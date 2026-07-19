@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Workflows — nlght Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+  <h2 style="margin:0">Workflows</h2>
+  <a href="/admin/workflows/new" role="button">+ New workflow</a>
+</div>
+
+{% if workflows %}
+<table>
+  <thead>
+    <tr>
+      <th>Name</th><th>Description</th><th>Enabled</th><th>Capabilities</th><th>Versions</th><th class="actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for wf in workflows %}
+  {% include "workflows/_row.html" with context %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No workflows yet. <a href="/admin/workflows/new">Create one →</a></p>
+{% endif %}
+{% endblock %}

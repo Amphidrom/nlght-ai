@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Resources — nlght Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+  <h2 style="margin:0">Resources</h2>
+  <a href="/admin/resources/new" role="button">+ New resource</a>
+</div>
+
+{% if resources %}
+<table>
+  <thead>
+    <tr><th>Name</th><th>Kind</th><th>Provider</th><th>Enabled</th><th class="actions">Actions</th></tr>
+  </thead>
+  <tbody>
+  {% for res in resources %}
+  {% include "resources/_row.html" with context %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No resources yet. <a href="/admin/resources/new">Create one →</a></p>
+{% endif %}
+{% endblock %}

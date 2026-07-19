@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — nlght Admin{% endblock %}
+{% block content %}
+<h2>Dashboard</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1.5rem;margin-bottom:2rem">
+  <article>
+    <h3 style="margin:0;font-size:2.5rem;font-weight:700">{{ workflow_count }}</h3>
+    <p style="margin:.25rem 0 0">Workflows</p>
+    <a href="/admin/workflows">View all →</a>
+  </article>
+  <article>
+    <h3 style="margin:0;font-size:2.5rem;font-weight:700">{{ resource_count }}</h3>
+    <p style="margin:.25rem 0 0">Resources</p>
+    <a href="/admin/resources">View all →</a>
+  </article>
+</div>
+
+{% if recent_workflows %}
+<section>
+  <h4>Recent workflows</h4>
+  <table>
+    <thead><tr><th>Name</th><th>Status</th><th>Versions</th><th></th></tr></thead>
+    <tbody>
+    {% for wf in recent_workflows %}
+    <tr>
+      <td><a href="/admin/workflows/{{ wf.workflow_id }}">{{ wf.name }}</a></td>
+      <td>{% if wf.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}</td>
+      <td>{{ wf.versions | length }}</td>
+      <td class="actions"><a href="/admin/workflows/{{ wf.workflow_id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<p>No workflows yet. <a href="/admin/workflows/new">Create one →</a></p>
+{% endif %}
+{% endblock %}

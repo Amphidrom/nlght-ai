@@ -1,0 +1,21 @@
+<tr id="policy-row-{{ policy.rule_id }}">
+  <td><code>{{ policy.subject_type }}</code></td>
+  <td><a href="/admin/policies/{{ policy.rule_id }}">{{ policy.subject }}</a></td>
+  <td>
+    {% if policy.effect == "allow" %}<span class="badge badge-yes">allow</span>{% else %}<span class="badge badge-no">deny</span>{% endif %}
+  </td>
+  <td><code>{{ policy.conditions | tojson if policy.conditions else "—" }}</code></td>
+  <td>{{ policy.priority }}</td>
+  <td>
+    {% if policy.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}
+  </td>
+  <td class="actions">
+    <a href="/admin/policies/{{ policy.rule_id }}">Edit</a>
+    <button style="display:inline;padding:.2em .7em;font-size:.85em"
+            hx-post="/admin/policies/{{ policy.rule_id }}/toggle"
+            hx-target="#policy-row-{{ policy.rule_id }}"
+            hx-swap="outerHTML">
+      {% if policy.enabled %}Disable{% else %}Enable{% endif %}
+    </button>
+  </td>
+</tr>

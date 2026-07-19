@@ -1,0 +1,17 @@
+<tr id="res-row-{{ res.resource_id }}">
+  <td><a href="/admin/resources/{{ res.resource_id }}">{{ res.name }}</a></td>
+  <td><code>{{ res.kind }}</code></td>
+  <td>{{ res.provider }}</td>
+  <td>
+    {% if res.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}
+  </td>
+  <td class="actions">
+    <a href="/admin/resources/{{ res.resource_id }}">Edit</a>
+    <button style="display:inline;padding:.2em .7em;font-size:.85em"
+            hx-post="/admin/resources/{{ res.resource_id }}/toggle"
+            hx-target="#res-row-{{ res.resource_id }}"
+            hx-swap="outerHTML">
+      {% if res.enabled %}Disable{% else %}Enable{% endif %}
+    </button>
+  </td>
+</tr>

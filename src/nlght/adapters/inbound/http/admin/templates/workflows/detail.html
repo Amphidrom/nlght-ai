@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ workflow.name }} — nlght Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem">
+  <div>
+    <p style="margin:0;color:var(--pico-muted-color)"><a href="/admin/workflows">Workflows</a> /</p>
+    <h2 style="margin:.25rem 0">{{ workflow.name }}</h2>
+    {% if workflow.description %}<p style="margin:0;color:var(--pico-muted-color)">{{ workflow.description }}</p>{% endif %}
+    <div style="margin-top:.5rem">
+      {% if workflow.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}
+      {% for cap in workflow.capabilities %}<span class="badge badge-draft" style="margin-left:.3rem">{{ cap }}</span>{% endfor %}
+    </div>
+  </div>
+  <div style="display:flex;gap:.75rem">
+    <form method="post" action="/admin/workflows/{{ workflow.workflow_id }}/versions/new" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+      <button type="submit" class="secondary">+ Fork new version</button>
+    </form>
+  </div>
+</div>
+
+<h4>Versions</h4>
+{% if versions %}
+<table>
+  <thead>
+    <tr>
+      <th>Version</th><th>Status</th><th>Steps</th><th class="actions">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for v in versions %}
+  <tr>
+    <td><a href="/admin/versions/{{ v.workflow_version_id }}">v{{ v.version }}</a></td>
+    <td>
+      {% if v.status == 'active' %}<span class="badge badge-active">active</span>
+      {% else %}<span class="badge badge-draft">{{ v.status }}</span>{% endif %}
+    </td>
+    <td>{{ v.steps | length if v.steps is defined else "—" }}</td>
+    <td class="actions">
+      <a href="/admin/versions/{{ v.workflow_version_id }}">Open</a>
+      {% if v.status != 'active' %}
+      <form method="post" action="/admin/versions/{{ v.workflow_version_id }}/activate" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <button type="submit" style="display:inline;padding:.2em .7em;font-size:.85em">Activate</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No versions yet.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{% if resource %}Edit resource{% else %}New resource{% endif %} — nlght Admin{% endblock %}
+{% block content %}
+<div>
+  <p style="margin:0;color:var(--pico-muted-color)"><a href="/admin/resources">Resources</a> /</p>
+  <h2 style="margin:.25rem 0">{% if resource %}Edit: {{ resource.name }}{% else %}New resource{% endif %}</h2>
+</div>
+
+{% if error %}<div style="color:var(--pico-del-color);margin-bottom:1rem">{{ error }}</div>{% endif %}
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+    <label>
+      Name
+      <input type="text" name="name" value="{{ resource.name if resource else '' }}" required placeholder="e.g. my-vector-store"/>
+    </label>
+    <label>
+      Kind <small>(matches tool/step resource lookup)</small>
+      <input type="text" name="kind" value="{{ resource.kind if resource else '' }}" required placeholder="e.g. vector_store"/>
+    </label>
+    <label>
+      Provider
+      <input type="text" name="provider" value="{{ resource.provider if resource else '' }}" required placeholder="e.g. chroma"/>
+    </label>
+  </div>
+  <p style="margin:.5rem 0 0;color:var(--pico-muted-color)"><small>Model/caller restrictions are managed under <a href="/admin/policies">Access Policies</a>.</small></p>
+  <label style="margin-top:.5rem">
+    <input type="checkbox" name="enabled" {% if not resource or resource.enabled %}checked{% endif %}/>
+    Enabled
+  </label>
+  <label style="margin-top:1rem">
+    Config <small>(JSON)</small>
+    <textarea name="config_json" rows="8" placeholder='{"url": "http://chroma:8000", "collection": "docs"}'>{{ resource.config | tojson(indent=2) if resource else '{}' }}</textarea>
+  </label>
+  <div style="display:flex;gap:1rem;margin-top:1rem">
+    <button type="submit">{% if resource %}Save changes{% else %}Create resource{% endif %}</button>
+    <a href="/admin/resources" role="button" class="secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}v{{ version.version }} — {{ workflow.name }} — nlght Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem">
+  <div>
+    <p style="margin:0;color:var(--pico-muted-color)">
+      <a href="/admin/workflows">Workflows</a> /
+      <a href="/admin/workflows/{{ workflow.workflow_id }}">{{ workflow.name }}</a> /
+    </p>
+    <h2 style="margin:.25rem 0">Version {{ version.version }}</h2>
+    <span class="badge {% if version.status == 'active' %}badge-active{% else %}badge-draft{% endif %}">{{ version.status }}</span>
+  </div>
+  <div style="display:flex;gap:.75rem">
+    {% if version.status != 'active' %}
+    <form method="post" action="/admin/versions/{{ version.workflow_version_id }}/activate">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+      <button type="submit">Activate version</button>
+    </form>
+    {% endif %}
+    <a href="/admin/versions/{{ version.workflow_version_id }}/steps/new" role="button" class="secondary">+ Add step</a>
+  </div>
+</div>
+
+<!-- Step list -->
+<h4>Steps ({{ steps | length }})</h4>
+{% if steps %}
+<table>
+  <thead>
+    <tr><th>Pos</th><th>Name</th><th>Type</th><th>Flags</th><th>Transitions</th><th class="actions">Actions</th></tr>
+  </thead>
+  <tbody>
+  {% for s in steps %}
+  <tr id="step-row-{{ s.workflow_step_id }}">
+    <td>{{ s.position }}</td>
+    <td>{{ s.name }}</td>
+    <td><code>{{ s.type }}</code></td>
+    <td>
+      {% if s.is_start %}<span class="badge badge-yes">start</span>{% endif %}
+      {% if s.is_terminal %}<span class="badge badge-no">terminal</span>{% endif %}
+      {% if s.is_resume %}<span class="badge badge-draft">resume</span>{% endif %}
+      {% if not s.is_start and not s.is_terminal and not s.is_resume %}—{% endif %}
+    </td>
+    <td>
+      {% if s.transitions %}
+        {% for verdict, target in s.transitions.items() %}
+          <span class="badge badge-draft">{{ verdict }} → {{ target }}</span>
+        {% endfor %}
+      {% else %}—{% endif %}
+    </td>
+    <td class="actions">
+      <a href="/admin/steps/{{ s.workflow_step_id }}">Edit</a>
+      <form method="post" action="/admin/steps/{{ s.workflow_step_id }}/delete" style="display:inline"
+            onsubmit="return confirm('Delete step {{ s.name }}?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+        <button type="submit" style="display:inline;padding:.2em .7em;font-size:.85em;background:var(--pico-del-color);border-color:var(--pico-del-color)">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No steps yet. <a href="/admin/versions/{{ version.workflow_version_id }}/steps/new">Add the first step →</a></p>
+{% endif %}
+
+{% if steps %}
+<!-- Graph Editor -->
+<h4 style="margin-top:2.5rem">Step Graph <small style="font-weight:400;color:var(--pico-muted-color)">— visual transition editor</small></h4>
+<div class="graph-wrap">
+  <div class="graph-toolbar">
+    <strong style="margin-right:.5rem">Add transition:</strong>
+    <select id="gFrom"><option value="">From step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
+    <input id="gVerdict" type="text" placeholder="verdict (e.g. done)" style="max-width:160px"/>
+    <select id="gTo"><option value="">To step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
+    <button id="addEdgeBtn" type="button">Add edge</button>
+    <span style="flex:1"></span>
+    <button id="saveGraphBtn" type="button" style="background:#16a34a;border-color:#16a34a">Save graph</button>
+    <span id="saveStatus" style="color:var(--pico-muted-color);font-size:.85em"></span>
+  </div>
+  <div id="cy"></div>
+</div>
+{% endif %}
+
+<script type="application/json" id="stepsData">{{ steps_json | safe }}</script>
+<script src="/admin/static/cytoscape.min.js"></script>
+<script>
+(function() {
+  const stepsData = JSON.parse(document.getElementById('stepsData').textContent);
+  if (!stepsData.length) return;
+
+  const cols = 4;
+  const xStep = 200, yStep = 130;
+  const stepNameById = Object.fromEntries(stepsData.map(s => [s.id, s.name]));
+
+  const nodes = stepsData.map((s, i) => ({
+    data: { ...s, label: s.name + '\n[' + s.type + ']' },
+    classes: s.is_start ? 'start' : s.is_terminal ? 'terminal' : s.is_resume ? 'resume' : 'normal',
+    position: { x: (i % cols) * xStep + 100, y: Math.floor(i / cols) * yStep + 80 },
+  }));
+
+  const edges = [];
+  stepsData.forEach(s => {
+    Object.entries(s.transitions || {}).forEach(([verdict, target]) => {
+      edges.push({ data: { id: s.id + '__' + verdict + '__' + target, source: s.id, target, label: verdict } });
+    });
+  });
+
+  const cy = window._cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: { nodes, edges },
+    style: [
+      { selector: 'node', style: {
+          'background-color': '#e5e7eb', 'label': 'data(label)', 'text-valign': 'center',
+          'text-halign': 'center', 'width': 140, 'height': 60, 'font-size': 11,
+          'text-wrap': 'wrap', 'shape': 'roundrectangle', 'border-width': 2, 'border-color': '#9ca3af',
+        }
+      },
+      { selector: 'node.start',    style: { 'background-color': '#93c5fd', 'border-color': '#3b82f6' } },
+      { selector: 'node.terminal', style: { 'background-color': '#fca5a5', 'border-color': '#ef4444' } },
+      { selector: 'node.resume',   style: { 'background-color': '#86efac', 'border-color': '#22c55e' } },
+      { selector: 'node:selected', style: { 'border-width': 3, 'border-color': '#7c3aed' } },
+      { selector: 'edge', style: {
+          'width': 2, 'line-color': '#6b7280', 'target-arrow-color': '#6b7280',
+          'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+          'label': 'data(label)', 'font-size': 10, 'text-background-color': '#fff',
+          'text-background-opacity': 1, 'text-background-padding': '2px',
+        }
+      },
+      { selector: 'edge:selected', style: { 'line-color': '#7c3aed', 'target-arrow-color': '#7c3aed' } },
+    ],
+    layout: { name: 'preset' },
+    userZoomingEnabled: true,
+    userPanningEnabled: true,
+  });
+
+  // Delete selected edge on Delete/Backspace key
+  document.addEventListener('keydown', e => {
+    if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement === document.body) {
+      cy.$(':selected').remove();
+    }
+  });
+
+  // Add edge from toolbar
+  document.getElementById('addEdgeBtn').addEventListener('click', () => {
+    const from = document.getElementById('gFrom').value;
+    const verdict = document.getElementById('gVerdict').value.trim();
+    const to = document.getElementById('gTo').value;
+    if (!from || !verdict || !to) { alert('Please fill in all three fields.'); return; }
+    const edgeId = from + '__' + verdict + '__' + to;
+    if (cy.getElementById(edgeId).length) { alert('This transition already exists.'); return; }
+    cy.add({ data: { id: edgeId, source: from, target: to, label: verdict } });
+    document.getElementById('gVerdict').value = '';
+  });
+
+  // Save graph — collect edges into { stepName: { verdict: target } }
+  function refreshEdgeLabels() {
+    cy.edges().forEach(e => {
+      const src = stepNameById[e.data('source')] || e.data('source');
+      const tgt = stepNameById[e.data('target')] || e.data('target');
+      e.data('displayLabel', e.data('label') + ': ' + src + ' -> ' + tgt);
+    });
+  }
+
+  refreshEdgeLabels();
+
+  document.getElementById('saveGraphBtn').addEventListener('click', async () => {
+    const transitions = {};
+    cy.nodes().forEach(n => { transitions[n.id()] = {}; });
+    cy.edges().forEach(e => {
+      const src = e.data('source'), label = e.data('label'), tgt = e.data('target');
+      if (!transitions[src]) transitions[src] = {};
+      transitions[src][label] = tgt;
+    });
+    const status = document.getElementById('saveStatus');
+    status.textContent = 'Saving…';
+    try {
+      const resp = await fetch('/admin/versions/{{ version.workflow_version_id }}/graph', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.nlghtCsrfToken },
+        body: JSON.stringify({ transitions }),
+      });
+      if (resp.ok) { status.textContent = '✓ Saved'; setTimeout(() => status.textContent = '', 2500); }
+      else { status.textContent = '✗ Error ' + resp.status; }
+    } catch (err) { status.textContent = '✗ ' + err.message; }
+  });
+})();
+</script>
+{% endblock %}

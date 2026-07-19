@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{% if step %}Edit step{% else %}New step{% endif %} — nlght Admin{% endblock %}
+{% block content %}
+<div>
+  <p style="margin:0;color:var(--pico-muted-color)">
+    <a href="/admin/workflows">Workflows</a> /
+    <a href="/admin/versions/{{ version_id }}">Version</a> /
+  </p>
+  <h2 style="margin:.25rem 0">{% if step %}Edit step: {{ step.name }}{% else %}New step{% endif %}</h2>
+</div>
+
+{% if error %}<div style="color:var(--pico-del-color);margin-bottom:1rem">{{ error }}</div>{% endif %}
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+    <label>
+      Name <small>(unique within version)</small>
+      <input type="text" name="name" value="{{ step.name if step else '' }}" required placeholder="e.g. rag-lookup"/>
+    </label>
+    <label>
+      Type <small>(maps to StepBase.TYPE)</small>
+      <input type="text" name="type" value="{{ step.type if step else '' }}" required placeholder="e.g. rag_sample"/>
+    </label>
+    <label>
+      Position <small>(execution order, unique within version)</small>
+      <input type="number" name="position" value="{{ step.position if step else next_position }}" required min="0"/>
+    </label>
+    <div style="display:flex;flex-direction:column;gap:.5rem;padding-top:1.5rem">
+      <label style="display:flex;align-items:center;gap:.5rem;margin:0">
+        <input type="checkbox" name="enabled" {% if not step or step.enabled %}checked{% endif %} style="margin:0"/>
+        Enabled
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;margin:0">
+        <input type="checkbox" name="is_start" {% if step and step.is_start %}checked{% endif %} style="margin:0"/>
+        Start node <small>(entry point)</small>
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;margin:0">
+        <input type="checkbox" name="is_terminal" {% if step and step.is_terminal %}checked{% endif %} style="margin:0"/>
+        Terminal <small>(no further steps)</small>
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;margin:0">
+        <input type="checkbox" name="is_resume" {% if step and step.is_resume %}checked{% endif %} style="margin:0"/>
+        Resume point <small>(re-entry after pause)</small>
+      </label>
+    </div>
+  </div>
+  <label style="margin-top:1rem">
+    Config <small>(JSON — available as <code>self.config</code> in the step's <code>run()</code>)</small>
+    <textarea name="config_json" rows="8" placeholder='{
+  "model_provider": "ollama",
+  "system_prompt": "You are a helpful assistant."
+}'>{{ step.config | tojson(indent=2) if step else '{}' }}</textarea>
+  </label>
+  <div style="display:flex;gap:1rem;margin-top:1rem">
+    <button type="submit">{% if step %}Save changes{% else %}Create step{% endif %}</button>
+    <a href="/admin/versions/{{ version_id }}" role="button" class="secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

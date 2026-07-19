@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Access Policies — nlght Admin{% endblock %}
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+  <h2 style="margin:0">Access Policies</h2>
+  <a href="/admin/policies/new" role="button">+ New policy</a>
+</div>
+
+<p style="color:var(--pico-muted-color)"><small>
+  No rules for a subject means unrestricted access. Once any rule matches a subject,
+  only requests satisfying a matching <em>allow</em> rule get through (highest priority
+  first, <em>deny</em> wins ties).
+</small></p>
+
+{% if policies %}
+<table>
+  <thead>
+    <tr><th>Type</th><th>Subject</th><th>Effect</th><th>Conditions</th><th>Priority</th><th>Enabled</th><th class="actions">Actions</th></tr>
+  </thead>
+  <tbody>
+  {% for policy in policies %}
+  {% include "policies/_row.html" with context %}
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No policies yet — all tools, models, and playbooks are unrestricted. <a href="/admin/policies/new">Create one →</a></p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,18 @@
+<tr id="wf-row-{{ wf.workflow_id }}">
+  <td><a href="/admin/workflows/{{ wf.workflow_id }}">{{ wf.name }}</a></td>
+  <td>{{ wf.description or "—" }}</td>
+  <td>
+    {% if wf.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}
+  </td>
+  <td>{{ wf.capabilities | join(", ") or "—" }}</td>
+  <td>{{ wf.versions | length }}</td>
+  <td class="actions">
+    <a href="/admin/workflows/{{ wf.workflow_id }}">Open</a>
+    <button style="display:inline;padding:.2em .7em;font-size:.85em"
+            hx-post="/admin/workflows/{{ wf.workflow_id }}/toggle"
+            hx-target="#wf-row-{{ wf.workflow_id }}"
+            hx-swap="outerHTML">
+      {% if wf.enabled %}Disable{% else %}Enable{% endif %}
+    </button>
+  </td>
+</tr>

@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}{% if workflow %}Edit{% else %}New{% endif %} Workflow — nlght Admin{% endblock %}
+{% block content %}
+<h2>{% if workflow %}Edit workflow: {{ workflow.name }}{% else %}New workflow{% endif %}</h2>
+
+{% if error %}<div style="color:var(--pico-del-color);margin-bottom:1rem">{{ error }}</div>{% endif %}
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+  <label>
+    Name
+    <input type="text" name="name" value="{{ workflow.name if workflow else '' }}" required placeholder="e.g. my-rag-workflow"/>
+  </label>
+  <label>
+    Description
+    <input type="text" name="description" value="{{ workflow.description if workflow and workflow.description else '' }}" placeholder="Optional short description"/>
+  </label>
+  <label>
+    <input type="checkbox" name="enabled" {% if not workflow or workflow.enabled %}checked{% endif %}/>
+    Enabled
+  </label>
+  <label>
+    Capabilities <small>(one per line — matched against incoming request triggers)</small>
+    <textarea name="capabilities" rows="4" placeholder="chat&#10;completion">{{ workflow.capabilities | join('\n') if workflow else '' }}</textarea>
+  </label>
+  <div style="display:flex;gap:1rem;margin-top:1rem">
+    <button type="submit">{% if workflow %}Save changes{% else %}Create workflow{% endif %}</button>
+    <a href="/admin/workflows" role="button" class="secondary">Cancel</a>
+  </div>
+</form>
+{% endblock %}

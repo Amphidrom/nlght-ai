@@ -1,0 +1,205 @@
+nlght-ai License Agreement
+Version 1.0
+
+Copyright (c) 2026 Amphidrom GmbH
+
+PLEASE READ THIS LICENSE AGREEMENT CAREFULLY BEFORE USING THIS SOFTWARE.
+BY USING, COPYING, MODIFYING OR DISTRIBUTING THIS SOFTWARE YOU AGREE TO
+BE BOUND BY THE TERMS OF THIS AGREEMENT.   
+
+---
+
+1. DEFINITIONS
+
+---
+
+"Software" means the enlight AI Runtimenlght source code, binaries, documentation
+and all associated files in this repository.
+
+"Licensor" is:
+Amphidrom GmbH
+Erlenauweg 18
+CH-3110 Münsingen
+
+"You" means the individual or legal entity exercising rights under this License.
+
+"Commercial Use" means any use of the Software in a production environment
+for business operations, or any use by or for a for-profit organization,
+regardless of whether revenue is directly attributable to the Software, where:
+
+(a) the organization exceeds 10 employees; or
+(b) the organization exceeds 100,000 EUR/USD in annual revenue; or
+(c) the Software is used in connection with revenue-generating activities,
+internal business processes, or customer-facing systems.
+
+“Intellectual Property Rights” means all rights, titles, and interests, whether registered or unregistered, in and to any patents, inventions, copyrights (including rights in software and databases), trademarks, domain names, design rights, and know-how anywhere in the world.
+
+"Internal Use" means use of the Software solely for Your own internal
+business operations, by Your employees or contractors, and not for the
+benefit of, or use by, any third party.
+
+Internal Use explicitly excludes any use where the Software is exposed,
+directly or indirectly, via APIs, user interfaces, integrations, or
+services to third parties.
+
+"Hosting Service" means operating the Software, or a product substantially
+based on the Software, to provide a service to third parties.
+
+"OEM Use" means embedding, bundling or distributing the Software, or a
+substantially modified or white-labeled version of it, as a component of
+Your own product, platform or service offered to third parties.
+
+"Substantially Similar Product" means any software, service, or system that
+replicates or competes with the core functionality of the Software, including
+but not limited to workflow orchestration for LLMs, agent execution platforms,
+or AI runtime environments, where the Software constitutes a material part
+of such offering.
+
+---
+
+2. FREE USE GRANT
+
+---
+
+Subject to the terms and conditions of this License, the Licensor hereby
+grants You a worldwide, non-exclusive, non-transferable, non-sublicensable
+license to:
+
+(a) Read, copy and study the Software source code;
+(b) Modify the Software for Your own Internal Use;
+(c) Run the Software locally for development, evaluation and testing;
+(d) Self-host the Software for Your own Internal Use, provided such use
+does not constitute Commercial Use as defined above;
+(e) Build and distribute extensions (custom Tools, Skills, Steps, Adapters)
+that interact with the Software via its published interfaces, provided
+such extensions are not themselves a redistribution of the Software.   
+
+---
+
+3. RESTRICTIONS
+
+---
+
+Unless You have obtained a separate written license from the Licensor, You
+MAY NOT:
+
+(a) Use the Software or any derivative work thereof for Commercial Use;
+(b) Operate the Software or any derivative work as a Hosting Service for third parties;
+(c) Use the Software or any derivative work for OEM Use;
+(d) Sell, resell, sublicense or otherwise transfer rights to the Software
+or any derivative work thereof;
+(e) Remove or alter any copyright, trademark or license notices contained
+in the Software;
+(f) Circumvent or attempt to circumvent the licensing terms of this
+Agreement, including by modifying, re-packaging, or re-deploying the
+Software in a manner intended to avoid the requirements for a Commercial
+or OEM License;
+(g) Provide access to the Software’s functionality to third parties, whether
+directly or indirectly, including via APIs, web interfaces, automation
+pipelines, or integrations, without an OEM / Platform License.
+
+---
+
+4. COMMERCIAL LICENSE
+
+---
+
+A Commercial License is required for Commercial Use as defined in Section 1.
+A Commercial License authorizes Internal Commercial Use by Your organization
+and does not grant rights for Hosting Services or OEM Use.
+
+The Licensor reserves the right to audit compliance with this License upon
+reasonable notice.
+
+To obtain a Commercial License, contact: [contact@nlght.ai](mailto:contact@nlght.ai)
+
+---
+
+5. OEM / PLATFORM LICENSE
+
+---
+
+A separate OEM / Platform License is required for:
+
+(a) OEM Use — embedding the Software in products or platforms distributed
+to third parties;
+(b) Hosting Services — operating the Software as a service for third parties;
+(c) White-label or rebranded deployments offered to third parties;
+(d) Any use that involves distributing, reselling or sublicensing the
+Software or a substantially similar product to third parties.
+
+To obtain an OEM / Platform License, contact: [contact@nlght.ai](mailto:contact@nlght.ai)
+
+---
+
+6. CONTRIBUTIONS
+
+---
+
+The Software does not accept open contributions by default. Any submission,
+including but not limited to pull requests, patches, suggestions, or other
+materials ("Contributions"), may be reviewed, accepted, modified, or rejected
+at the sole discretion of the Licensor.
+
+If a Contribution is accepted and incorporated into the Software, You hereby
+assign to the Licensor all right, title, and interest, including all
+intellectual property rights, in and to such Contribution.
+
+To the extent that such assignment is not legally effective, You grant the
+Licensor a perpetual, worldwide, exclusive, irrevocable, royalty-free,
+transferable license (with the right to sublicense) to use, reproduce,
+modify, distribute, commercialize, and otherwise exploit the Contribution
+without restriction.
+
+You waive, to the maximum extent permitted by law, any moral rights or
+similar rights in the Contribution.
+
+You represent and warrant that:
+
+(a) You have the full legal right to make the Contribution and to assign
+or license the rights set forth above;
+(b) The Contribution is Your original work or You have obtained all
+necessary rights to submit it;
+(c) The Contribution does not infringe any third-party intellectual
+property rights.
+
+You shall indemnify, defend, and hold harmless the Licensor against any claims, losses, damages, and expenses (including reasonable attorneys’ fees) arising from Your breach of the representations and warrants above. Upon first request, You shall cooperate fully in the defense of any such claim.
+
+No compensation is owed for any accepted Contribution.
+---
+
+
+7. DISCLAIMER OF WARRANTIES
+
+---
+
+THE SOFTWARE IS PROVIDED "AS IS" AND “AS AVAILABLE”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED. THE LICENSOR EXPRESSLY DISCLAIMS ALL WARRANTIES, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, CONFORMITY WITH APPLICABLE LAWS AND REGULATIONS, AND ACCURACY OF DATA. NO WARRANTY IS MADE AS TO THE AVAILABILITY, UNINTERRUPTED OR ERROR-FREE OPERATION OF THE SOFTWARE, OR THE ACCURACY OF ANY DATA PROCESSING PERFORMED THROUGH THE SOFTWARE. FURTHERMORE, THE LICENSOR MAKES NO REPRESENTATIONS OR WARRANTIES WITH RESPECT TO ANY THIRD-PARTY COMPONENTS, OPEN-SOURCE SOFTWARE, OR OTHER DEPENDENCIES INCLUDED IN OR DISTRIBUTED WITH THE SOFTWARE, WHETHER AS TO TITLE, NON-INFRINGEMENT, OR OTHERWISE, AND ALL SUCH COMPONENTS ARE PROVIDED SUBJECT TO THEIR RESPECTIVE LICENSE TERMS.   
+
+---
+
+8. LIMITATION OF LIABILITY   
+
+---
+
+TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW, ANY LIABILITY OF THE LICENSOR IS EXCLUDED. IN PARTICULAR, THE LICENSOR SHALL NOT BE LIABLE FOR ORDINARY OR MODERATE NEGLIGENCE, DAMAGES TO OR IN CONNECTION WITH IT-INFRASTRUCTURE, LACK OF COMMERCIAL SUCCESS, LOSS OF PROFITS, BUSINESS INTERRUPTION, LOSS OF USE, LOSS OF REVENUE OR PRODUCTION, COSTS OF PROCURING SUBSTITUTE PRODUCTS OR SERVICES, LOSS OR CORRUPTION OF DATA (INCLUDING COSTS OF DATA RECOVERY), CONSEQUENTIAL DAMAGES, OR ANY OTHER INDIRECT OR INCIDENTAL DAMAGES OF ANY KIND, EVEN IF THE LICENSOR HAS BEEN ADVSIED OF THE POSSIBILITY OF SUCH DAMAGES. TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR SHALL FURTHER NOT BE LIABLE FOR ANY ACTS OR OMISSIONS OF ITS AUXILIARY PERSONS OR AGENTS.
+THE SOFTWARE MAY INCORPORATE THIRD-PARTY PRODUCTS, SOFTWARE COMPONENTS, OR SERVICES (“THIRD-PARTY COMPONENTS”). SUCH THIRD-PARTY COMPONENTS ARE GOVERNED EXCLUSIVELY BY THEIR RESPECTIVE TERMS OF USE, LICENSE TERMS, AND WARRANTY PROVISIONS. TO THE FULLEST EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR EXPRESSLY DISCLAIMS ALL LIABILITY AND WARRANTY WITH RESPECT TO ANY THIRD-PARTY COMPONENTS. 
+
+---
+
+9. GOVERNING LAW
+
+---
+
+This License shall be governed by and construed exclusively by the laws of Switzerland. The conflict laws provisions of Swiss private international law, the United Nations Convention on Contracts for the International Sale of Goods (CISG), and any other conventions or treaties shall not apply.
+The exclusive place of jurisdiction for any disputes arising out of or in connection with this License shall be the ordinary courts of Bern, Switzerland. 
+
+---
+
+10. CONTACT
+
+---
+
+For licensing inquiries:
+[contact@nlght.ai](mailto:contact@nlght.ai)
+https://docs.nlght.ai/commercial/licensing

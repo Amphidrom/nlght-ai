@@ -1,0 +1,218 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlght-ai"
+version = "0.1.0"
+description = "The workflow runtime layer between your application and any LLM provider."
+requires-python = ">=3.11"
+readme = "README.md"
+license = "LicenseRef-nlght-ai"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Amphidrom GmbH", email = "info@amphidrom.ai" }
+]
+keywords = [
+  "llm",
+  "ai",
+  "workflow",
+  "ollama",
+  "openai",
+  "anthropic",
+  "gemini",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "pydantic>=2.8.0",
+  "pyyaml>=6.0.2",
+  "asyncpg>=0.30.0",
+  "sqlalchemy[asyncio]>=2.0.0",
+  "alembic>=1.13.0",
+  "httpx2>=2.5.0",
+  "jinja2>=3.1",
+  "python-multipart>=0.0.9",
+  "cryptography>=46.0.7",
+  "tzdata>=2026.2"
+]
+
+[project.optional-dependencies]
+docker = [
+  "docker>=7.0.0",
+]
+web-search = [
+  "beautifulsoup4>=4.12.0",
+]
+hive-mind = [
+  "aiofiles>=23.0.0",
+]
+nlp = [
+  "spacy>=3.7.0",
+]
+anthropic = [
+  "anthropic>=0.40.0",
+]
+openai = [
+  "openai>=1.50.0",
+]
+google = [
+  "google-genai>=1.0.0",
+]
+metrics = [
+  "prometheus-client>=0.20.0",
+]
+lexical-store = [
+  "opensearch-py>=2.0.0",
+]
+vector-store = [
+  "qdrant-client>=1.9.0",
+]
+stores = [
+  "opensearch-py>=2.0.0",
+  "qdrant-client>=1.9.0",
+]
+all = [
+  "nlght-ai[docker,web-search,hive-mind,nlp,anthropic,openai,google,metrics,stores]",
+]
+
+[dependency-groups]
+dev = [
+  "aiosqlite>=0.20.0",
+  "pytest>=8.3.0",
+  "pytest-cov>=5.0.0",
+  "pytest-asyncio>=0.23.0",
+  "ruff>=0.6.0",
+  "mypy>=1.11.0",
+  "pytestarch>=4.0.1",
+  "types-PyYAML>=6.0.0",
+  "anybadge>=1.14.0",
+  "bandit[sarif]>=1.7.9",
+  "pip-audit>=2.7.0",
+  "nlght-ai[anthropic,google,openai]",
+]
+
+[project.scripts]
+nlght-ai = "nlght.main:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["nlght*"]
+
+[tool.setuptools.package-data]
+"nlght" = [
+  "adapters/inbound/http/admin/templates/**/*.html",
+  "adapters/inbound/http/admin/static/*",
+  "alembic.ini",
+  "py.typed",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = [
+  "-ra",
+  "--strict-markers",
+  "--strict-config",
+  # local_e2e needs a live local Ollama daemon and never runs in CI — deselect
+  # by default. Run it explicitly with: pytest tests/local_e2e -m local_e2e
+  "-m", "not local_e2e",
+]
+markers = [
+  "architecture: architectural dependency tests",
+  "integration: tests with external systems",
+  "e2e: end-to-end tests",
+  "local_e2e: e2e against a live local Ollama daemon (local-only; excluded by default)",
+]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+src = ["src", "tests"]
+exclude = [
+  "build",
+  ".venv",
+  "venv",
+]
+
+[tool.ruff.lint]
+# ANN401: no bare `Any` in signatures (reasoned per-line noqa for dynamic
+# construction seams). PLC0415: imports at file top (reasoned per-line noqa
+# for optional-extra / lazy-import sites).
+select = ["E", "F", "I", "UP", "B", "ANN401", "PLC0415"]
+
+[tool.ruff.lint.per-file-ignores]
+# Function-level imports are idiomatic in tests (importorskip-gated modules,
+# fixture-local heavy imports); the top-level-import rule applies to src only.
+"tests/**" = ["PLC0415"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+strict = true
+
+# Optional-extra third-party packages with no bundled type stubs. Unlike
+# `pyyaml` (a required base dependency -- see the types-PyYAML dev dep
+# above), these are only ever installed via `pip install nlght-ai[extra]`,
+# so we can't require stubs for them without forcing every extra into the
+# dev environment just to typecheck. `follow_imports = "skip"` keeps the
+# result identical whether or not an extra happens to be installed —
+# otherwise mypy follows installed packages into their transitive stubs
+# (e.g. spacy → numpy, whose PEP 695 stubs don't parse under
+# python_version 3.11) and the outcome depends on the local venv.
+[[tool.mypy.overrides]]
+module = [
+  "docker.*",
+  "opensearchpy.*",
+  "qdrant_client.*",
+  "spacy.*",
+  "anthropic.*",
+  "openai.*",
+  "google.*",
+  "prometheus_client.*",
+  "bs4.*",
+  "ifaddr.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[tool.coverage.run]
+branch = true
+source = ["src/nlght"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+omit = [
+  # Instrumented debug clients duplicate the regular provider implementations
+  # and would double the denominator without adding distinct behaviour.
+  "src/nlght/adapters/outbound/model/*_debug.py",
+  # Local Ollama e2e requires a daemon and model and intentionally does not run
+  # in CI. Cloud provider implementations are measured by their CI e2e suite.
+  "src/nlght/adapters/outbound/model/ollama_local.py",
+]
+
+[tool.uv.sources]
+nlght-ai = { workspace = true }
+
+[project.urls]
+Homepage = "https://nlght.ai"
+Documentation = "https://nlght.ai/documentation/getting-started/quickstart/"
+Repository = "https://github.com/Amphidrom/nlght-ai"
+Issues = "https://github.com/Amphidrom/nlght-ai/issues"
+Changelog = "https://github.com/Amphidrom/nlght-ai/releases"

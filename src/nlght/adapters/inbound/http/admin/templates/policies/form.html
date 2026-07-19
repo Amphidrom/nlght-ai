@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{% if policy %}Edit policy{% else %}New policy{% endif %} — nlght Admin{% endblock %}
+{% block content %}
+<div>
+  <p style="margin:0;color:var(--pico-muted-color)"><a href="/admin/policies">Access Policies</a> /</p>
+  <h2 style="margin:.25rem 0">{% if policy %}Edit: {{ policy.subject_type }} / {{ policy.subject }}{% else %}New policy{% endif %}</h2>
+</div>
+
+{% if error %}<div style="color:var(--pico-del-color);margin-bottom:1rem">{{ error }}</div>{% endif %}
+
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+    <label>
+      Subject type
+      <select name="subject_type">
+        {% for st in ["tool", "model", "playbook"] %}
+        <option value="{{ st }}" {% if policy and policy.subject_type == st %}selected{% endif %}>{{ st }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Subject <small>(name or glob, e.g. <code>web_*</code> or <code>*</code>)</small>
+      <input type="text" name="subject" value="{{ policy.subject if policy else '' }}" required placeholder="e.g. web_search"/>
+    </label>
+    <label>
+      Effect
+      <select name="effect">
+        <option value="allow" {% if not policy or policy.effect == "allow" %}selected{% endif %}>allow</option>
+        <option value="deny" {% if policy and policy.effect == "deny" %}selected{% endif %}>deny</option>
+      </select>
+    </label>
+    <label>
+      Priority <small>(higher evaluates first; deny wins ties)</small>
+      <input type="number" name="priority" value="{{ policy.priority if policy else 0 }}"/>
+    </label>
+  </div>
+  <label style="margin-top:.5rem">
+    <input type="checkbox" name="enabled" {% if not policy or policy.enabled %}checked{% endif %}/>
+    Enabled
+  </label>
+  <label style="margin-top:1rem">
+    Conditions <small>(JSON — keys AND, values OR, globs; keys: <code>model</code>, <code>header:&lt;name&gt;</code>, <code>client_host</code>; empty = matches always)</small>
+    <textarea name="conditions_json" rows="6" placeholder='{"model": ["llama3*"], "header:x-org": ["acme"]}'>{{ policy.conditions | tojson(indent=2) if policy else '{}' }}</textarea>
+  </label>
+  <div style="display:flex;gap:1rem;margin-top:1rem">
+    <button type="submit">{% if policy %}Save changes{% else %}Create policy{% endif %}</button>
+    <a href="/admin/policies" role="button" class="secondary">Cancel</a>
+    {% if policy %}
+    <button type="submit" formaction="/admin/policies/{{ policy.rule_id }}/delete" class="secondary" style="margin-left:auto;color:var(--pico-del-color)">Delete</button>
+    {% endif %}
+  </div>
+</form>
+{% endblock %}

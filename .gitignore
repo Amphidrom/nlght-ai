@@ -1,0 +1,26 @@
+.venv
+__pycache__
+*.egg-info
+build
+.vscode
+.pytest_cache
+.config
+logs
+to_port
+.structurizr
+.workspaces
+.sessions
+.skills
+.ruff_cache
+.claude/
+!.claude/skills
+test-output/
+.nlght-snapshots/
+# coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+results/
+.mypy_cache/
+dist/
+.uv-release-cache/
