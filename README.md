@@ -2,9 +2,9 @@
 The layer between your app and your LLM — workflows, tools, memory, any provider.
 
 <!-- release-badges:start -->
-[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.0/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.0/.github/badges/tests.svg)
-[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.0/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.0/.github/badges/coverage.svg)
-[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.0/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.0/.github/badges/pypi.svg)
+[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/tests.svg)
+[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/coverage.svg)
+[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/pypi.svg)
 <!-- release-badges:end -->
 
 > **E2E scope note.** The test badge covers the cloud model-client e2e suite
