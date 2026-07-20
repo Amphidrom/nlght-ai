@@ -2,9 +2,9 @@
 The layer between your app and your LLM — workflows, tools, memory, any provider.
 
 <!-- release-badges:start -->
-[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/tests.svg)
-[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/coverage.svg)
-[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.1/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.1/.github/badges/pypi.svg)
+[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/tests.svg)
+[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/coverage.svg)
+[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/pypi.svg)
 <!-- release-badges:end -->
 
 > **E2E scope note.** The test badge covers the cloud model-client e2e suite
@@ -204,7 +204,7 @@ system  = builder.build(mental_model=model, ego="You are a helpful assistant.", 
 
 ## Demo
 
-The separate [nlght-ai-demo repository](https://github.com/Amphidrom/nlght-ai-demo) contains self-contained workflows showing the platform in action.
+The [Demo Showcase](docs/documentation/getting-started/showcase.mdx) introduces six complete workflows across grounding, tools, routing, session memory, and isolated runtime execution. Setup, migration, and run requirements are maintained by the demo repository linked there.
 
 ---
 
