@@ -26,7 +26,6 @@ class MemoryCandidateKind(StrEnum):
     ARTIFACT = "artifact"
     RELATION = "relation"
     REQUEST = "request"
-    DIRECTIVE = "directive"
 
 
 @dataclass(frozen=True)

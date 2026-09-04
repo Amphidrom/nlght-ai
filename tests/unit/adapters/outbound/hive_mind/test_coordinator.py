@@ -35,40 +35,6 @@ def _session_root() -> Path:
 # Directives
 # ---------------------------------------------------------------------------
 
-def test_set_directive_inferred_first_time() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de", source="inferred")
-    assert c.get_directives()["lang"] == "de"
-
-
-def test_set_directive_inferred_not_overwritten_by_inferred() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de", source="inferred")
-    c.set_directive("lang", "en", source="inferred")
-    assert c.get_directives()["lang"] == "de"
-
-
-def test_set_directive_user_overrides_inferred() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de", source="inferred")
-    c.set_directive("lang", "en", source="user")
-    assert c.get_directives()["lang"] == "en"
-
-
-def test_set_directive_same_value_no_update() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de")
-    c.set_directive("lang", "de")
-    assert c.get_directives()["lang"] == "de"
-
-
-def test_get_directives_list_returns_directive_objects() -> None:
-    c = _coordinator()
-    c.set_directive("tone", "formal")
-    directives = c.get_directives_list()
-    assert len(directives) == 1
-    assert directives[0].key == "tone"
-
 
 # ---------------------------------------------------------------------------
 # Conversation
@@ -141,7 +107,6 @@ def test_write_promote_immediately_marks_atom() -> None:
 
 def test_multiturn_branch_promotion_preserves_context_across_all_store_layers() -> None:
     c = _coordinator()
-    c.set_directive("conversation_language", "de", source="user")
 
     c.record_turn(TurnSummary(
         turn_nr=1,
@@ -193,7 +158,6 @@ def test_multiturn_branch_promotion_preserves_context_across_all_store_layers() 
     ))
     turn_2_context = c.get_context(["Iran"])
 
-    assert turn_2_context["directives"]["conversation_language"] == "de"
     assert [turn.turn_nr for turn in turn_2_context["recent_turns"]] == [1, 2]
     assert [result.content for result in turn_2_context["known_results"]] == [
         "claim=Talks remain fragile | document_id=doc_usa_iran | status=verified"
@@ -335,7 +299,6 @@ def test_resolve_reference_returns_turn() -> None:
 def test_get_context_returns_dict() -> None:
     c   = _coordinator()
     ctx = c.get_context(["e"])
-    assert "directives" in ctx
     assert "recent_turns" in ctx
     assert "known_results" in ctx
 
@@ -388,20 +351,6 @@ def test_factory_creates_new_session() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def test_factory_restores_session() -> None:
-    root = _session_root()
-    try:
-        factory = HiveMindStoreCoordinatorFactory(base_dir=str(root))
-        coord = factory.get_or_create("sess-2")
-        coord.set_directive("lang", "fr")
-        factory.save("sess-2", coord)
-
-        coord2 = factory.get_or_create("sess-2")
-        assert coord2.get_directives().get("lang") == "fr"
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
 def test_factory_saves_and_restores_turns() -> None:
     root = _session_root()
     try:
@@ -419,7 +368,6 @@ def test_factory_saves_and_restores_turns() -> None:
 def test_factory_restores_multiturn_hive_mind_context_without_transient_working_memory() -> None:
     factory = HiveMindStoreCoordinatorFactory(backend=_MemoryBackend())
     coord = factory.get_or_create("sess-complex")
-    coord.set_directive("conversation_language", "de", source="user")
     coord.record_turn(TurnSummary(
         turn_nr=1,
         user_input="Merke: NLght nutzt HiveMind.",
@@ -451,7 +399,6 @@ def test_factory_restores_multiturn_hive_mind_context_without_transient_working_
     restored = factory.get_or_create("sess-complex")
     context = restored.get_context(["NLght"])
 
-    assert context["directives"] == {"conversation_language": "de"}
     assert [turn.turn_nr for turn in context["recent_turns"]] == [1, 2]
     assert [result.content for result in context["known_results"]] == [
         "NLght uses HiveMind as its session memory coordinator."

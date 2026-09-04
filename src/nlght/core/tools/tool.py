@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
+    from nlght.core.tools.action import ActionSemanticsResolver, ToolArgumentBinder
     from nlght.ports.outbound.os_runtime import OsRuntime
 
 
@@ -46,6 +47,42 @@ class ToolSignature:
     """If True, a call to this operation ends the model turn: the
     ModelClient closes the stream after the tool call instead of waiting
     for the model's natural ``done``."""
+    action: ActionSemanticsResolver | None = None
+    """Typed action semantics resolved after arguments are validated.
+
+    ``None`` is unknown, never read-only.  Execution-capable catalogs reject
+    such signatures and the execution gate denies them again if a custom path
+    bypasses registration validation.
+    """
+    argument_binder: ToolArgumentBinder | None = None
+    """Optional deterministic scope/destination binding after schema validation."""
+
+
+@dataclass(frozen=True)
+class ToolOption:
+    """One configuration key a tool understands.
+
+    Declaring options lets the admin UI render real inputs for a resource
+    instead of asking an operator to hand-write JSON from memory. A tool that
+    declares none keeps the free-form JSON editor, so existing tools are
+    unaffected.
+    """
+
+    name: str
+    type: str  # "string" | "number" | "integer" | "boolean" | "object" | "array"
+    description: str = ""
+    required: bool = False
+    default: Any = None
+    choices: list[Any] | None = None
+    placeholder: str = ""
+    secret: bool = False
+    """Rendered as a password field — the value is still stored in plain config."""
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("tool option name must not be empty")
+        if self.type not in ("string", "number", "integer", "boolean", "object", "array"):
+            raise ValueError(f"unsupported tool option type '{self.type}'")
 
 
 class ToolBase:
@@ -58,6 +95,13 @@ class ToolBase:
 
     Minimal example::
 
+        from nlght.core.tools.action import (
+            DataEgressClass,
+            ScopeClass,
+            SideEffectClass,
+            StaticActionSemantics,
+        )
+
         class MyTool(ToolBase):
             KIND = "my_tool"
 
@@ -69,6 +113,11 @@ class ToolBase:
                         description="Greets someone.",
                         method_name="greet",
                         parameters=[ToolParameter(name="name", type="string")],
+                        action=StaticActionSemantics(
+                            SideEffectClass.NONE,
+                            DataEgressClass.NONE,
+                            ScopeClass.REQUEST,
+                        ),
                     )
                 ]
 
@@ -90,6 +139,16 @@ class ToolBase:
         self.name = name
         self.config = config
         self.os_runtime = os_runtime
+
+    @classmethod
+    def options(cls) -> list[ToolOption]:
+        """The configuration keys this tool understands.
+
+        Override to make a resource self-describing: the admin UI renders these
+        as typed inputs. The default is empty, which means "free-form JSON" and
+        preserves existing behaviour.
+        """
+        return []
 
     @classmethod
     def signatures(cls) -> list[ToolSignature]:

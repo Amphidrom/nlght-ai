@@ -12,8 +12,8 @@ to_port
 .sessions
 .skills
 .ruff_cache
-.claude/
-!.claude/skills
+.claude/*
+!.claude/skills/
 test-output/
 .nlght-snapshots/
 # coverage artifacts
@@ -24,3 +24,9 @@ results/
 .mypy_cache/
 dist/
 .uv-release-cache/
+.DS_Store
+node_modules
+test-data/
+
+# Rendered diagram screenshots (scripts/render-check.mjs)
+.render-check/

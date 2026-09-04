@@ -10,6 +10,10 @@ import yaml
 
 from nlght.adapters.outbound.config.file.mapper import to_snapshot
 from nlght.adapters.outbound.config.file.models import (
+    EmbeddingModel,
+    ExecutionModel,
+    ExecutionStreamModel,
+    ExecutionWorkerModel,
     GatewayModel,
     HiveMindProviderModel,
     LicensingConfigModel,
@@ -17,6 +21,7 @@ from nlght.adapters.outbound.config.file.models import (
     OsRuntimeModel,
     PlatformFileConfigModel,
     ProtocolAdapterModel,
+    WatcherModel,
     WorkflowsPersistenceModel,
 )
 from nlght.core.config.snapshot import LoggingConfig, PlatformConfigSnapshot
@@ -68,6 +73,39 @@ class FileConfigurationSource(ConfigurationSource):
             for k, v in (logging_raw.get("level", {}) or {}).items()
         }
 
+        execution_raw = raw.get("execution", {}) or {}
+        worker_raw = execution_raw.get("worker", {}) or {}
+        stream_raw = execution_raw.get("stream", {}) or {}
+        execution = ExecutionModel(
+            role=str(execution_raw.get("role", "gateway+worker")),
+            stream=ExecutionStreamModel(
+                transport=str(stream_raw.get("transport", "in_process")).strip(),
+                url=str(stream_raw.get("url", "")).strip(),
+                channel=str(stream_raw.get("channel", "nlght_execution_stream")).strip(),
+            ),
+            worker=ExecutionWorkerModel(
+                instance_name=str(worker_raw.get("instance_name", "")),
+                capabilities=[str(item) for item in (worker_raw.get("capabilities", []) or [])],
+                concurrency=int(worker_raw.get("concurrency", 1)),
+                poll_interval_seconds=float(worker_raw.get("poll_interval_seconds", 1.0)),
+                lease_seconds=float(worker_raw.get("lease_seconds", 30.0)),
+                heartbeat_seconds=float(worker_raw.get("heartbeat_seconds", 10.0)),
+                retry_base_seconds=float(worker_raw.get("retry_base_seconds", 1.0)),
+                retry_max_seconds=float(worker_raw.get("retry_max_seconds", 60.0)),
+            ),
+        )
+
+        embedding_raw = raw.get("embedding", {}) or {}
+        embedding = EmbeddingModel(
+            provider=str(embedding_raw.get("provider", "")).strip(),
+            model=str(embedding_raw.get("model", "")).strip(),
+            batch_size=int(embedding_raw.get("batch_size", 64)),
+            normalize=bool(embedding_raw.get("normalize", True)),
+            device=str(embedding_raw.get("device", "auto")).strip(),
+            cache_dir=str(embedding_raw.get("cache_dir", "")).strip(),
+            offline=str(embedding_raw.get("offline", "auto")).strip(),
+        )
+
         playbooks_raw = catalogs.get("playbooks") or {}
         catalogs_playbooks_definitions_path = (
             str(playbooks_raw.get("definitions_path") or playbooks_raw.get("path")).strip()
@@ -78,6 +116,9 @@ class FileConfigurationSource(ConfigurationSource):
         model = PlatformFileConfigModel(
             catalogs_playbooks_definitions_path=catalogs_playbooks_definitions_path,
             licensing=licensing,
+            execution=execution,
+            embedding=embedding,
+            principal=dict(raw.get("principal") or {}),
             protocol_adapters=[
                 self._protocol_adapter(item)
                 for item in (raw.get("protocol_adapters", []) or [])
@@ -85,6 +126,10 @@ class FileConfigurationSource(ConfigurationSource):
             gateways=[
                 self._gateway(item)
                 for item in (raw.get("gateways", []) or [])
+            ],
+            watchers=[
+                self._watcher(item)
+                for item in (raw.get("watchers", []) or [])
             ],
             os_runtime=os_runtime_model,
             model_providers=[
@@ -131,6 +176,15 @@ class FileConfigurationSource(ConfigurationSource):
     @staticmethod
     def _gateway(raw: dict[str, Any]) -> GatewayModel:
         return GatewayModel(
+            name=str(raw.get("name", "")),
+            kind=str(raw.get("kind", "")),
+            enabled=bool(raw.get("enabled", True)),
+            config=dict(raw.get("config", {}) or {}),
+        )
+
+    @staticmethod
+    def _watcher(raw: dict[str, Any]) -> WatcherModel:
+        return WatcherModel(
             name=str(raw.get("name", "")),
             kind=str(raw.get("kind", "")),
             enabled=bool(raw.get("enabled", True)),

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
+from nlght.adapters.outbound.model.google import _to_google_wire_messages
+from nlght.core.model.messages import CanonicalMessage, MessageLike, append_canonical_tool_turn
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -410,7 +412,13 @@ class BoundGoogleModelClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_google_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
                 messages=messages,
@@ -524,12 +532,13 @@ class BoundGoogleModelClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_google_wire_messages(messages)
         from google.genai import types as _types  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
         system_text, initial_contents = _to_google_contents(messages)
@@ -713,16 +722,9 @@ class BoundGoogleModelClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        """Append in canonical (Ollama-style) shape — ``_to_google_contents``
-        lowers it to Gemini's function_call/function_response parts on the next call.
-        """
-        from nlght.adapters.outbound.model._tool_helpers import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            append_ollama_native_tool_turn,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        )
-
-        return append_ollama_native_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

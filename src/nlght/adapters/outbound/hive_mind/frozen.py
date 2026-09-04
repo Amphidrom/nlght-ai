@@ -25,8 +25,6 @@ from typing import Any, TypeVar, cast
 from nlght.core.hive_mind.models import (
     AtomType,
     ConflictReport,
-    Directive,
-    DirectivePriority,
     PromotionStatus,
     SessionResult,
     TurnSummary,
@@ -54,28 +52,6 @@ class FrozenStoreCoordinator(StoreCoordinator):
         self._shadow_task:     str | None          = None
 
     # ------------------------------------------------------------------
-    # Directives — reads from inner, writes ignored
-    # ------------------------------------------------------------------
-
-    def set_directive(
-        self,
-        key:      str,
-        value:    str,
-        source:   str               = "inferred",
-        priority: DirectivePriority = DirectivePriority.NORMAL,
-    ) -> ConflictReport | None:
-        return None
-
-    def get_directives(self) -> dict[str, str]:
-        return self._inner.get_directives()
-
-    def get_directives_list(self) -> list[Directive]:
-        return self._inner.get_directives_list()
-
-    # ------------------------------------------------------------------
-    # Conversation — reads from inner, record_turn is a no-op
-    # ------------------------------------------------------------------
-
     def record_turn(self, turn: TurnSummary) -> None:
         pass
 
@@ -91,7 +67,10 @@ class FrozenStoreCoordinator(StoreCoordinator):
             atom_type = intent.atom_type,
             content   = intent.content,
             task_id   = intent.task_id,
+            entities  = intent.entities,
             tags      = intent.tags,
+            key       = intent.key,
+            kind      = intent.kind,
             promote_to_parent=intent.promote_immediately,
         )
         self._shadow_atoms.append(atom)

@@ -130,29 +130,6 @@ class SlotReaderStep(StepBase):
         return StepResult(ctx=ctx, verdict="done")
 
 
-class DirectiveWriterStep(StepBase):
-    """Sets a directive."""
-    TYPE = "test_directive_writer"
-
-    async def run(self, ctx: WorkflowStepContext) -> StepResult:
-        ctx.store_coordinator.set_directive(
-            key="conversation_language",
-            value="de",
-            source="step",
-        )
-        return StepResult(ctx=ctx, verdict="next")
-
-
-class DirectiveReaderStep(StepBase):
-    """Reads directives written by the previous step."""
-    TYPE = "test_directive_reader"
-
-    async def run(self, ctx: WorkflowStepContext) -> StepResult:
-        directives = ctx.store_coordinator.get_directives()
-        _CAPTURED["language"] = directives.get("conversation_language")
-        return StepResult(ctx=ctx, verdict="done")
-
-
 # ---------------------------------------------------------------------------
 # UC7: Session key extraction
 # ---------------------------------------------------------------------------
@@ -299,44 +276,3 @@ async def test_slot_written_in_step_a_is_readable_in_step_b(
 
     assert resp.status_code == 200
     assert _CAPTURED.get("slot_value") == {"answer": 42}
-
-
-# ---------------------------------------------------------------------------
-# UC4: Directives persist between steps within the same run
-# ---------------------------------------------------------------------------
-
-async def test_directive_written_in_step_a_is_readable_in_step_b(
-    session_factory, workflow_repo, resource_repo,
-):
-    """A directive set in step A is visible to step B in the same execution."""
-    reader_id = uuid.uuid4()
-    writer_id = uuid.uuid4()
-
-    await seed_workflow(session_factory, "wf", steps=[
-        {
-            "id": writer_id,
-            "type": "test_directive_writer",
-            "is_start": True,
-            "transitions": {"next": str(reader_id)},
-        },
-        {
-            "id": reader_id,
-            "type": "test_directive_reader",
-            "is_terminal": True,
-        },
-    ])
-    loader = make_step_loader(DirectiveWriterStep, DirectiveReaderStep)
-    container = build_test_container(
-        workflow_repo, resource_repo,
-        openai_workflow_mapping=_MAPPING,
-        step_loader=loader,
-        with_session_store=True,
-    )
-    with TestClient(build_test_app(container)) as client:
-        resp = client.post(
-            "/v1/chat/completions",
-            json={"model": "test", "messages": _MSG, "user": "session-eve"},
-        )
-
-    assert resp.status_code == 200
-    assert _CAPTURED.get("language") == "de"

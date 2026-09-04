@@ -29,8 +29,10 @@ import httpx2
 
 from nlght.adapters.outbound.model.ollama_local import OllamaClient
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
+from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
 from nlght.adapters.outbound.tools.catalog import TemporaryToolCatalog
 from nlght.adapters.outbound.tools.contract import CallbackToolContract
+from nlght.core.tools.tool import ToolParameter
 
 
 class _TerminalThenRunawayStream(httpx2.AsyncByteStream):
@@ -86,9 +88,10 @@ async def test_terminal_tool_call_closes_stream_without_draining_trailing_tokens
         CallbackToolContract(
             name="chain_analysis_done",
             description="Signal that chain analysis is complete.",
-            parameters=[],
+            parameters=[ToolParameter("summary", "string", required=False)],
             callback=_done,
             terminal=True,
+            action=READ_REQUEST,
         ),
     ])
     bound = client.bind(

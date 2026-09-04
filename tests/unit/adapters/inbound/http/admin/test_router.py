@@ -223,10 +223,28 @@ async def test_admin_static_serves_only_allowlisted_packaged_assets() -> None:
     assert missing.value.status_code == 404
 
 
+async def test_an_allowlisted_but_unvendored_asset_is_a_404_not_a_500() -> None:
+    # The dagre pair is optional — the graph falls back to a built-in layout
+    # without it — so a checkout that does not carry it must answer 404 rather
+    # than raising on a missing file.
+    absent = [
+        asset for asset in ("dagre.min.js", "cytoscape-dagre.min.js")
+        if not (router._STATIC_DIR / asset).is_file()
+    ]
+    if not absent:
+        pytest.skip("both optional assets are vendored in this checkout")
+    with pytest.raises(HTTPException) as missing:
+        await router.admin_static(absent[0])
+    assert missing.value.status_code == 404
+
+
 async def test_router_dashboard_workflow_version_and_graph_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     svc = _Service()
     templates = _Templates()
     monkeypatch.setattr(router, "_svc", lambda request: svc)
+    # The dashboard also reports what the runtime is doing, which reaches the
+    # execution repository — the fake engine on the request would not survive it.
+    monkeypatch.setattr(router, "_executions", lambda request: _Executions())
     monkeypatch.setattr(router, "_tmpl", lambda: templates)
     req = _request()
 
@@ -255,6 +273,10 @@ async def test_router_dashboard_workflow_version_and_graph_paths(monkeypatch: py
         "description": "desc",
         "enabled": True,
         "capabilities": ["web", "code"],
+        "concurrency": "non-blocking",
+        # Left empty on the form, which means the runtime's default rather than
+        # a number — the three states are what makes 0 mean unlimited.
+        "max_hops": None,
     }
 
 
@@ -373,3 +395,110 @@ async def test_router_raises_404_for_missing_domain_objects(monkeypatch: pytest.
         with pytest.raises(HTTPException) as exc:
             await call
         assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Executions — read-only
+# ---------------------------------------------------------------------------
+
+
+class _Executions:
+    def __init__(self, *, found: bool = True) -> None:
+        self.found = found
+        self.asked: dict[str, object] = {}
+
+    async def runs(self, **kwargs: object) -> dict[str, object]:
+        self.asked = kwargs
+        return {"runs": [], "total": 0, "limit": kwargs["limit"], "offset": kwargs["offset"]}
+
+    async def run(self, execution_id: uuid.UUID, **kwargs: object) -> dict[str, object] | None:
+        return {"record": SimpleNamespace(execution_id=execution_id)} if self.found else None
+
+    async def workers(self) -> tuple[object, ...]:
+        return ()
+
+    async def counts(self, **kwargs: object) -> object:
+        return SimpleNamespace(in_flight=0, of=lambda _status: 0)
+
+    async def list_workflows_for_filter(self) -> list[object]:
+        return []
+
+
+async def test_executions_listing_passes_its_filters_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executions = _Executions()
+    templates = _Templates()
+    monkeypatch.setattr(router, "_executions", lambda request: executions)
+    monkeypatch.setattr(router, "_tmpl", lambda: templates)
+    workflow_id = uuid.uuid4()
+
+    await router.list_executions(
+        _request(), status="failed", workflow_id=str(workflow_id), offset=50
+    )
+
+    assert executions.asked["status"].value == "failed"
+    assert executions.asked["workflow_id"] == workflow_id
+    assert executions.asked["offset"] == 50
+    assert templates.calls[0][0] == "executions/list.html"
+
+
+async def test_an_unknown_status_is_refused_rather_than_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Silently listing everything would answer a question nobody asked.
+    monkeypatch.setattr(router, "_executions", lambda request: _Executions())
+    monkeypatch.setattr(router, "_tmpl", lambda: _Templates())
+
+    with pytest.raises(HTTPException) as exc:
+        await router.list_executions(_request(), status="exploded")
+    assert exc.value.status_code == 400
+
+
+async def test_the_page_size_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    executions = _Executions()
+    monkeypatch.setattr(router, "_executions", lambda request: executions)
+    monkeypatch.setattr(router, "_tmpl", lambda: _Templates())
+
+    await router.list_executions(_request(), limit=100_000)
+
+    assert executions.asked["limit"] == 200
+
+
+async def test_a_missing_execution_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(router, "_executions", lambda request: _Executions(found=False))
+    monkeypatch.setattr(router, "_tmpl", lambda: _Templates())
+
+    with pytest.raises(HTTPException) as exc:
+        await router.execution_detail(_request(), uuid.uuid4())
+    assert exc.value.status_code == 404
+
+
+async def test_workers_render_their_own_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    templates = _Templates()
+    monkeypatch.setattr(router, "_executions", lambda request: _Executions())
+    monkeypatch.setattr(router, "_tmpl", lambda: templates)
+
+    await router.list_workers(_request())
+
+    assert templates.calls[0][0] == "executions/workers.html"
+
+
+def test_a_duration_reads_as_time_not_as_two_timestamps() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    start = datetime(2026, 8, 27, 10, 0, tzinfo=UTC)
+    finished = SimpleNamespace(
+        started_at=start, created_at=start, completed_at=start + timedelta(seconds=90)
+    )
+    assert router._duration(finished) == "1 m 30 s"
+
+    # An unfinished run measures against now, so a stuck execution shows a
+    # growing number rather than an empty cell.
+    running = SimpleNamespace(started_at=start, created_at=start, completed_at=None)
+    assert router._duration(running) != ""
+
+
+def test_pretty_json_survives_a_payload_it_cannot_serialize() -> None:
+    assert router._pretty_json({"a": 1}) == '{\n  "a": 1\n}'
+    assert "object" in router._pretty_json({"a": object()})

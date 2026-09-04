@@ -177,6 +177,17 @@ def test_serve_enables_reload_from_env(tmp_path, monkeypatch) -> None:
     assert run_calls[0]["reload"] is True
 
 
+def test_serve_rejects_worker_only_role(tmp_path, monkeypatch) -> None:
+    config = tmp_path / "platform.yaml"
+    config.write_text("execution:\n  role: worker\n", encoding="utf-8")
+    monkeypatch.setenv("NLGHT_CONFIG", str(config))
+
+    import nlght.main as serve_module
+
+    with pytest.raises(RuntimeError, match="nlght-ai worker"):
+        serve_module.serve()
+
+
 # ---------------------------------------------------------------------------
 # _warn_if_admin_on_public_binding — RLS-009
 # ---------------------------------------------------------------------------
@@ -252,6 +263,18 @@ def test_cli_dispatches_serve(monkeypatch) -> None:
     cli()
 
     assert called == ["serve"]
+
+
+def test_cli_dispatches_worker(monkeypatch) -> None:
+    import nlght.main as main_module
+
+    called: list[str] = []
+    monkeypatch.setattr(main_module, "worker", lambda: called.append("worker"))
+    monkeypatch.setattr("sys.argv", ["nlght-ai", "worker"])
+
+    cli()
+
+    assert called == ["worker"]
 
 
 def test_cli_dispatches_migrate_with_args(monkeypatch) -> None:

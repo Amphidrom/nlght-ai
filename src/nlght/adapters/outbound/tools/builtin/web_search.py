@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import httpx2
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import CONFIGURED_NETWORK_READ
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class WebSearchTool(ToolBase):
                 ),
                 method_name="search",
                 parameters=params,
+                action=CONFIGURED_NETWORK_READ,
             ),
         ]
 
@@ -112,7 +114,17 @@ class WebSearchTool(ToolBase):
         engines: str = str(self.config.get("engines", "google,bing,duckduckgo"))
 
         try:
-            async with httpx2.AsyncClient(timeout=timeout) as client:
+            # `follow_redirects=False` is the whole reason this operation may be
+            # classified BOUNDED_DESTINATION (ADR-0069): the destination is fixed
+            # in operator config, and a 302 would move it somewhere the operator
+            # never named. In langsearch mode the request carries an
+            # `Authorization: Bearer` header, so a followed redirect would hand
+            # the key to whatever host the redirect chose. Stated rather than
+            # inherited from the client default, because a later "our endpoint
+            # redirects now" fix must be a deliberate decision about the boundary.
+            async with httpx2.AsyncClient(
+                timeout=timeout, follow_redirects=False,
+            ) as client:
                 if mode == "searxng":
                     r = await client.get(
                         endpoint,

@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from nlght.core.model.messages import CanonicalMessage
 from nlght.core.trigger.trigger import Trigger
 
 if TYPE_CHECKING:
     from nlght.core.workspace.workspace import WorkspaceContext
+    from nlght.ports.outbound.execution_dispatcher import ExecutionDispatcher
     from nlght.ports.outbound.metering import MeteringPort
     from nlght.ports.outbound.model_client import ModelClient
     from nlght.ports.outbound.os_runtime import OsRuntime
@@ -35,7 +38,7 @@ class WorkflowStepContext:
     correlation_id: str
     trigger: Trigger
     model: str
-    messages: list[dict[str, Any]]
+    messages: list[CanonicalMessage]
     stream: bool
     emitter: SignalEmitter
     llm: ModelClient | None = None
@@ -45,6 +48,11 @@ class WorkflowStepContext:
     store_coordinator: StoreCoordinator | None = None
     os_runtime: OsRuntime | None = None
     metering: MeteringPort | None = None
+    execution_id: uuid.UUID | None = None
+    """This run's durable execution, when it has one (see ``WorkflowInvocation``)."""
+    dispatcher: ExecutionDispatcher | None = None
+    """Submits further executions — the seam a step uses to spread work across
+    workers instead of looping over it here."""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -54,13 +62,53 @@ class StepResult:
     verdict: str | None = None
 
 
+@dataclass(frozen=True)
+class StepOption:
+    """One configuration key a step understands.
+
+    Declaring options lets the admin UI render real inputs instead of asking an
+    operator to hand-write JSON from memory. A step that declares none keeps the
+    free-form JSON editor, so existing steps are unaffected.
+    """
+
+    name: str
+    type: str  # "string" | "number" | "integer" | "boolean" | "object" | "array"
+    description: str = ""
+    required: bool = False
+    default: Any = None
+    choices: list[Any] | None = None
+    placeholder: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("step option name must not be empty")
+        if self.type not in ("string", "number", "integer", "boolean", "object", "array"):
+            raise ValueError(f"unsupported step option type '{self.type}'")
+
+
 class StepBase:
-    """Base class for all workflow steps."""
+    """Base class for all workflow steps.
+
+    ``config`` is the step's JSON configuration from its workflow version.
+    Additional keyword arguments are runtime dependencies supplied by a bound
+    ``StepLoader`` (a repository, an embedding client, …); a step that does not
+    need them ignores them, exactly as ``ToolBase`` does.
+    """
 
     TYPE: ClassVar[str]
 
-    def __init__(self, *, config: dict[str, Any]) -> None:
+    def __init__(self, *, config: dict[str, Any], **_: object) -> None:
         self.config = config
+
+    @classmethod
+    def options(cls) -> list[StepOption]:
+        """The configuration keys this step understands.
+
+        Override to make a step self-describing: the admin UI renders these as
+        typed inputs with descriptions and defaults. The default is empty, which
+        means "free-form JSON" and preserves existing behaviour.
+        """
+        return []
 
     async def run(self, ctx: WorkflowStepContext) -> StepResult:
         raise NotImplementedError

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Executions — nlght Admin{% endblock %}
+{% block content %}
+<h2>Executions</h2>
+
+{# One row is one *run*. A fanned-out corpus is one run with hundreds of
+   children; listing every execution would bury the runs that matter. #}
+<p class="muted">
+  Runs handed to the durable queue, newest first. <strong>Status is the run's</strong>, not the
+  execution's: a flow that fans work out succeeds as soon as it has handed it over, so a corpus
+  still being processed reads <em>in progress</em> until its children settle. The filter matches the
+  execution's own status, which is what the queue stores.
+</p>
+
+<form method="get" action="/admin/executions" class="form-actions" style="align-items:end;margin-top:0;margin-bottom:1.5rem">
+  <label style="margin:0">
+    Execution status
+    <select name="status">
+      <option value="">any</option>
+      {% for value in statuses %}
+      <option value="{{ value }}" {% if value == status %}selected{% endif %}>{{ value }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label style="margin:0">
+    Workflow
+    <select name="workflow_id">
+      <option value="">any</option>
+      {% for wf in workflows %}
+      <option value="{{ wf.workflow_id }}" {% if wf.workflow_id|string == workflow_id %}selected{% endif %}>{{ wf.name }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit">Filter</button>
+  {% if status or workflow_id %}<a href="/admin/executions" role="button" class="secondary">Clear</a>{% endif %}
+</form>
+
+{% if runs %}
+<table>
+  <thead>
+    <tr>
+      <th>Started</th>
+      <th>Workflow</th>
+      <th>Status</th>
+      <th>Attempts</th>
+      <th>Children</th>
+      <th>Finished</th>
+      <th>Duration</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for run in runs %}
+  {% set r = run.record %}
+  <tr>
+    <td class="nowrap mono">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+    <td>
+      {{ run.workflow_name }}
+      <br><span class="muted mono">{{ r.trigger.context.correlation_id }}</span>
+    </td>
+    <td>
+      {# The run's state, not the execution's. A distribution flow succeeds as
+         soon as it has handed the work out; saying so here would report a
+         corpus as finished while most of it is still queued. #}
+      <span class="badge badge-{{ run.state.badge }}">{{ run.state.label }}</span>
+      {% if run.state.detail %}<br><span class="muted" style="font-size:.8em">{{ run.state.detail }}</span>{% endif %}
+    </td>
+    <td>
+      {{ r.attempt_count }} / {{ r.max_attempts }}
+      {% if r.attempt_count > 1 %}<br><span class="muted">retried</span>{% endif %}
+    </td>
+    <td>
+      {% if run.fan_out %}
+        {{ run.fan_out.succeeded }}/{{ run.fan_out.total }} done
+        {% if run.fan_out.failed %}<br><span class="badge badge-failed">{{ run.fan_out.failed }} failed</span>{% endif %}
+        {% if run.fan_out.pending %}<br><span class="muted">{{ run.fan_out.pending }} in flight</span>{% endif %}
+      {% else %}
+        <span class="muted">—</span>
+      {% endif %}
+    </td>
+    {# Both columns describe the *run*. For a fan-out that means its last child,
+       not its own execution, which ended the moment it had handed the work out. #}
+    <td class="nowrap mono">
+      {% if run.timing.running %}<span class="muted">still running</span>
+      {% else %}{{ run.timing.finished_at | at }}{% endif %}
+    </td>
+    <td class="nowrap">
+      {{ run.timing.elapsed | span }}
+      {% if run.timing.child_time is not none %}
+      <br><span class="muted" style="font-size:.8em" title="Time the children spent between them">
+        {{ run.timing.child_time | span }} of child time
+      </span>
+      {% endif %}
+    </td>
+    <td class="actions"><a href="/admin/executions/{{ r.execution_id }}">Open</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% if total > limit %}
+<nav style="display:flex;gap:1rem;align-items:center;margin-top:1rem">
+  {% if offset > 0 %}<a href="/admin/executions?{{ query }}&offset={{ [offset - limit, 0] | max }}">← Newer</a>{% endif %}
+  <span class="muted">{{ offset + 1 }}–{{ [offset + limit, total] | min }} of {{ total }}</span>
+  {% if offset + limit < total %}<a href="/admin/executions?{{ query }}&offset={{ offset + limit }}">Older →</a>{% endif %}
+</nav>
+{% endif %}
+
+{% else %}
+<p class="muted">No runs match. Executions appear here once a workflow is submitted to the durable queue — an inline gateway request never becomes one.</p>
+{% endif %}
+{% endblock %}

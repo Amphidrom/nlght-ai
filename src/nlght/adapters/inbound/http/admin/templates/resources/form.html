@@ -17,11 +17,15 @@
     </label>
     <label>
       Kind <small>(matches tool/step resource lookup)</small>
-      <input type="text" name="kind" value="{{ resource.kind if resource else '' }}" required placeholder="e.g. vector_store"/>
+      <input type="text" name="kind" id="resource-kind" list="resource-kind-list" value="{{ resource.kind if resource else '' }}" required placeholder="e.g. vector_store"/>
+      <datalist id="resource-kind-list">
+        {% for known in resource_kinds %}<option value="{{ known.kind }}">{{ known.doc }}</option>{% endfor %}
+      </datalist>
+      <small id="resource-kind-doc" class="muted"></small>
     </label>
     <label>
       Provider
-      <input type="text" name="provider" value="{{ resource.provider if resource else '' }}" required placeholder="e.g. chroma"/>
+      <input type="text" name="provider" id="resource-provider" value="{{ resource.provider if resource else '' }}" required placeholder="e.g. chroma"/>
     </label>
   </div>
   <p style="margin:.5rem 0 0;color:var(--pico-muted-color)"><small>Model/caller restrictions are managed under <a href="/admin/policies">Access Policies</a>.</small></p>
@@ -29,11 +33,135 @@
     <input type="checkbox" name="enabled" {% if not resource or resource.enabled %}checked{% endif %}/>
     Enabled
   </label>
-  <label style="margin-top:1rem">
-    Config <small>(JSON)</small>
-    <textarea name="config_json" rows="8" placeholder='{"url": "http://chroma:8000", "collection": "docs"}'>{{ resource.config | tojson(indent=2) if resource else '{}' }}</textarea>
-  </label>
-  <div style="display:flex;gap:1rem;margin-top:1rem">
+  <fieldset id="resource-options" style="margin-top:1rem;display:none">
+    <legend>Configuration</legend>
+    <div id="resource-options-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem"></div>
+    <small class="muted">
+      These fields are declared by the tool itself. Anything it does not declare stays editable as
+      JSON below.
+    </small>
+  </fieldset>
+
+  <details id="resource-config-raw" style="margin-top:1rem" {% if not resource_kinds %}open{% endif %}>
+    <summary>Config as JSON</summary>
+    <label>
+      <textarea name="config_json" id="resource-config-json" rows="8" placeholder='{"url": "http://chroma:8000", "collection": "docs"}'>{{ resource.config | tojson(indent=2) if resource else '{}' }}</textarea>
+    </label>
+  </details>
+
+  <script id="resource-kind-catalogue" type="application/json">{{ resource_kinds | tojson }}</script>
+  <script>
+  (function () {
+    const catalogue = JSON.parse(document.getElementById("resource-kind-catalogue").textContent || "[]");
+    const byKind = Object.fromEntries(catalogue.map((entry) => [entry.kind, entry]));
+    const kindInput = document.getElementById("resource-kind");
+    const providerInput = document.getElementById("resource-provider");
+    const doc = document.getElementById("resource-kind-doc");
+    const box = document.getElementById("resource-options");
+    const fields = document.getElementById("resource-options-fields");
+    const json = document.getElementById("resource-config-json");
+    const form = kindInput.closest("form");
+
+    function currentConfig() {
+      try { return JSON.parse(json.value || "{}"); } catch (e) { return {}; }
+    }
+
+    function undeclaredKeys(entry, config) {
+      const declared = new Set((entry ? entry.options : []).map((o) => o.name));
+      return Object.fromEntries(Object.entries(config).filter(([k]) => !declared.has(k)));
+    }
+
+    function render() {
+      const entry = byKind[kindInput.value];
+      doc.textContent = entry ? entry.doc : "";
+      // Offer the registered provider, but let an operator override it.
+      if (entry && entry.provider && !providerInput.value) providerInput.value = entry.provider;
+      fields.replaceChildren();
+      if (!entry || !entry.options.length) { box.style.display = "none"; return; }
+      box.style.display = "";
+      const config = currentConfig();
+
+      for (const option of entry.options) {
+        const label = document.createElement("label");
+        const title = document.createElement("span");
+        title.textContent = option.name + (option.required ? " *" : "");
+        label.appendChild(title);
+        if (option.description) {
+          const hint = document.createElement("small");
+          hint.textContent = " " + option.description;
+          label.appendChild(hint);
+        }
+
+        const value = config[option.name];
+        let input;
+        if (option.choices && option.choices.length) {
+          input = document.createElement("select");
+          for (const choice of option.choices) {
+            const opt = document.createElement("option");
+            opt.value = String(choice);
+            opt.textContent = String(choice);
+            input.appendChild(opt);
+          }
+          if (value !== undefined) input.value = String(value);
+        } else if (option.type === "boolean") {
+          input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = value === undefined ? Boolean(option.default) : Boolean(value);
+        } else if (option.type === "object" || option.type === "array") {
+          input = document.createElement("textarea");
+          input.rows = 3;
+          input.placeholder = option.placeholder || "";
+          input.value = value === undefined ? "" : JSON.stringify(value);
+        } else {
+          input = document.createElement("input");
+          // Secrets are masked in the form; the value is still stored as plain
+          // config, so treat the database as sensitive either way.
+          input.type = option.secret ? "password" : (option.type === "string" ? "text" : "number");
+          if (option.type === "number") input.step = "any";
+          input.placeholder = option.placeholder
+            || (option.default === null || option.default === undefined ? "" : String(option.default));
+          if (value !== undefined) input.value = String(value);
+        }
+        input.dataset.option = option.name;
+        input.dataset.optionType = option.type;
+        label.appendChild(input);
+        fields.appendChild(label);
+      }
+    }
+
+    function collect() {
+      const entry = byKind[kindInput.value];
+      if (!entry || !entry.options.length) return;
+      const config = undeclaredKeys(entry, currentConfig());
+
+      for (const input of fields.querySelectorAll("[data-option]")) {
+        const name = input.dataset.option;
+        const type = input.dataset.optionType;
+        if (type === "boolean") { config[name] = input.checked; continue; }
+        const raw = input.value.trim();
+        if (raw === "") continue;
+        if (type === "object" || type === "array") {
+          try { config[name] = JSON.parse(raw); }
+          catch (e) { throw new Error("Config option '" + name + "' is not valid JSON."); }
+        } else if (type === "number" || type === "integer") {
+          config[name] = Number(raw);
+        } else {
+          config[name] = raw;
+        }
+      }
+      json.value = JSON.stringify(config, null, 2);
+    }
+
+    kindInput.addEventListener("change", render);
+    kindInput.addEventListener("input", render);
+    form.addEventListener("submit", function (event) {
+      try { collect(); }
+      catch (error) { event.preventDefault(); alert(error.message); }
+    });
+    render();
+  })();
+  </script>
+  <div class="form-actions">
     <button type="submit">{% if resource %}Save changes{% else %}Create resource{% endif %}</button>
     <a href="/admin/resources" role="button" class="secondary">Cancel</a>
   </div>

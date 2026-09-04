@@ -12,6 +12,12 @@ import pytest
 
 from nlght.adapters.outbound.os_runtime import docker as docker_module
 from nlght.adapters.outbound.os_runtime.docker import DockerOsRuntime, DockerOsRuntimeFactory
+from nlght.core.tools.action import (
+    FilesystemCapability,
+    NetworkCapability,
+    ProcessCapability,
+    SecretsCapability,
+)
 
 
 class _NotFound(Exception):
@@ -19,8 +25,9 @@ class _NotFound(Exception):
 
 
 class _Container:
-    def __init__(self, *, status: str = "running") -> None:
+    def __init__(self, *, status: str = "running", network_mode: str = "bridge") -> None:
         self.status = status
+        self.attrs = {"HostConfig": {"NetworkMode": network_mode}}
         self.started = False
         self.stopped = False
         self.removed = False
@@ -207,6 +214,22 @@ def test_sync_start_propagates_non_not_found_lookup_error(monkeypatch: pytest.Mo
         DockerOsRuntime(name="nlght", base_image="python:3")._sync_start()
 
 
+def test_confined_runtime_refuses_to_reuse_networked_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    containers = _Containers()
+    containers.existing = _Container(network_mode="bridge")
+    _install_docker(monkeypatch, containers)
+
+    with pytest.raises(RuntimeError, match="does not enforce network_mode='none'"):
+        DockerOsRuntime(
+            name="nlght",
+            base_image="python:3",
+            network_mode="none",
+            allow_runtime_env=False,
+        )._sync_start()
+
+
 def test_runtime_resolves_paths_environment_and_running_assertion(monkeypatch: pytest.MonkeyPatch) -> None:
     containers = _Containers()
     _install_docker(monkeypatch, containers)
@@ -225,6 +248,43 @@ def test_runtime_resolves_paths_environment_and_running_assertion(monkeypatch: p
         "BASE": "one",
         "CALL": "two",
     }
+
+
+def test_confined_runtime_capabilities_are_enforced_not_inferred(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    containers = _Containers()
+    _install_docker(monkeypatch, containers)
+    runtime = DockerOsRuntime(
+        name="confined",
+        base_image="python:3",
+        network_mode="none",
+        allow_runtime_env=False,
+    )
+
+    capabilities = runtime.security_capabilities()
+    assert capabilities.filesystem == FilesystemCapability.SANDBOX
+    assert capabilities.network == NetworkCapability.NONE
+    assert capabilities.process == ProcessCapability.SANDBOXED
+    assert capabilities.secrets == SecretsCapability.NONE
+
+    with pytest.raises(PermissionError, match="environment injection is disabled"):
+        runtime.add_env({"TOKEN": "secret"})
+    with pytest.raises(PermissionError, match="environment injection is disabled"):
+        runtime._sync_exec(["env"], None, {"TOKEN": "secret"})
+
+    runtime._sync_start()
+    assert containers.run_args is not None
+    assert containers.run_args[1]["network_mode"] == "none"
+
+
+def test_default_docker_capabilities_do_not_claim_confinement() -> None:
+    capabilities = DockerOsRuntime(
+        name="default", base_image="python:3"
+    ).security_capabilities()
+
+    assert capabilities.network == NetworkCapability.ARBITRARY
+    assert capabilities.secrets == SecretsCapability.MAY_READ
 
 
 def test_sync_stop_swallows_container_cleanup_error() -> None:

@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from nlght.adapters.inbound.http.openai_schemas import ChatCompletionRequest
+from nlght.adapters.inbound.http.streaming import relay_openai_sse, stream_execution_signals
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.adapters.outbound.signals.streaming import QueuedSignalEmitter
 
@@ -125,8 +126,11 @@ class OpenAIHttpProtocolAdapter:
                 )
                 invocation = replace(invocation, trigger=enriched)
             if invocation.trigger.stream:
+                # One shared streaming source: through a worker when durable
+                # execution is available, inline otherwise. Serialization stays
+                # OpenAI SSE, byte-compatible with the previous inline stream.
                 return StreamingResponse(
-                    executor.stream(invocation),
+                    relay_openai_sse(stream_execution_signals(container, invocation)),
                     media_type="text/event-stream",
                     headers={
                         "Cache-Control": "no-cache",

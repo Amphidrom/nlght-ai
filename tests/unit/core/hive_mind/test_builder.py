@@ -9,7 +9,6 @@ import pytest
 from nlght.core.hive_mind.builder import ContextSnapshot, MentalModelBuilder
 from nlght.core.hive_mind.models import (
     AtomType,
-    Directive,
     RelevanceWeights,
     ScoringStrategy,
     SessionResult,
@@ -23,20 +22,22 @@ def _engine() -> RelevanceEngine:
     return RelevanceEngine(
         weights=RelevanceWeights(),
         strategy=ScoringStrategy.LINEAR,
-        threshold=0.0,
     )
 
 
-def _builder(**kwargs) -> MentalModelBuilder:
-    return MentalModelBuilder(relevance_engine=_engine(), **kwargs)
+def _builder(**_ignored) -> MentalModelBuilder:
+    """The builder no longer takes caps or a threshold — it selects nothing.
+
+    `**_ignored` so the call sites that used to pass `max_turns=3` read as what
+    they now are: a request for a limit that no longer exists.
+    """
+    return MentalModelBuilder(relevance_engine=_engine())
 
 
 def test_from_step_config_uses_defaults() -> None:
     builder = MentalModelBuilder.from_step_config({})
     assert builder.engine.strategy == ScoringStrategy.WEIGHTED_SIGMOID
-    assert builder.engine.threshold == 0.15
     assert builder.engine.weights == RelevanceWeights()
-    assert (builder.max_atoms, builder.max_results, builder.max_turns) == (15, 10, 8)
 
 
 def test_from_step_config_applies_nested_memory_config() -> None:
@@ -44,7 +45,6 @@ def test_from_step_config_applies_nested_memory_config() -> None:
         "session_memory": {
             "relevance": {
                 "strategy": "linear",
-                "threshold": 0.25,
                 "weights": {
                     "recency": 0.20,
                     "proximity": 0.50,
@@ -53,14 +53,14 @@ def test_from_step_config_applies_nested_memory_config() -> None:
                     "proximity_boost": 1.5,
                 },
             },
-            "mental_model": {"max_atoms": 5, "max_results": 6, "max_turns": 7},
         }
     })
     assert builder.engine.strategy == ScoringStrategy.LINEAR
-    assert builder.engine.threshold == 0.25
     assert builder.engine.weights.proximity == 0.50
     assert builder.engine.weights.proximity_boost == 1.5
-    assert (builder.max_atoms, builder.max_results, builder.max_turns) == (5, 6, 7)
+    # No caps and no threshold in the block any more: they configured a selection
+    # that no longer happens here, and setting one is now an error rather than a
+    # silent no-op (ADR-0056).
 
 
 @pytest.mark.parametrize("strategy", ["weighted_sigmoid", "linear", "multiplicative"])
@@ -76,8 +76,11 @@ def test_from_step_config_accepts_every_strategy(strategy: str) -> None:
     [
         ({"session_memory": []}, "session_memory must be an object"),
         ({"session_memory": {"relevance": {"strategy": "magic"}}}, "must be one of"),
-        ({"session_memory": {"relevance": {"threshold": "high"}}}, "threshold must be a number"),
-        ({"session_memory": {"mental_model": {"max_atoms": 0}}}, "max_atoms must be a positive integer"),
+        # Settings that no longer do anything are refused rather than accepted in
+        # silence: configured, ignored and undetectable is the worst outcome.
+        ({"session_memory": {"relevance": {"threshold": 0.25}}}, "no longer exists"),
+        ({"session_memory": {"mental_model": {"max_atoms": 5}}}, "no longer exists"),
+        ({"session_memory": {"mental_model": {"max_turns": 3}}}, "no longer exists"),
     ],
 )
 def test_from_step_config_rejects_invalid_values(config: dict[str, object], message: str) -> None:
@@ -91,7 +94,6 @@ def test_from_step_config_rejects_invalid_values(config: dict[str, object], mess
 
 def test_context_snapshot_defaults_empty() -> None:
     snap = ContextSnapshot()
-    assert snap.directives == []
     assert snap.active_atoms == []
     assert snap.known_results == []
     assert snap.recent_turns == []
@@ -134,15 +136,21 @@ def test_build_with_results() -> None:
     assert isinstance(model.known_results, list)
 
 
-def test_build_with_recent_turns_clipped_to_max() -> None:
-    builder = _builder(max_turns=3)
+def test_build_keeps_every_turn_the_snapshot_holds() -> None:
+    """`[-max_turns:]` was the third selection rule for the third storage type.
+
+    It was also the only one that never consulted relevance at all: turns were
+    cut by position while atoms and results were cut by score. What a model is
+    told is now one decision, made once, with retention and cost in view.
+    """
+    builder = _builder()
     turns = [
         TurnSummary(turn_nr=i, user_input="hi", intent="greet", topic="t")
         for i in range(10)
     ]
     snap  = ContextSnapshot(recent_turns=turns)
     model = builder.build(turn_id="t", context=snap, signal_entities=[], intents=[])
-    assert len(model.recent_turns) <= 3
+    assert len(model.recent_turns) == 10
 
 
 def test_build_includes_summary() -> None:
@@ -152,13 +160,6 @@ def test_build_includes_summary() -> None:
         turn_id="t", context=snap, signal_entities=[], intents=[], summary="A brief summary."
     )
     assert model.summary == "A brief summary."
-
-
-def test_build_includes_directives() -> None:
-    builder = _builder()
-    snap    = ContextSnapshot(directives=[Directive(key="lang", value="de")])
-    model   = builder.build(turn_id="t", context=snap, signal_entities=[], intents=[])
-    assert len(model.directives) == 1
 
 
 def test_build_deduplicates_entities() -> None:

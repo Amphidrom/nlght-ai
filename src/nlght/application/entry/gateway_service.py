@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from nlght.core.entry.context import RequestContext
 from nlght.core.errors.errors import UnsupportedProtocolError, WorkflowNotFoundError
 from nlght.core.workflow.workflow import WorkflowInvocation
+from nlght.ports.outbound.principal_resolver import PrincipalResolver
 from nlght.ports.outbound.protocol_detection import ProtocolDetector
 from nlght.ports.outbound.resource_repository import ResourceRepository
 from nlght.ports.outbound.trigger_resolution import TriggerResolver
@@ -22,11 +23,13 @@ class GatewayService:
         trigger_resolver: TriggerResolver,
         workflow_repository: WorkflowRepository | None = None,
         resource_repository: ResourceRepository | None = None,
+        principal_resolver: PrincipalResolver | None = None,
     ) -> None:
         self._protocol_detector = protocol_detector
         self._trigger_resolver = trigger_resolver
         self._workflow_repository = workflow_repository
         self._resource_repository = resource_repository
+        self._principal_resolver = principal_resolver
 
     async def process(
         self,
@@ -42,6 +45,23 @@ class GatewayService:
     ) -> WorkflowInvocation:
         normalized_headers = {k.lower(): v for k, v in headers.items()}
 
+        # Established here because this is the one place an inbound
+        # `RequestContext` is built, so nothing downstream can be reached with a
+        # principal that skipped the resolver. `None` where none is configured
+        # or the trust conditions did not hold, which is a definite answer.
+        principal = (
+            await self._principal_resolver.resolve(
+                path=path,
+                method=method,
+                headers=normalized_headers,
+                query_params=query_params,
+                client_host=client_host,
+                raw_body=raw_body,
+            )
+            if self._principal_resolver is not None
+            else None
+        )
+
         context = RequestContext(
             correlation_id=session_key or str(uuid.uuid4()),
             request_id=str(uuid.uuid4()),
@@ -51,6 +71,7 @@ class GatewayService:
             headers=normalized_headers,
             query_params=query_params,
             client_host=client_host,
+            principal=principal,
         )
 
         protocol = await self._protocol_detector.detect(

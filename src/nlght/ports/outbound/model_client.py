@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
+
+from nlght.core.model.budget import TokenBudget
+from nlght.core.model.messages import CanonicalMessage, MessageLike
 
 
 @dataclass(frozen=True)
@@ -35,11 +38,27 @@ class ModelClient(Protocol):
         await ctx.llm.call(ctx.messages)
     """
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None: ...
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """This model's context budget, as the client that will make the call sees it.
+
+        Read-only, and the point is *which* budget it is: the same object the
+        safety net downstream will enforce with, derived for the model actually
+        bound to this step. Anything composing a prompt has to work to the same
+        number, or a prompt is built against one limit and checked against
+        another — two truths that agree until the day they do not.
+
+        `None` where the client cannot say: a provider without a known context
+        window, or a test double. That is a definite answer meaning "no budget
+        from here", never an invitation to invent one.
+        """
+        ...
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None: ...
 
     def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
@@ -48,14 +67,13 @@ class ModelClient(Protocol):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        """Append assistant-tool_calls + tool-result messages in the wire format this client expects.
+    ) -> list[CanonicalMessage]:
+        """Append typed assistant-tool_calls and genuine tool-result messages.
 
-        Steps that drive their own tool loop must use this instead of importing
-        format-specific helpers — the client knows its own wire format.
+        Provider mapping happens only when the next request crosses the adapter.
         """
         ...

@@ -8,6 +8,8 @@ from typing import Any
 from nlght.core.config.runtime_context import (
     AnthropicModelProviderRuntime,
     DockerOsRuntimeSubsystemRuntime,
+    ExecutionRuntime,
+    ExecutionStreamRuntime,
     GatewayRegistry,
     GenericModelProviderRuntime,
     GenericRuntimeSubsystemRuntime,
@@ -31,6 +33,35 @@ from nlght.core.config.snapshot import PlatformConfigSnapshot
 
 class CompositionService:
     def compose(self, snapshot: PlatformConfigSnapshot) -> RuntimeContext:
+        execution_config = snapshot.execution
+        if execution_config.role not in {"gateway", "worker", "gateway+worker"}:
+            raise ValueError(
+                "execution.role must be one of: gateway, worker, gateway+worker"
+            )
+        worker_config = execution_config.worker
+        if worker_config.concurrency < 1:
+            raise ValueError("execution.worker.concurrency must be at least 1")
+        if worker_config.poll_interval_seconds <= 0:
+            raise ValueError("execution.worker.poll_interval_seconds must be positive")
+        if worker_config.lease_seconds <= 0:
+            raise ValueError("execution.worker.lease_seconds must be positive")
+        if not 0 < worker_config.heartbeat_seconds < worker_config.lease_seconds:
+            raise ValueError(
+                "execution.worker.heartbeat_seconds must be positive and shorter than lease_seconds"
+            )
+        if (
+            worker_config.retry_base_seconds <= 0
+            or worker_config.retry_max_seconds < worker_config.retry_base_seconds
+        ):
+            raise ValueError("execution.worker retry bounds are invalid")
+        stream_config = execution_config.stream
+        if stream_config.transport not in {"in_process", "postgres"}:
+            raise ValueError(
+                "execution.stream.transport must be one of: in_process, postgres"
+            )
+        if not stream_config.channel.strip():
+            raise ValueError("execution.stream.channel must not be empty")
+
         protocol_detector_runtimes = [
             ProtocolDetectorRuntime(
                 name=adapter.name,
@@ -74,6 +105,10 @@ class CompositionService:
                     workspace_path=str(os_runtime_cfg.config["workspace_path"])
                     if os_runtime_cfg.config.get("workspace_path") else None,
                     extra_hosts=list(os_runtime_cfg.config.get("extra_hosts", [])),
+                    network_mode=str(os_runtime_cfg.config.get("network_mode", "bridge")),
+                    allow_runtime_env=bool(
+                        os_runtime_cfg.config.get("allow_runtime_env", True)
+                    ),
                 )
 
         # ── Persistence (from integrations.persistence.workflows) ────────────
@@ -206,5 +241,24 @@ class CompositionService:
             hive_mind_provider=hive_mind_provider,
             licensing=LicensingRuntime(
                 license_key=snapshot.licensing.license_key,
+            ),
+            watchers=list(snapshot.watchers),
+            execution=ExecutionRuntime(
+                role=execution_config.role,
+                instance_name=worker_config.instance_name,
+                capabilities=tuple(
+                    sorted({item.strip() for item in worker_config.capabilities if item.strip()})
+                ),
+                concurrency=worker_config.concurrency,
+                poll_interval_seconds=worker_config.poll_interval_seconds,
+                lease_seconds=worker_config.lease_seconds,
+                heartbeat_seconds=worker_config.heartbeat_seconds,
+                retry_base_seconds=worker_config.retry_base_seconds,
+                retry_max_seconds=worker_config.retry_max_seconds,
+                stream=ExecutionStreamRuntime(
+                    transport=stream_config.transport,
+                    url=stream_config.url,
+                    channel=stream_config.channel.strip(),
+                ),
             ),
         )

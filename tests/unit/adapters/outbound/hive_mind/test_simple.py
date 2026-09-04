@@ -29,26 +29,6 @@ def _turn(nr: int = 1) -> TurnSummary:
 # Directives
 # ---------------------------------------------------------------------------
 
-def test_set_directive_and_get() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de")
-    assert c.get_directives()["lang"] == "de"
-
-
-def test_set_directive_last_write_wins() -> None:
-    c = _coordinator()
-    c.set_directive("lang", "de")
-    c.set_directive("lang", "en")
-    assert c.get_directives()["lang"] == "en"
-
-
-def test_get_directives_list() -> None:
-    c = _coordinator()
-    c.set_directive("tone", "formal")
-    lst = c.get_directives_list()
-    assert len(lst) == 1
-    assert lst[0].key == "tone"
-
 
 # ---------------------------------------------------------------------------
 # Conversation
@@ -149,7 +129,6 @@ def test_finish_task_clears_active_task() -> None:
 def test_get_context_structure() -> None:
     c   = _coordinator()
     ctx = c.get_context(["x"])
-    assert "directives" in ctx
     assert "recent_turns" in ctx
     assert "known_results" in ctx
 

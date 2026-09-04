@@ -5,10 +5,25 @@ from __future__ import annotations
 
 import base64
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
+from nlght.adapters.outbound.model._messages import (
+    serialize_caller_instruction,
+    serialize_untrusted_context,
+)
+from nlght.core.model.messages import (
+    AssistantMessage,
+    CallerInstructionMessage,
+    CanonicalMessage,
+    MessageLike,
+    ToolResultMessage,
+    TrustedInstructionMessage,
+    UntrustedContextMessage,
+    UserMessage,
+    append_canonical_tool_turn,
+)
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -36,6 +51,48 @@ _CONTEXT_WINDOWS: dict[str, int] = {
     "gemini-1.0-pro": 32_768,
 }
 _DEFAULT_CONTEXT_WINDOW = 1_048_576
+_SYNTHETIC_FUNCTION_CALL_SIGNATURE = b"skip_thought_signature_validator"
+
+
+def _to_google_wire_messages(messages: Sequence[MessageLike]) -> list[dict[str, Any]]:
+    """Choose Gemini authority roles before native Content/Part conversion."""
+
+    lowered: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            lowered.append(dict(message))
+        elif isinstance(message, TrustedInstructionMessage):
+            lowered.append({"role": "system", "content": message.content})
+        elif isinstance(message, CallerInstructionMessage):
+            lowered.append({"role": "user", "content": serialize_caller_instruction(message)})
+        elif isinstance(message, UserMessage):
+            lowered.append({"role": "user", "content": message.content, **dict(message.attributes)})
+        elif isinstance(message, AssistantMessage):
+            wire = {"role": "assistant", "content": message.content, **dict(message.attributes)}
+            if message.tool_calls:
+                wire["tool_calls"] = [
+                    {
+                        "function": {
+                            "name": call.name,
+                            "arguments": dict(call.arguments),
+                        },
+                        **dict(call.provider_metadata),
+                    }
+                    for call in message.tool_calls
+                ]
+            lowered.append(wire)
+        elif isinstance(message, ToolResultMessage):
+            wire = {"role": message.original_role, "content": message.content, **dict(message.attributes)}
+            if message.tool_call_id:
+                wire["tool_call_id"] = message.tool_call_id
+            if message.name:
+                wire["name"] = message.name
+            lowered.append(wire)
+        elif isinstance(message, UntrustedContextMessage):
+            lowered.append({"role": "user", "content": serialize_untrusted_context(message)})
+        else:
+            raise TypeError(f"unsupported Google canonical message type '{type(message).__name__}'")
+    return lowered
 
 
 def _to_google_contents(
@@ -74,7 +131,7 @@ def _to_google_contents(
             text = m.get("content") or ""
             if text:
                 parts.append({"text": text})
-            for tc in m["tool_calls"]:
+            for call_index, tc in enumerate(m["tool_calls"]):
                 fn = tc.get("function", {})
                 part: dict[str, Any] = {
                     "function_call": {
@@ -83,12 +140,16 @@ def _to_google_contents(
                     },
                 }
                 # Gemini 3.x requires the model's thought_signature to be echoed
-                # back on the function_call part; it rides through the canonical
-                # tool-turn as base64 (see append_ollama_native_tool_turn) and is
-                # decoded back to the bytes the SDK originally handed us.
+                # back on the first function_call part. Provider-originated calls
+                # carry it through the canonical turn as base64. A canonical call
+                # imported from another provider or constructed by the runtime has
+                # no genuine signature, so use Google's documented validator-skip
+                # marker for that first synthetic call only.
                 ts_b64 = tc.get("thought_signature")
                 if ts_b64:
                     part["thought_signature"] = base64.b64decode(ts_b64)
+                elif call_index == 0:
+                    part["thought_signature"] = _SYNTHETIC_FUNCTION_CALL_SIGNATURE
                 parts.append(part)
             raw_contents.append({"role": "model", "parts": parts})
             i += 1
@@ -404,7 +465,13 @@ class BoundGoogleModelClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_google_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
                 messages=messages,
@@ -504,12 +571,13 @@ class BoundGoogleModelClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_google_wire_messages(messages)
         from google.genai import types as _types  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
         system_text, initial_contents = _to_google_contents(messages)
@@ -677,16 +745,9 @@ class BoundGoogleModelClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        """Append in canonical (Ollama-style) shape — ``_to_google_contents``
-        lowers it to Gemini's function_call/function_response parts on the next call.
-        """
-        from nlght.adapters.outbound.model._tool_helpers import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            append_ollama_native_tool_turn,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        )
-
-        return append_ollama_native_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

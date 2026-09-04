@@ -15,6 +15,7 @@ from integration._helpers import seed_policy, seed_resource
 from nlght.adapters.outbound.access_policy.rule_engine import AccessRuleEngine
 from nlght.adapters.outbound.persistence.access_rule_repository import SqlAlchemyAccessRuleRepository
 from nlght.adapters.outbound.playbooks.catalog import PlaybookCatalogBuilder
+from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
 from nlght.adapters.outbound.tools.catalog import ToolCatalogBuilder
 from nlght.adapters.outbound.tools.loader import ToolLoader
 from nlght.core.entry.context import RequestContext
@@ -29,7 +30,14 @@ class _EchoTool(ToolBase):
 
     @classmethod
     def signatures(cls) -> list[ToolSignature]:
-        return [ToolSignature(name="echo", description="Echo.", method_name="run")]
+        return [
+            ToolSignature(
+                name="echo",
+                description="Echo.",
+                method_name="run",
+                action=READ_REQUEST,
+            )
+        ]
 
     async def run(self) -> str:
         return "echo"
@@ -61,7 +69,8 @@ def _tool_builder(sqlite_engine, resource_repo, engine: AccessRuleEngine) -> Too
     return ToolCatalogBuilder(
         loader=loader,
         resource_repository=resource_repo,
-        access_policy=engine.for_tools(),
+        resource_access_policy=engine.for_resources(),
+        tool_access_policy=engine.for_tools(),
     )
 
 
@@ -77,7 +86,7 @@ async def test_tool_catalog_unrestricted_without_rules(sqlite_engine, session_fa
 async def test_tool_catalog_filters_by_model_rule(sqlite_engine, session_factory, resource_repo) -> None:
     await seed_resource(session_factory, kind="echo", name="echo-tool")
     await seed_policy(
-        session_factory, "tool", "echo-tool",
+        session_factory, "resource", "echo/echo-tool",
         conditions={"model": ["llama3"]},
     )
     builder = _tool_builder(sqlite_engine, resource_repo, _engine_for(sqlite_engine))
@@ -91,9 +100,9 @@ async def test_tool_catalog_filters_by_model_rule(sqlite_engine, session_factory
 
 async def test_tool_catalog_deny_rule_wins_over_allow(sqlite_engine, session_factory, resource_repo) -> None:
     await seed_resource(session_factory, kind="echo", name="echo-tool")
-    await seed_policy(session_factory, "tool", "*", effect="allow")
+    await seed_policy(session_factory, "resource", "*", effect="allow")
     await seed_policy(
-        session_factory, "tool", "echo-*", effect="deny", priority=10,
+        session_factory, "resource", "echo/echo-*", effect="deny", priority=10,
         conditions={"header:x-org": ["blocked"]},
     )
     builder = _tool_builder(sqlite_engine, resource_repo, _engine_for(sqlite_engine))
@@ -108,7 +117,7 @@ async def test_tool_catalog_deny_rule_wins_over_allow(sqlite_engine, session_fac
 async def test_disabled_rule_is_ignored(sqlite_engine, session_factory, resource_repo) -> None:
     await seed_resource(session_factory, kind="echo", name="echo-tool")
     await seed_policy(
-        session_factory, "tool", "echo-tool", effect="deny", enabled=False,
+        session_factory, "resource", "echo/echo-tool", effect="deny", enabled=False,
     )
     builder = _tool_builder(sqlite_engine, resource_repo, _engine_for(sqlite_engine))
 

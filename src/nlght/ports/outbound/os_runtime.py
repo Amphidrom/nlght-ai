@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from nlght.core.tools.action import ExecutionCapabilities
+
 if TYPE_CHECKING:
     pass
 
@@ -84,4 +86,8 @@ class OsRuntime(Protocol):
           ``("powershell", "-Command")`` on Windows
           ``("sh", "-c")`` on Linux / macOS / Docker
         """
+        ...
+
+    def security_capabilities(self) -> ExecutionCapabilities:
+        """Return guarantees enforced by this runtime, never operator intent."""
         ...

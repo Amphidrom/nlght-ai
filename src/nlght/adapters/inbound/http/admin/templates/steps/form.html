@@ -20,7 +20,11 @@
     </label>
     <label>
       Type <small>(maps to StepBase.TYPE)</small>
-      <input type="text" name="type" value="{{ step.type if step else '' }}" required placeholder="e.g. rag_sample"/>
+      <input type="text" name="type" id="step-type" list="step-type-list" value="{{ step.type if step else '' }}" required placeholder="e.g. rag_sample"/>
+      <datalist id="step-type-list">
+        {% for known in step_types %}<option value="{{ known.type }}">{{ known.doc }}</option>{% endfor %}
+      </datalist>
+      <small id="step-type-doc" class="muted"></small>
     </label>
     <label>
       Position <small>(execution order, unique within version)</small>
@@ -45,14 +49,143 @@
       </label>
     </div>
   </div>
-  <label style="margin-top:1rem">
-    Config <small>(JSON — available as <code>self.config</code> in the step's <code>run()</code>)</small>
-    <textarea name="config_json" rows="8" placeholder='{
+  <fieldset id="step-options" style="margin-top:1rem;display:none">
+    <legend>Configuration</legend>
+    <div id="step-options-fields" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem"></div>
+    <small class="muted">
+      These fields are declared by the step itself. Anything it does not declare stays editable
+      as JSON below.
+    </small>
+  </fieldset>
+
+  <details id="step-config-raw" style="margin-top:1rem" {% if not step_types %}open{% endif %}>
+    <summary>Config as JSON</summary>
+    <label>
+      <small>Available as <code>self.config</code> in the step's <code>run()</code>.</small>
+      <textarea name="config_json" id="config-json" rows="8" placeholder='{
   "model_provider": "ollama",
   "system_prompt": "You are a helpful assistant."
 }'>{{ step.config | tojson(indent=2) if step else '{}' }}</textarea>
-  </label>
-  <div style="display:flex;gap:1rem;margin-top:1rem">
+    </label>
+  </details>
+
+  <script id="step-type-catalogue" type="application/json">{{ step_types | tojson }}</script>
+  <script>
+  (function () {
+    const catalogue = JSON.parse(document.getElementById("step-type-catalogue").textContent || "[]");
+    const byType = Object.fromEntries(catalogue.map((entry) => [entry.type, entry]));
+    const typeInput = document.getElementById("step-type");
+    const doc = document.getElementById("step-type-doc");
+    const box = document.getElementById("step-options");
+    const fields = document.getElementById("step-options-fields");
+    const json = document.getElementById("config-json");
+    const form = typeInput.closest("form");
+
+    function currentConfig() {
+      try { return JSON.parse(json.value || "{}"); } catch (e) { return {}; }
+    }
+
+    // Keys the step does not declare must survive editing, so an operator can
+    // still set something the UI does not know about.
+    function undeclaredKeys(entry, config) {
+      const declared = new Set((entry ? entry.options : []).map((o) => o.name));
+      return Object.fromEntries(Object.entries(config).filter(([k]) => !declared.has(k)));
+    }
+
+    function render() {
+      const entry = byType[typeInput.value];
+      doc.textContent = entry ? entry.doc : "";
+      fields.replaceChildren();
+      if (!entry || !entry.options.length) { box.style.display = "none"; return; }
+      box.style.display = "";
+      const config = currentConfig();
+
+      for (const option of entry.options) {
+        const label = document.createElement("label");
+        const title = document.createElement("span");
+        title.textContent = option.name + (option.required ? " *" : "");
+        label.appendChild(title);
+        if (option.description) {
+          const hint = document.createElement("small");
+          hint.textContent = " " + option.description;
+          label.appendChild(hint);
+        }
+
+        const value = config[option.name];
+        let input;
+        if (option.choices && option.choices.length) {
+          input = document.createElement("select");
+          for (const choice of option.choices) {
+            const opt = document.createElement("option");
+            opt.value = String(choice);
+            opt.textContent = String(choice);
+            input.appendChild(opt);
+          }
+          if (value !== undefined) input.value = String(value);
+        } else if (option.type === "boolean") {
+          input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = value === undefined ? Boolean(option.default) : Boolean(value);
+        } else if (option.type === "object" || option.type === "array") {
+          input = document.createElement("textarea");
+          input.rows = 3;
+          input.placeholder = option.placeholder || "";
+          input.value = value === undefined
+            ? (option.default === null || option.default === undefined ? "" : JSON.stringify(option.default))
+            : JSON.stringify(value);
+        } else {
+          input = document.createElement("input");
+          input.type = option.type === "string" ? "text" : "number";
+          if (option.type === "number") input.step = "any";
+          input.placeholder = option.placeholder
+            || (option.default === null || option.default === undefined ? "" : String(option.default));
+          if (value !== undefined) input.value = String(value);
+        }
+        input.dataset.option = option.name;
+        input.dataset.optionType = option.type;
+        label.appendChild(input);
+        fields.appendChild(label);
+      }
+    }
+
+    function collect() {
+      const entry = byType[typeInput.value];
+      if (!entry || !entry.options.length) return;
+      const config = undeclaredKeys(entry, currentConfig());
+
+      for (const input of fields.querySelectorAll("[data-option]")) {
+        const name = input.dataset.option;
+        const type = input.dataset.optionType;
+        if (type === "boolean") { config[name] = input.checked; continue; }
+        const raw = input.value.trim();
+        // An empty field means "unset", so the step keeps its own default
+        // rather than receiving an empty string it never expected.
+        if (raw === "") continue;
+        if (type === "object" || type === "array") {
+          try { config[name] = JSON.parse(raw); }
+          catch (e) { throw new Error("Config option '" + name + "' is not valid JSON."); }
+        } else if (type === "number" || type === "integer") {
+          config[name] = Number(raw);
+        } else {
+          config[name] = raw;
+        }
+      }
+      json.value = JSON.stringify(config, null, 2);
+    }
+
+    typeInput.addEventListener("change", render);
+    typeInput.addEventListener("input", render);
+    form.addEventListener("submit", function (event) {
+      try { collect(); }
+      catch (error) {
+        event.preventDefault();
+        alert(error.message);
+      }
+    });
+    render();
+  })();
+  </script>
+  <div class="form-actions">
     <button type="submit">{% if step %}Save changes{% else %}Create step{% endif %}</button>
     <a href="/admin/versions/{{ version_id }}" role="button" class="secondary">Cancel</a>
   </div>

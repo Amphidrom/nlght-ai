@@ -27,10 +27,8 @@ from nlght.core.hive_mind.models import (
     ScoredResult,
     SessionSnapshot,
     WorkingAtom,
-    _de_directive,
     _de_result,
     _de_turn,
-    _ser_directive,
     _ser_result,
     _ser_turn,
 )
@@ -139,7 +137,10 @@ def _ser_atom(a: WorkingAtom) -> dict[str, Any]:
         "atom_type":        str(a.atom_type),
         "content":          a.content,
         "task_id":          a.task_id,
+        "entities":         list(a.entities),
         "tags":             list(a.tags),
+        "key":              a.key,
+        "kind":             a.kind,
         "promote_to_parent": a.promote_to_parent,
         "created_at":       a.created_at.isoformat(),
     }
@@ -150,7 +151,10 @@ def _de_atom(d: dict[str, Any]) -> WorkingAtom:
         atom_type         = d["atom_type"],
         content           = d["content"],
         task_id           = d["task_id"],
+        entities          = list(d.get("entities", []) or []),
         tags              = list(d.get("tags", []) or []),
+        key               = d.get("key", ""),
+        kind              = d.get("kind", ""),
         promote_to_parent = d.get("promote_to_parent", False),
     )
     a.id         = d["id"]
@@ -166,15 +170,24 @@ def _ser_scored_atom(sa: ScoredAtom) -> dict[str, Any]:
     return {
         "atom":  _ser_atom(sa.atom),
         "score": _ser_score(sa.score),
-        "depth": sa.depth,
     }
 
 
 def _de_scored_atom(d: dict[str, Any]) -> ScoredAtom:
+    """A scored atom, ignoring a `depth` an older snapshot may still carry.
+
+    It was a second, score-derived idea of how fully to render something,
+    computed from the relevance total and read only by this dump. The real
+    answer is an element's representations and the reduction that chooses
+    between them (ADR-0054), and keeping both invited somebody to reach for the
+    shortcut and bypass retention and budget entirely.
+
+    Unread rather than rejected: the key was optional on the way in before it was
+    removed, so a snapshot written by any version deserialises either way.
+    """
     return ScoredAtom(
         atom  = _de_atom(d["atom"]),
         score = _de_score(d["score"]),
-        depth = d.get("depth", 2),
     )
 
 
@@ -223,7 +236,6 @@ def _ser_mental_model(m: MentalModel) -> dict[str, Any]:
         "turn_id":       m.turn_id,
         "built_at":      m.built_at.isoformat(),
         "is_valid":      m.is_valid,
-        "directives":    [_ser_directive(d) for d in m.directives],
         "recent_turns":  [_ser_turn(t) for t in m.recent_turns],
         "known_results": [_ser_scored_result(sr) for sr in m.known_results],
         "active_atoms":  [_ser_scored_atom(sa) for sa in m.active_atoms],
@@ -239,7 +251,11 @@ def _de_mental_model(d: dict[str, Any]) -> MentalModel:
         turn_id       = d["turn_id"],
         built_at      = datetime.fromisoformat(d["built_at"]),
         is_valid      = d.get("is_valid", True),
-        directives    = [_de_directive(x) for x in d.get("directives", [])],
+        # A cached mental model reaches the model as untrusted context and never
+        # as an instruction — ADR-0066 removed that path, and nothing here
+        # restores it. What this filter adds is the second layer: a value that
+        # did not parse is not carried at all, so it is not even quoted data
+        # (ADR-0067).
         recent_turns  = [_de_turn(x)      for x in d.get("recent_turns", [])],
         known_results = [_de_scored_result(x) for x in d.get("known_results", [])],
         active_atoms  = [_de_scored_atom(x)   for x in d.get("active_atoms", [])],

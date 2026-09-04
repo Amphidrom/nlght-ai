@@ -31,8 +31,10 @@ from model_client_suite import (  # noqa: F401
     test_call_returns_assistant_result,
     test_native_tool_loop_call_executes_tool,
     test_native_tool_loop_stream_executes_tool,
+    test_prompt_injection_corpus_is_observational,
     test_step_driven_tool_loop_round_trip,
     test_stream_yields_tokens_and_done,
+    test_untrusted_context_is_readable_without_being_an_instruction,
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.local_e2e]
@@ -87,3 +89,8 @@ def _ollama_local_backend():
 @pytest.fixture
 def backend(request):
     return _ollama_local_backend()
+
+
+@pytest.fixture
+def provider_name() -> str:
+    return "ollama-local"

@@ -28,7 +28,7 @@ import time
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
-from nlght.core.access.rule import AccessRule, SubjectType
+from nlght.core.access.rule import AccessRule, SubjectType, tool_subject
 from nlght.ports.outbound.access_rule_repository import AccessRuleRepository
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_KNOWN_CONDITION_KEYS = ("model", "client_host")
+_KNOWN_CONDITION_KEYS = ("model", "client_host", "workflow")
 _HEADER_PREFIX = "header:"
 
 
@@ -55,6 +55,9 @@ class AccessRuleEngine:
         self._cache: list[AccessRule] | None = None
         self._cache_at: float = 0.0
         self._lock = asyncio.Lock()
+
+    def for_resources(self) -> ResourceRuleAccessPolicy:
+        return ResourceRuleAccessPolicy(self)
 
     def for_tools(self) -> ToolRuleAccessPolicy:
         return ToolRuleAccessPolicy(self)
@@ -132,6 +135,8 @@ class AccessRuleEngine:
             return model
         if key == "client_host":
             return caller.client_host if caller is not None else None
+        if key == "workflow":
+            return caller.workflow if caller is not None else None
         if key.startswith(_HEADER_PREFIX):
             if caller is None:
                 return None
@@ -159,8 +164,13 @@ class AccessRuleEngine:
             return self._cache
 
 
-class ToolRuleAccessPolicy:
-    """ToolAccessPolicy facade — subject is the tool resource's name."""
+class ResourceRuleAccessPolicy:
+    """ResourceAccessPolicy facade — subject is the resource's address.
+
+    Authorizes the resource as a whole: whether this caller may activate it at
+    all. That is the only question for a resource used inside a workflow step,
+    and the first of two for one whose signatures a model may call.
+    """
 
     def __init__(self, engine: AccessRuleEngine) -> None:
         self._engine = engine
@@ -171,7 +181,33 @@ class ToolRuleAccessPolicy:
         caller: RequestContext | None,
         model: str | None,
     ) -> bool:
-        return await self._engine.decide("tool", resource.name, caller, model)
+        return await self._engine.decide("resource", resource.address, caller, model)
+
+
+class ToolRuleAccessPolicy:
+    """ToolAccessPolicy facade — subject is one signature of one resource.
+
+    This used to decide on `resource.name`, which meant a rule named a tool and
+    authorized a whole resource. It now decides on
+    `<kind>/<name>::<signature>`, so a rule can allow one operation of one
+    activation without allowing the rest.
+
+    It is the second of two checks, never the only one: a resource the caller
+    may not activate offers nothing to allow, and no tool rule can put it back.
+    """
+
+    def __init__(self, engine: AccessRuleEngine) -> None:
+        self._engine = engine
+
+    async def is_allowed(
+        self,
+        resource: ResourceDef,
+        signature_name: str,
+        caller: RequestContext | None,
+        model: str | None,
+    ) -> bool:
+        subject = tool_subject(resource.address, signature_name)
+        return await self._engine.decide("tool", subject, caller, model)
 
 
 class ModelRuleAccessPolicy:

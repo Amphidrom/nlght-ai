@@ -1,0 +1,20 @@
+# Advisory exceptions for the dependency vulnerability gate (ADR-0070).
+#
+# The list is empty because the baseline is zero, and that is the normal state.
+# An entry here says: this advisory is known, somebody looked at whether this
+# product can reach it, and the answer is recorded with a date by which the
+# judgement must be made again.
+#
+# Every entry needs all five fields:
+#
+#   - advisory: PYSEC-2026-3552        one concrete id — never a package wildcard
+#     package: cryptography            the package the finding is reported against
+#     reason: >                        why this product is not exposed, in prose
+#       The affected API is not reachable: cryptography is used only for Ed25519
+#       signature verification and no code path touches PKCS#7.
+#     expires: 2026-10-01              the day the exception stops working
+#     owner: security                  who answers for it
+#
+# An expired exception turns the gate red. That is the point: an exception is a
+# postponed decision, not a permanent one.
+exceptions: []

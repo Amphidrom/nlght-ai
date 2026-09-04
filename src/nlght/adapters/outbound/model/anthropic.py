@@ -4,13 +4,27 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
+from nlght.adapters.outbound.model._messages import (
+    serialize_caller_instruction,
+    serialize_untrusted_context,
+)
 from nlght.adapters.outbound.model._tool_helpers import (
-    append_ollama_native_tool_turn,
     contract_to_openai_tool,
     terminal_tool_names,
+)
+from nlght.core.model.messages import (
+    AssistantMessage,
+    CallerInstructionMessage,
+    CanonicalMessage,
+    MessageLike,
+    ToolResultMessage,
+    TrustedInstructionMessage,
+    UntrustedContextMessage,
+    UserMessage,
+    append_canonical_tool_turn,
 )
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
@@ -39,6 +53,47 @@ _CONTEXT_WINDOWS: dict[str, int] = {
     "claude-3-sonnet-20240229": 200_000,
 }
 _DEFAULT_CONTEXT_WINDOW = 200_000
+
+
+def _to_anthropic_wire_messages(messages: Sequence[MessageLike]) -> list[dict[str, Any]]:
+    """Choose Anthropic authority roles before native content-block conversion."""
+
+    lowered: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            lowered.append(dict(message))
+        elif isinstance(message, TrustedInstructionMessage):
+            lowered.append({"role": "system", "content": message.content})
+        elif isinstance(message, CallerInstructionMessage):
+            lowered.append({"role": "user", "content": serialize_caller_instruction(message)})
+        elif isinstance(message, UserMessage):
+            lowered.append({"role": "user", "content": message.content, **dict(message.attributes)})
+        elif isinstance(message, AssistantMessage):
+            wire = {"role": "assistant", "content": message.content, **dict(message.attributes)}
+            if message.tool_calls:
+                wire["tool_calls"] = [
+                    {
+                        "function": {
+                            "name": call.name,
+                            "arguments": dict(call.arguments),
+                        },
+                        **dict(call.provider_metadata),
+                    }
+                    for call in message.tool_calls
+                ]
+            lowered.append(wire)
+        elif isinstance(message, ToolResultMessage):
+            wire = {"role": message.original_role, "content": message.content, **dict(message.attributes)}
+            if message.tool_call_id:
+                wire["tool_call_id"] = message.tool_call_id
+            if message.name:
+                wire["name"] = message.name
+            lowered.append(wire)
+        elif isinstance(message, UntrustedContextMessage):
+            lowered.append({"role": "user", "content": serialize_untrusted_context(message)})
+        else:
+            raise TypeError(f"unsupported Anthropic canonical message type '{type(message).__name__}'")
+    return lowered
 
 
 def _split_messages(
@@ -372,7 +427,13 @@ class BoundAnthropicModelClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_anthropic_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
                 messages=messages,
@@ -392,7 +453,8 @@ class BoundAnthropicModelClient(ModelClient):
         anthropic_tools = [_to_anthropic_tool(t) for t in openai_tools] if openai_tools else None
         terminal_names = terminal_tool_names(self._tool_catalog)
 
-        system, current_messages = _split_messages(_convert_messages_for_anthropic(messages))
+        system, unprivileged_messages = _split_messages(messages)
+        current_messages = _convert_messages_for_anthropic(unprivileged_messages)
         input_t = output_t = 0
 
         for _round in range(10):
@@ -455,12 +517,13 @@ class BoundAnthropicModelClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_anthropic_wire_messages(messages)
         # Derive tool definitions: explicit > catalog > none
         effective_tools = tools
         if effective_tools is None and self._tool_catalog is not None:
@@ -469,8 +532,8 @@ class BoundAnthropicModelClient(ModelClient):
 
         if effective_tools:
             anthropic_tools = [_to_anthropic_tool(t) for t in effective_tools]
-            converted = _convert_messages_for_anthropic(messages)
-            system, current_messages = _split_messages(converted)
+            system, unprivileged_messages = _split_messages(messages)
+            current_messages = _convert_messages_for_anthropic(unprivileged_messages)
             anthropic_tool_choice = _to_anthropic_tool_choice(tool_choice) if tool_choice is not None else None
         else:
             anthropic_tools = None
@@ -580,12 +643,9 @@ class BoundAnthropicModelClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        """Append in canonical (Ollama-style) shape — ``_convert_messages_for_anthropic``
-        converts it to Anthropic's tool_use/tool_result block format on the next call.
-        """
-        return append_ollama_native_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

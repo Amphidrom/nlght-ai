@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
-from nlght.core.hive_mind.models import ConflictReport, Directive, DirectivePriority, SessionResult, TurnSummary, WorkingAtom, WriteIntent
+from nlght.core.hive_mind.models import ConflictReport, SessionResult, TurnSummary, WorkingAtom, WriteIntent
 
 T = TypeVar("T")
 
@@ -38,23 +38,12 @@ class StoreCoordinator(Protocol):
     Absence (``None`` on ``WorkflowStepContext``) is valid — the step
     machine runs without session memory.
 
-    In-memory-only objects (MentalModelCache, …) are NOT part of this port.
-    Access them via typed slot accessors in ``nlght.core.hive_mind.slots``.
+    Coordinator-scoped extension state uses the generic ``get_slot`` and
+    ``set_slot`` methods. Consumers own their namespaced keys and value types;
+    persistence depends on the selected coordinator implementation.
 
     See: ADR-0017
     """
-
-    def set_directive(
-        self,
-        key:      str,
-        value:    str,
-        source:   str              = "inferred",
-        priority: DirectivePriority = DirectivePriority.NORMAL,
-    ) -> ConflictReport | None: ...
-
-    def get_directives(self) -> dict[str, str]: ...
-
-    def get_directives_list(self) -> list[Directive]: ...
 
     def record_turn(self, turn: TurnSummary) -> None: ...
 
@@ -100,12 +89,13 @@ class StoreCoordinator(Protocol):
     def load_artifact(self, artifact_id: str) -> ArtifactContent | None: ...
 
     # ------------------------------------------------------------------
-    # Generic slot API — extension point for in-memory-only concepts.
+    # Generic slot API — extension point for coordinator-scoped state.
     #
     # ``get_slot`` lazily initialises the slot via ``default_factory``
-    # the first time a key is accessed.  Steps never extend this port
-    # for new in-memory concepts — they add a typed accessor to
-    # ``nlght.core.hive_mind.slots`` instead.
+    # the first time a key is accessed. Consumers own their namespaced
+    # keys and value types. Persistence is implementation-dependent:
+    # the simple coordinator is process-local, while Hive Mind includes
+    # JSON-serialisable values in its session snapshot.
     # ------------------------------------------------------------------
 
     def get_slot(self, key: str, default_factory: Callable[[], T]) -> T: ...
@@ -136,5 +126,28 @@ class StoreCoordinatorFactory(Protocol):
     def exists(self, session_id: str) -> bool: ...
 
     def get_or_create(self, session_id: str) -> StoreCoordinator: ...
+
+    def owner_of(self, session_id: str) -> str | None:
+        """Which principal owns this session, if it exists and has an owner.
+
+        `None` for a session that does not exist **and** for one written before
+        ownership was recorded. The two are told apart with `exists`, because
+        they mean opposite things: the first may be created, the second may not
+        be adopted (ADR-0061).
+
+        On the factory rather than on `SessionBackend` deliberately. One factory
+        keeps its sessions in memory and never reaches a backend at all, so a
+        check placed underneath would be bypassed entirely by a cache hit —
+        which is the exact path an attacker with a session id would take.
+        """
+        ...
+
+    def claim_ownership(self, session_id: str, owner_principal_id: str) -> None:
+        """Record who a newly created session belongs to.
+
+        Only ever called for a session being created. An existing owner is never
+        overwritten: a session changing hands is not something a request may do.
+        """
+        ...
 
     def save(self, session_id: str, coordinator: StoreCoordinator) -> None: ...

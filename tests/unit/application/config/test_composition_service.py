@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
+import pytest
+
 from nlght.application.config.composition_service import CompositionService
 from nlght.core.config.runtime_context import (
     DockerOsRuntimeSubsystemRuntime,
@@ -12,6 +14,9 @@ from nlght.core.config.runtime_context import (
     PersistenceSubsystemRuntime,
 )
 from nlght.core.config.snapshot import (
+    ExecutionConfig,
+    ExecutionStreamConfig,
+    ExecutionWorkerConfig,
     GatewayConfig,
     HiveMindPersistenceConfig,
     HiveMindProviderConfig,
@@ -36,7 +41,15 @@ def test_compose_maps_registries_and_runtime_objects() -> None:
             GatewayConfig(name="custom", kind="custom", enabled=True, config={"k": "v"}),
             GatewayConfig(name="off", kind="custom", enabled=False),
         ],
-        os_runtime=OsRuntimeConfig(kind="docker", enabled=True, config={"base_image": "python:3.12"}),
+        os_runtime=OsRuntimeConfig(
+            kind="docker",
+            enabled=True,
+            config={
+                "base_image": "python:3.12",
+                "network_mode": "none",
+                "allow_runtime_env": False,
+            },
+        ),
         integrations=IntegrationsSnapshot(
             model_providers=[
                 ModelProviderConfig(
@@ -88,6 +101,8 @@ def test_compose_maps_registries_and_runtime_objects() -> None:
 
     assert isinstance(context.os_runtime, DockerOsRuntimeSubsystemRuntime)
     assert context.os_runtime.base_image == "python:3.12"
+    assert context.os_runtime.network_mode == "none"
+    assert context.os_runtime.allow_runtime_env is False
 
     assert context.persistence is not None
     assert isinstance(context.persistence, PersistenceSubsystemRuntime)
@@ -144,3 +159,92 @@ def test_compose_local_os_runtime() -> None:
     assert isinstance(context.os_runtime, LocalOsRuntimeSubsystemRuntime)
     assert context.os_runtime.workdir == "/tmp"
     assert context.os_runtime.workspace_path == "/tmp/ws"
+
+
+def test_compose_validates_and_normalizes_execution_runtime() -> None:
+    snapshot = PlatformConfigSnapshot(
+        execution=ExecutionConfig(
+            role="worker",
+            worker=ExecutionWorkerConfig(
+                capabilities=[" parser:pdf ", "parser:pdf", "projection:qdrant"],
+                concurrency=3,
+                lease_seconds=20,
+                heartbeat_seconds=5,
+            ),
+        )
+    )
+
+    runtime = CompositionService().compose(snapshot).execution
+
+    assert runtime.role == "worker"
+    assert runtime.capabilities == ("parser:pdf", "projection:qdrant")
+    assert runtime.concurrency == 3
+
+
+@pytest.mark.parametrize(
+    ("worker", "message"),
+    [
+        (ExecutionWorkerConfig(concurrency=0), "concurrency"),
+        (ExecutionWorkerConfig(poll_interval_seconds=0), "poll_interval"),
+        (ExecutionWorkerConfig(lease_seconds=0), "lease_seconds"),
+        (ExecutionWorkerConfig(lease_seconds=10, heartbeat_seconds=10), "heartbeat_seconds"),
+        (ExecutionWorkerConfig(retry_base_seconds=5, retry_max_seconds=4), "retry bounds"),
+    ],
+)
+def test_compose_rejects_invalid_execution_worker_config(
+    worker: ExecutionWorkerConfig,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CompositionService().compose(
+            PlatformConfigSnapshot(execution=ExecutionConfig(worker=worker))
+        )
+
+
+def test_compose_rejects_unknown_execution_role() -> None:
+    with pytest.raises(ValueError, match="execution.role"):
+        CompositionService().compose(
+            PlatformConfigSnapshot(execution=ExecutionConfig(role="scheduler"))
+        )
+
+
+def test_compose_defaults_the_stream_transport_to_in_process() -> None:
+    runtime = CompositionService().compose(PlatformConfigSnapshot()).execution
+
+    assert runtime.stream.transport == "in_process"
+    assert runtime.stream.channel == "nlght_execution_stream"
+
+
+def test_compose_carries_the_configured_stream_transport() -> None:
+    snapshot = PlatformConfigSnapshot(
+        execution=ExecutionConfig(
+            stream=ExecutionStreamConfig(
+                transport="postgres",
+                url="postgresql+asyncpg://stream",
+                channel="  nlght_stream_a  ",
+            )
+        )
+    )
+
+    runtime = CompositionService().compose(snapshot).execution
+
+    assert runtime.stream.transport == "postgres"
+    assert runtime.stream.url == "postgresql+asyncpg://stream"
+    assert runtime.stream.channel == "nlght_stream_a"
+
+
+@pytest.mark.parametrize(
+    ("stream", "message"),
+    [
+        (ExecutionStreamConfig(transport="kafka"), "execution.stream.transport"),
+        (ExecutionStreamConfig(channel="   "), "execution.stream.channel"),
+    ],
+)
+def test_compose_rejects_invalid_stream_config(
+    stream: ExecutionStreamConfig,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        CompositionService().compose(
+            PlatformConfigSnapshot(execution=ExecutionConfig(stream=stream))
+        )

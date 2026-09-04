@@ -3,6 +3,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +16,7 @@ from nlght.adapters.inbound.http.generic_json_adapter import GenericJsonHttpProt
 from nlght.adapters.inbound.http.openai_adapter import OpenAIHttpProtocolAdapter
 from nlght.core.entry.context import RequestContext
 from nlght.core.errors.errors import WorkflowNotFoundError
+from nlght.core.execution import ExecutionStatus
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.protocol.protocol import ProtocolKind
 from nlght.core.signals.signal import Signal
@@ -66,8 +68,10 @@ def _make_invocation(operation: str = "generic_json_request") -> WorkflowInvocat
 class StubGatewayService:
     def __init__(self, invocation: WorkflowInvocation) -> None:
         self._invocation = invocation
+        self.calls: list[dict] = []
 
-    async def process(self, **_) -> WorkflowInvocation:
+    async def process(self, **kwargs) -> WorkflowInvocation:
+        self.calls.append(kwargs)
         return self._invocation
 
 
@@ -76,9 +80,52 @@ class ErrorGatewayService:
         raise WorkflowNotFoundError("no workflow")
 
 
+class StubExecutor:
+    def __init__(self, result=None) -> None:
+        self.executed: list[WorkflowInvocation] = []
+        self._result = result if result is not None else {"ran": True}
+
+    async def execute(self, invocation: WorkflowInvocation):
+        self.executed.append(invocation)
+        return self._result
+
+
+class StubDispatcher:
+    """Submits, and answers what became of it.
+
+    The sync path holds the request open and polls `get_status` until the
+    execution is terminal — a sync call is the same durable run as an async
+    one, it just waits. A stub that only submits leaves that poll with nothing
+    to ask.
+    """
+
+    def __init__(self, result: dict | None = None) -> None:
+        self.submissions = []
+        self._result = result if result is not None else {"ran": True}
+
+    async def submit(self, submission):
+        self.submissions.append(submission)
+        return SimpleNamespace(
+            execution_id=uuid.UUID("11111111-1111-1111-1111-111111111111"),
+            status=SimpleNamespace(value="queued"),
+        )
+
+    async def get_status(self, execution_id):
+        return SimpleNamespace(
+            execution_id=execution_id,
+            status=ExecutionStatus.SUCCEEDED,
+            result=self._result,
+            diagnostics=None,
+        )
+
+
 class StubContainer:
-    def __init__(self, gateway_service) -> None:
+    def __init__(self, gateway_service, workflow_executor=None, dispatcher=None) -> None:
         self.gateway_service = gateway_service
+        if workflow_executor is not None:
+            self.workflow_executor = workflow_executor
+        if dispatcher is not None:
+            self.execution_dispatcher = dispatcher
 
 
 def _make_app(*adapters) -> FastAPI:
@@ -272,3 +319,203 @@ def test_generic_json_returns_404_on_missing_workflow() -> None:
         response = client.post("/anything", json={})
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Generic JSON as the configurable trigger surface
+# ---------------------------------------------------------------------------
+
+
+def test_a_configured_path_names_the_workflow_and_runs_it() -> None:
+    # The one place a workflow that is not a completion can get an endpoint.
+    invocation = _make_invocation("ingest-data")
+    gateway = StubGatewayService(invocation)
+    executor = StubExecutor({"documents": 12})
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/reindex-docs": "ingest-data"}
+        )
+    )
+    app.state.container = StubContainer(gateway, workflow_executor=executor)
+
+    with TestClient(app) as client:
+        response = client.post("/hooks/reindex-docs", json={})
+
+    # Resolution goes through the gateway's existing workflow_name override...
+    assert gateway.calls[0]["workflow_name"] == "ingest-data"
+    # ...and execution through the same executor the other adapters use.
+    assert executor.executed == [invocation]
+    assert response.status_code == 200
+    assert response.json() == {"documents": 12}
+
+
+def test_a_trailing_slash_names_the_same_endpoint() -> None:
+    gateway = StubGatewayService(_make_invocation("ingest-data"))
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/reindex-docs/": "ingest-data"}
+        )
+    )
+    app.state.container = StubContainer(gateway, workflow_executor=StubExecutor())
+
+    with TestClient(app) as client:
+        client.post("/hooks/reindex-docs", json={})
+
+    assert gateway.calls[0]["workflow_name"] == "ingest-data"
+
+
+def test_an_unmapped_path_still_falls_back_to_the_resolved_operation() -> None:
+    gateway = StubGatewayService(_make_invocation("generic_json_request"))
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(workflow_mapping={"/hooks/x": "some-workflow"})
+    )
+    app.state.container = StubContainer(gateway, workflow_executor=StubExecutor())
+
+    with TestClient(app) as client:
+        client.post("/anything/else", json={})
+
+    # No override: the gateway looks the workflow up by trigger.operation.
+    assert gateway.calls[0]["workflow_name"] is None
+
+
+def test_without_a_runtime_the_resolution_is_reported_rather_than_faked() -> None:
+    # A container with no executor cannot run anything; saying so beats
+    # answering as though the workflow had run.
+    invocation = _make_invocation("ingest-data")
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(workflow_mapping={"/hooks/go": "ingest-data"})
+    )
+    app.state.container = StubContainer(StubGatewayService(invocation))
+
+    with TestClient(app) as client:
+        response = client.post("/hooks/go", json={})
+
+    assert response.status_code == 200
+    assert response.json()["workflow"]["name"] == "ingest-data"
+
+
+# ---------------------------------------------------------------------------
+# Sync vs async per endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_an_async_endpoint_queues_the_run_and_answers_202() -> None:
+    invocation = _make_invocation("ingest-data")
+    dispatcher, executor = StubDispatcher(), StubExecutor()
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/reindex": {"workflow": "ingest-data", "mode": "async"}}
+        )
+    )
+    app.state.container = StubContainer(
+        StubGatewayService(invocation), workflow_executor=executor, dispatcher=dispatcher
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/hooks/reindex", json={})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["execution_id"] == "11111111-1111-1111-1111-111111111111"
+    assert body["status"] == "queued"
+    assert body["workflow"] == "ingest-data"
+    # Queued, not run here: the caller is free while a worker does the work.
+    assert executor.executed == []
+
+    submission = dispatcher.submissions[0]
+    assert submission.workflow_id == invocation.workflow.workflow_id
+    assert submission.workflow_version_id == invocation.version.version_id
+    assert submission.trigger is invocation.trigger
+
+
+def test_an_explicit_idempotency_key_is_used_for_the_submission() -> None:
+    # A caller retrying a POST must not start the run a second time.
+    dispatcher = StubDispatcher()
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/reindex": {"workflow": "ingest-data", "mode": "async"}}
+        )
+    )
+    app.state.container = StubContainer(
+        StubGatewayService(_make_invocation("ingest-data")), dispatcher=dispatcher
+    )
+
+    with TestClient(app) as client:
+        client.post("/hooks/reindex", json={}, headers={"Idempotency-Key": "nightly-2026-08-22"})
+        client.post("/hooks/reindex", json={})
+
+    assert dispatcher.submissions[0].idempotency_key == "nightly-2026-08-22"
+    # Without a supplied key the request id stands in, so it is never empty.
+    assert dispatcher.submissions[1].idempotency_key
+
+
+def test_the_adapter_default_mode_applies_to_short_form_entries() -> None:
+    dispatcher = StubDispatcher()
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/a": "ingest-data"}, default_mode="async"
+        )
+    )
+    app.state.container = StubContainer(
+        StubGatewayService(_make_invocation("ingest-data")), dispatcher=dispatcher
+    )
+
+    with TestClient(app) as client:
+        assert client.post("/hooks/a", json={}).status_code == 202
+    assert len(dispatcher.submissions) == 1
+
+
+def test_an_endpoint_may_override_the_default_mode() -> None:
+    executor, dispatcher = StubExecutor({"ran": True}), StubDispatcher()
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/quick": {"workflow": "ingest-data", "mode": "sync"}},
+            default_mode="async",
+        )
+    )
+    app.state.container = StubContainer(
+        StubGatewayService(_make_invocation("ingest-data")),
+        workflow_executor=executor,
+        dispatcher=dispatcher,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/hooks/quick", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"ran": True}
+    # Not zero submissions: with a durable dispatcher configured, sync commits
+    # the run to the queue exactly as async does, so it is claimable, retried
+    # and concurrency-governed either way. The mode decides only who waits —
+    # async answers 202 with an id, sync holds the request open for the result.
+    assert len(dispatcher.submissions) == 1
+
+
+def test_an_async_endpoint_without_a_dispatcher_says_so() -> None:
+    # Silently running it synchronously would hold a connection open for a
+    # workflow the operator asked to be queued.
+    app = _make_app(
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/hooks/a": {"workflow": "ingest-data", "mode": "async"}}
+        )
+    )
+    app.state.container = StubContainer(
+        StubGatewayService(_make_invocation("ingest-data")), workflow_executor=StubExecutor()
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/hooks/a", json={})
+
+    assert response.status_code == 503
+    assert "no execution dispatcher" in response.json()["detail"]
+
+
+def test_a_malformed_endpoint_configuration_is_refused_at_startup() -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        GenericJsonHttpProtocolAdapter(
+            workflow_mapping={"/a": {"workflow": "w", "mode": "eventually"}}
+        )
+    with pytest.raises(ValueError, match="names no workflow"):
+        GenericJsonHttpProtocolAdapter(workflow_mapping={"/a": {"mode": "async"}})
+    with pytest.raises(ValueError, match="must map to a workflow name"):
+        GenericJsonHttpProtocolAdapter(workflow_mapping={"/a": 42})

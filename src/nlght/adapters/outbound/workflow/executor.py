@@ -15,11 +15,22 @@ from typing import TYPE_CHECKING, Any
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.adapters.outbound.signals.streaming import QueuedSignalEmitter
 from nlght.adapters.outbound.workflow.loader import StepLoader
-from nlght.core.errors.errors import WorkflowConfigurationError, WorkflowExecutionError
+from nlght.core.errors.errors import (
+    SessionAccessDeniedError,
+    WorkflowConfigurationError,
+    WorkflowExecutionError,
+)
 from nlght.core.metering.context import MeteringContext
+from nlght.core.model.messages import normalize_workflow_messages
+from nlght.core.session import SessionAccess
 from nlght.core.signals.signal import Signal
 from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
-from nlght.core.workflow.workflow import WorkflowInvocation, WorkflowStepDef
+from nlght.core.workflow.workflow import (
+    WorkflowDef,
+    WorkflowInvocation,
+    WorkflowStepDef,
+)
+from nlght.ports.outbound.execution_dispatcher import ExecutionDispatcher
 from nlght.ports.outbound.signal_emitter import SignalEmitter
 from nlght.ports.outbound.workflow_executor import WorkflowExecutor
 
@@ -30,12 +41,40 @@ if TYPE_CHECKING:
     from nlght.ports.outbound.metering import MeteringPort
     from nlght.ports.outbound.os_runtime import OsRuntime, OsRuntimeFactory
     from nlght.ports.outbound.playbook_catalog import PlaybookCatalogBuilder
-    from nlght.ports.outbound.store_coordinator import StoreCoordinator, StoreCoordinatorFactory
+    from nlght.ports.outbound.store_coordinator import StoreCoordinator
     from nlght.ports.outbound.tool_catalog import ToolCatalogBuilder
 
 logger = logging.getLogger(__name__)
 
-_MAX_HOPS = 20
+# What a workflow gets when it says nothing. Not a limit anyone is stuck with:
+# a workflow sets `max_hops` to whatever its shape needs, and a corpus that
+# takes thousands of steps says so in its own configuration rather than being
+# capped by a number chosen here. Zero switches the guard off entirely.
+_DEFAULT_MAX_HOPS = 20
+
+
+def _hop_budget(workflow: WorkflowDef) -> int | None:
+    """The workflow's hop budget: its own, ours, or none at all.
+
+    ``None`` means unbounded — a deliberate choice a workflow may make, at the
+    price that a step which never stops routing holds its worker for as long as
+    it takes somebody to notice.
+    """
+    configured = workflow.max_hops
+    if configured is None:
+        return _DEFAULT_MAX_HOPS
+    return None if configured == 0 else configured
+
+
+def _budget_message(workflow: str, step: WorkflowStepDef | None, budget: int) -> str:
+    """Say what ran out, where, and what to do about it."""
+    where = f"step '{step.name}'" if step is not None else "an unknown step"
+    return (
+        f"Workflow '{workflow}' stopped at {where} after {budget} steps. Either its verdicts "
+        f"route in a cycle, or it legitimately needs more than {budget} — a step that repeats "
+        f"itself once per document spends one on each. Raise the workflow's max_hops if the work "
+        f"is real; set it to 0 to remove the guard entirely."
+    )
 
 
 class StepMachineWorkflowExecutor(WorkflowExecutor):
@@ -60,18 +99,23 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         tool_catalog_builder: ToolCatalogBuilder | None = None,
         playbook_catalog_builder: PlaybookCatalogBuilder | None = None,
         model_access_policy: ModelAccessPolicy | None = None,
-        coordinator_factory: StoreCoordinatorFactory | None = None,
+        session_access: SessionAccess | None = None,
         os_runtime: OsRuntimeFactory | None = None,
         metering_port: MeteringPort | None = None,
+        dispatcher: ExecutionDispatcher | None = None,
     ) -> None:
         self._loader = loader
         self._model_clients: dict[str, Any] = model_clients or {}
         self._tool_catalog_builder = tool_catalog_builder
         self._playbook_catalog_builder = playbook_catalog_builder
         self._model_access_policy = model_access_policy
-        self._coordinator_factory = coordinator_factory
+        self._session_access = session_access
         self._os_runtime_factory = os_runtime
         self._metering_port = metering_port
+        # Handed to every step context: a step that spreads work across workers
+        # submits its children through this. Absent on a gateway running a
+        # workflow inline in a request.
+        self._dispatcher = dispatcher
         self._active_runs: set[str] = set()
         self._active_runs_lock = threading.Lock()
 
@@ -154,29 +198,39 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         return self._os_runtime_factory.bind(cid)
 
     def _provision_coordinator(self, trigger: Trigger) -> tuple[StoreCoordinator | None, bool]:
-        if self._coordinator_factory is None:
+        if self._session_access is None:
             return None, False
         session_key = trigger.session_key
         if session_key is None:
             # No session key → ephemeral coordinator: runs in-memory, not persisted.
-            return self._coordinator_factory.get_or_create(f"__ephemeral__{trigger.context.correlation_id}"), False
+            return self._session_access.ephemeral(trigger.context.correlation_id), False
+        principal = trigger.context.principal
         try:
-            is_resumed = self._coordinator_factory.exists(session_key)
-            coordinator = self._coordinator_factory.get_or_create(session_key)
+            is_resumed = self._session_access.exists(session_key, principal)
+            coordinator = self._session_access.open(session_key, principal)
             return coordinator, is_resumed
+        except SessionAccessDeniedError:
+            # Never swallowed. The broad catch below exists so a broken session
+            # store degrades into running without memory, which is a reasonable
+            # answer to "the disk is full". It is not a reasonable answer to
+            # "this session is not yours": continuing would serve the request
+            # anyway, just without the data — turning a refusal into a shrug.
+            raise
         except Exception as exc:
             logger.warning("coordinator.provision_failed | error=%s — continuing without coordinator", exc)
             return None, False
 
     def _release_coordinator(self, trigger: Trigger, coordinator: StoreCoordinator | None) -> None:
-        if coordinator is None or self._coordinator_factory is None:
+        if coordinator is None or self._session_access is None:
             return
         if trigger.session_key is None:
             # Ephemeral — discard without saving.
             logger.debug("coordinator.ephemeral.discard | cid=%s", trigger.context.correlation_id)
             return
         try:
-            self._coordinator_factory.save(trigger.session_key, coordinator)
+            self._session_access.save(
+                trigger.session_key, coordinator, trigger.context.principal
+            )
         except Exception as exc:
             logger.warning("coordinator.release_failed | error=%s", exc)
 
@@ -216,7 +270,15 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             s.type: str(s.step_id) for s in steps if s.enabled
         }
 
-        trigger           = invocation.trigger
+        # Stamp the resolved workflow onto the request context once, so every
+        # downstream consumer — tool catalog, model and playbook policies —
+        # can restrict a subject to specific flows via a 'workflow' condition.
+        trigger           = dataclasses.replace(
+            invocation.trigger,
+            context=dataclasses.replace(
+                invocation.trigger.context, workflow=invocation.workflow.name
+            ),
+        )
         payload           = trigger.payload
         auto_save_session = bool(payload.get("auto_save_session", True))
 
@@ -240,6 +302,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
                 caller=caller,
                 store_coordinator=coordinator,
                 workspace=workspace,
+                session_id=trigger.session_key,
             )
             if self._tool_catalog_builder is not None
             else None
@@ -258,7 +321,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             correlation_id=trigger.context.correlation_id,
             trigger=trigger,
             model=str(payload.get("model", "")),
-            messages=list(payload.get("messages", [])),
+            messages=normalize_workflow_messages(payload.get("messages", [])),
             stream=trigger.stream,
             emitter=emitter,
             tools=tool_catalog,
@@ -267,10 +330,17 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             store_coordinator=coordinator,
             os_runtime=os_runtime,
             metering=self._metering_port,
+            execution_id=invocation.execution_id,
+            dispatcher=self._dispatcher,
         )
 
         current_step_id = str(start_steps[0].step_id)
+        # Every move counts, including a step routing back to itself: a workflow
+        # that works through a corpus one document per hop is doing hops, and
+        # says how many it needs through its own `max_hops`.
         hops = 0
+        budget = _hop_budget(invocation.workflow)
+        over_budget_once = False
 
         logger.info(
             "workflow.start | workflow=%s cid=%s",
@@ -283,21 +353,33 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
 
         try:
             while True:
-                if hops >= _MAX_HOPS:
+                if budget is not None and hops >= budget:
                     max_hops_id = type_index.get("max_hops")
-                    if max_hops_id and current_step_id != max_hops_id:
+                    if max_hops_id and not over_budget_once and current_step_id != max_hops_id:
+                        # Hand control to the workflow's own handler — and then
+                        # actually run it. Routing without executing is what the
+                        # earlier `continue` did, which made a configured
+                        # max_hops step dead weight.
                         logger.error(
-                            "workflow.max_hops | cid=%s hops=%d",
-                            ctx.correlation_id, hops,
+                            "workflow.max_hops | cid=%s budget=%d hops=%d",
+                            ctx.correlation_id, budget, hops,
                         )
                         current_step_id = max_hops_id
-                        continue
-                    logger.warning(
-                        "workflow.hard_stop | cid=%s hops=%d",
-                        ctx.correlation_id, hops,
-                    )
-                    request_status = "max_hops"
-                    break
+                        over_budget_once = True
+                        hops = 0
+                    else:
+                        # No handler, or the handler ran out too. Stopping here
+                        # silently would report a half-finished run as a success:
+                        # the caller sees a result, the queue sees no failure, and
+                        # the untouched remainder of the work is never mentioned.
+                        request_status = "max_hops"
+                        raise WorkflowConfigurationError(
+                            _budget_message(
+                                invocation.workflow.name,
+                                steps_by_id.get(current_step_id),
+                                budget,
+                            )
+                        )
 
                 step_def = steps_by_id.get(current_step_id)
                 if step_def is None:
@@ -356,12 +438,16 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
 
                 if (
                     auto_save_session
-                    and self._coordinator_factory is not None
+                    and self._session_access is not None
                     and coordinator is not None
                     and invocation.trigger.session_key is not None
                 ):
                     try:
-                        self._coordinator_factory.save(invocation.trigger.session_key, coordinator)
+                        self._session_access.save(
+                            invocation.trigger.session_key,
+                            coordinator,
+                            invocation.trigger.context.principal,
+                        )
                     except Exception as exc:
                         logger.warning("coordinator.checkpoint_failed | step=%s error=%s", step_def.name, exc)
 
@@ -379,9 +465,9 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
 
                 transitions: dict[str, Any] = step_def.transitions or {}
                 if verdict and verdict in transitions:
-                    current_step_id = str(transitions[verdict])
+                    next_step_id = str(transitions[verdict])
                 elif "DEFAULT" in transitions:
-                    current_step_id = str(transitions["DEFAULT"])
+                    next_step_id = str(transitions["DEFAULT"])
                 else:
                     raise WorkflowConfigurationError(
                         f"Step '{step_def.name}' has no transition for verdict "
@@ -389,6 +475,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
                     )
 
                 hops += 1
+                current_step_id = next_step_id
 
         except Exception:
             request_status = "error"
@@ -440,10 +527,10 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
     ) -> WorkflowStepContext:
         """Resolve and bind a ModelClient for this step into ctx.llm.
 
-        Fetches a TokenBudget via OllamaModelClient.token_budget() so the
-        BoundModelClient can apply the hard-cap safety net (ADR-0012).
-        Budget results are cached per-process — /api/show is called at most
-        once per model.
+        Fetches the selected backend's TokenBudget and passes that exact object
+        to the BoundModelClient so context assembly and the hard-cap safety net
+        share one authority (ADR-0012, ADR-0055). Context-window resolution is
+        provider-specific; Ollama Local caches successful /api/show lookups.
         """
         payload_provider = ctx.trigger.payload.get("model_provider") if ctx.trigger.payload else None
         provider_name = step_config.get("model_provider") or payload_provider

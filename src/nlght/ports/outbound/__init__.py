@@ -12,10 +12,11 @@ Import individual ports directly for minimal coupling:
 from nlght.ports.outbound.access_policy import (
     ModelAccessPolicy,
     PlaybookAccessPolicy,
+    ResourceAccessPolicy,
     ToolAccessPolicy,
 )
 from nlght.ports.outbound.access_rule_repository import AccessRuleRepository
-from nlght.ports.outbound.lexical_store import LexicalResult, LexicalStore
+from nlght.ports.outbound.action_policy import ActionApprovalPort, ActionPolicy
 from nlght.ports.outbound.licensing import LicensingPort
 from nlght.ports.outbound.metering import MeteringPort
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -35,7 +36,6 @@ from nlght.ports.outbound.signal_emitter import SignalEmitter
 from nlght.ports.outbound.store_coordinator import StoreCoordinator, StoreCoordinatorFactory
 from nlght.ports.outbound.tool_catalog import ToolCatalog, ToolContract
 from nlght.ports.outbound.trigger_resolution import TriggerResolver
-from nlght.ports.outbound.vector_store import VectorResult, VectorStore
 from nlght.ports.outbound.workflow_executor import WorkflowExecutor
 from nlght.ports.outbound.workflow_repository import WorkflowRepository
 from nlght.ports.outbound.workspace_manager import WorkspaceManager
@@ -43,8 +43,11 @@ from nlght.ports.outbound.workspace_manager import WorkspaceManager
 __all__ = [
     # Access policies
     "AccessRuleRepository",
+    "ActionApprovalPort",
+    "ActionPolicy",
     "ModelAccessPolicy",
     "PlaybookAccessPolicy",
+    "ResourceAccessPolicy",
     "ToolAccessPolicy",
     # Licensing
     "LicensingPort",
@@ -63,14 +66,10 @@ __all__ = [
     "SessionKeyResolver",
     "SignalEmitter",
     "PlaybookCatalog",
-    "LexicalStore",
-    "LexicalResult",
     "StoreCoordinator",
     "StoreCoordinatorFactory",
     "ToolCatalog",
     "ToolContract",
-    "VectorStore",
-    "VectorResult",
     "TriggerResolver",
     "WorkflowExecutor",
     "WorkflowRepository",

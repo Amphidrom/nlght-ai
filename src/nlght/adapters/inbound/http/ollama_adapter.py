@@ -15,6 +15,7 @@ import httpx2
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from nlght.adapters.inbound.http.streaming import stream_execution_signals
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.adapters.outbound.signals.streaming import QueuedSignalEmitter
 from nlght.core.signals.signal import Signal
@@ -181,7 +182,9 @@ class OllamaHttpProtocolAdapter:
             model = invocation.trigger.payload.get("model", "")
             if invocation.trigger.stream:
                 return StreamingResponse(
-                    _stream_as_ndjson(executor.stream_signals(invocation), model=model),
+                    _stream_as_ndjson(
+                        stream_execution_signals(container, invocation), model=model
+                    ),
                     media_type="application/x-ndjson",
                     headers={
                         "Cache-Control": "no-cache",

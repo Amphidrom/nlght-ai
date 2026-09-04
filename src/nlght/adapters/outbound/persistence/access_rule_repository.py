@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
+from typing import cast, get_args
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -15,7 +15,11 @@ from nlght.ports.outbound.access_rule_repository import AccessRuleRepository
 
 logger = logging.getLogger(__name__)
 
-_SUBJECT_TYPES = {"tool", "model", "playbook"}
+#: Derived from the domain type rather than restated, so a new subject type
+#: cannot be added to `SubjectType` and silently dropped here as malformed —
+#: which is exactly what happened when `resource` was introduced: every rule
+#: naming one was discarded with a warning, and the subject read as ungoverned.
+_SUBJECT_TYPES = frozenset(get_args(SubjectType))
 _EFFECTS = {"allow", "deny"}
 
 

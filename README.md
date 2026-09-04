@@ -2,9 +2,9 @@
 The layer between your app and your LLM — workflows, tools, memory, any provider.
 
 <!-- release-badges:start -->
-[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/tests.svg)
-[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/coverage.svg)
-[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.2/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.2/.github/badges/pypi.svg)
+[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/tests.svg)
+[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/coverage.svg)
+[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/pypi.svg)
 <!-- release-badges:end -->
 
 > **E2E scope note.** The test badge covers the cloud model-client e2e suite
@@ -191,13 +191,23 @@ integrations:
           base_dir: ./.sessions
 ```
 
-Use `SystemPromptBuilder` in your steps to inject session context automatically:
+Use `SystemPromptBuilder` with an explicit `PromptInputPolicy` to select the session context that
+enters the prompt:
 
 ```python
-from nlght.core.hive_mind.system_prompt import SystemPromptBuilder
+from nlght.core.hive_mind.system_prompt import PromptInputPolicy, SystemPromptBuilder
 
 builder = SystemPromptBuilder()
-system  = builder.build(mental_model=model, ego="You are a helpful assistant.", scope="task")
+system = builder.build(
+    mental_model=model,
+    ego="You are a helpful assistant.",
+    input_policy=PromptInputPolicy(
+        include_directive_store=True,
+        include_conversation_store=True,
+        include_working_memory=True,
+        include_session_result_store=True,
+    ),
+)
 ```
 
 ---
@@ -251,6 +261,10 @@ uv sync
 uv run pytest -q -m "not e2e and not integration"
 uv run ruff check src tests
 ```
+
+The default `dev` group installs `nlght-ai[all]`, so local development and CI
+exercise every portable runtime capability. Accelerator-specific
+`embedding-cpu` and `embedding-cuda` remain explicit machine choices.
 
 `uv sync --locked` (used in CI) fails instead of silently re-resolving if
 `pyproject.toml` and `uv.lock` have drifted apart — run `uv lock` after

@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Execution — nlght Admin{% endblock %}
+{% block content %}
+{% set r = record %}
+<p><a href="/admin/executions">← Executions</a></p>
+
+<h2 style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap">
+  {{ workflow_name }}
+  <span class="badge badge-{{ state.badge }}">{{ state.label }}</span>
+  {% if r.cancel_requested and r.status.value != 'cancelled' %}<span class="badge badge-cancelled">cancel requested</span>{% endif %}
+</h2>
+<p class="muted mono">{{ r.execution_id }}</p>
+
+{% if r.parent_execution_id %}
+<p>Child of <a href="/admin/executions/{{ r.parent_execution_id }}" class="mono">{{ r.parent_execution_id }}</a> — it was handed one share of that run's work.</p>
+{% endif %}
+
+<section>
+  <h4>Run</h4>
+  <table>
+    <tbody>
+      <tr>
+        <th>This execution</th>
+        <td>
+          <span class="badge badge-{{ r.status.value }}">{{ r.status.value }}</span>
+          {% if state.detail %}<span class="muted"> — {{ state.detail }}</span>{% endif %}
+        </td>
+      </tr>
+      <tr><th>Correlation id</th><td class="mono">{{ r.trigger.context.correlation_id }}</td></tr>
+      <tr><th>Operation</th><td>{{ r.trigger.operation }} <span class="muted">({{ r.trigger.kind.value }} / {{ r.trigger.protocol.value }})</span></td></tr>
+      <tr><th>Idempotency key</th><td class="mono">{{ r.idempotency_key }}</td></tr>
+      <tr><th>Attempts</th><td>{{ r.attempt_count }} of {{ r.max_attempts }}</td></tr>
+      <tr><th>Required capabilities</th><td>{% if r.required_capabilities %}{{ r.required_capabilities | join(', ') }}{% else %}<span class="muted">any worker</span>{% endif %}</td></tr>
+      <tr><th>Created</th><td class="mono">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>
+      <tr><th>Started</th><td class="mono">{% if r.started_at %}{{ r.started_at.strftime('%Y-%m-%d %H:%M:%S') }}{% else %}<span class="muted">not yet</span>{% endif %}</td></tr>
+      <tr><th>Completed</th><td class="mono">{% if r.completed_at %}{{ r.completed_at.strftime('%Y-%m-%d %H:%M:%S') }}{% else %}<span class="muted">—</span>{% endif %}</td></tr>
+      <tr><th>Duration</th><td>{{ r | duration }}{% if fan_out %} <span class="muted">— this execution only; it ended by handing the work out</span>{% endif %}</td></tr>
+      {% if fan_out %}
+      {# The rows above are this execution's. These are the run's, and for a
+         fan-out the two are nowhere near each other: the distribution is over in
+         a second or two, the corpus it handed out takes as long as it takes. #}
+      <tr>
+        <th>Run finished</th>
+        <td class="mono">
+          {% if timing.running %}<span class="muted">not yet — {{ fan_out.pending }} of {{ fan_out.total }} children still to finish</span>
+          {% else %}{{ timing.finished_at | at }} <span class="muted">— when the last child settled</span>{% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th>Run duration</th>
+        <td>
+          {{ timing.elapsed | span }}
+          {% if timing.running %}<span class="muted"> and counting</span>{% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th>Child time</th>
+        <td>
+          {{ timing.child_time | span }}
+          <span class="muted">— summed over every child's own run, so far</span>
+          {% if timing.parallel_factor %}
+          <br><span class="muted">about {{ '%.1f' | format(timing.parallel_factor) }}× the run's own duration: that is the work the pool did in parallel</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      {% if r.status.value in ('queued',) %}
+      <tr><th>Next attempt</th><td class="mono">{{ r.next_attempt_at.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>
+      {% endif %}
+      {% if r.owner_worker_id %}
+      <tr><th>Held by</th><td class="mono">{{ r.owner_worker_id }}{% if r.lease_expires_at %} <span class="muted">— lease until {{ r.lease_expires_at.strftime('%H:%M:%S') }}</span>{% endif %}</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+
+{% if r.diagnostics %}
+<section>
+  <h4>Why it failed</h4>
+  <pre class="diagnostics">{{ r.diagnostics | pretty_json }}</pre>
+</section>
+{% endif %}
+
+{% if attempts %}
+<section>
+  <h4>Attempts</h4>
+  {# The record says where a run ended up; this says how it got there. A run
+     that succeeded on its third try is indistinguishable from one that
+     succeeded outright unless someone can read this. #}
+  <table>
+    <thead><tr><th>#</th><th>Worker</th><th>Status</th><th>Started</th><th>Completed</th><th>Fencing</th></tr></thead>
+    <tbody>
+    {% for attempt in attempts %}
+    <tr>
+      <td>{{ attempt.attempt_number }}</td>
+      <td>{{ attempt.instance_name }}</td>
+      <td><span class="badge badge-{{ attempt.status }}">{{ attempt.status }}</span></td>
+      <td class="nowrap mono">{% if attempt.started_at %}{{ attempt.started_at.strftime('%H:%M:%S') }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="nowrap mono">{% if attempt.completed_at %}{{ attempt.completed_at.strftime('%H:%M:%S') }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="mono">{{ attempt.fencing_token }}</td>
+    </tr>
+    {% if attempt.diagnostics %}
+    <tr><td></td><td colspan="5"><pre class="diagnostics">{{ attempt.diagnostics | pretty_json }}</pre></td></tr>
+    {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if fan_out %}
+<section>
+  <h4>Children</h4>
+  <p>
+    This run fanned its work out across the worker pool and ended without waiting.
+    <strong>{{ fan_out.succeeded }} of {{ fan_out.total }}</strong> children have succeeded,
+    {{ fan_out.failed }} failed, {{ fan_out.cancelled }} cancelled, {{ fan_out.pending }} still in flight.
+    {% if fan_out.settled %}<br><span class="muted">Every child has settled — the logical run is finished.</span>
+    {% else %}<br><span class="muted">The run is not finished: this execution succeeded by handing the work out, and the children below are what is still doing it.</span>{% endif %}
+  </p>
+  <table>
+    <thead><tr><th>Correlation id</th><th>Status</th><th>Attempts</th><th>Duration</th><th></th></tr></thead>
+    <tbody>
+    {% for child in children %}
+    <tr>
+      <td class="mono">{{ child.trigger.context.correlation_id }}</td>
+      <td><span class="badge badge-{{ child.status.value }}">{{ child.status.value }}</span></td>
+      <td>{{ child.attempt_count }}{% if child.attempt_count > 1 %} <span class="muted">retried</span>{% endif %}</td>
+      <td class="nowrap">{{ child | duration }}</td>
+      <td class="actions"><a href="/admin/executions/{{ child.execution_id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if fan_out.total > child_limit %}
+  <nav style="display:flex;gap:1rem;align-items:center;margin-top:1rem">
+    {% if child_offset > 0 %}<a href="/admin/executions/{{ r.execution_id }}?child_offset={{ [child_offset - child_limit, 0] | max }}">← Previous</a>{% endif %}
+    <span class="muted">{{ child_offset + 1 }}–{{ [child_offset + child_limit, fan_out.total] | min }} of {{ fan_out.total }}</span>
+    {% if child_offset + child_limit < fan_out.total %}<a href="/admin/executions/{{ r.execution_id }}?child_offset={{ child_offset + child_limit }}">Next →</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endif %}
+
+<section>
+  <h4>Trigger payload</h4>
+  <pre class="diagnostics">{{ r.trigger.payload | pretty_json }}</pre>
+</section>
+
+{% if r.result %}
+<section>
+  <h4>Result</h4>
+  <pre class="diagnostics">{{ r.result | pretty_json }}</pre>
+</section>
+{% endif %}
+{% endblock %}

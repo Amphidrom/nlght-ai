@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nlght-ai"
-version = "0.1.2"
+version = "0.1.3"
 description = "The workflow runtime layer between your application and any LLM provider."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -43,7 +43,11 @@ dependencies = [
   "httpx2>=2.5.0",
   "jinja2>=3.1",
   "python-multipart>=0.0.9",
-  "cryptography>=46.0.7",
+  "pygments>=2.18.0",
+  "pathspec>=0.12.1",
+  # >=50 is a security floor, not a preference: 49.x carries PYSEC-2026-3552
+  # (PKCS#7 decryption oracle), fixed in 50.0.0.
+  "cryptography>=50.0.0",
   "tzdata>=2026.2"
 ]
 
@@ -78,12 +82,39 @@ lexical-store = [
 vector-store = [
   "qdrant-client>=1.9.0",
 ]
+embedding = [
+  "sentence-transformers>=3.0.0",
+]
+# Which torch build the embedding model runs on. `embedding` alone resolves torch
+# from PyPI, whose default wheel differs per platform — CPU-only on Windows, a
+# CUDA build on Linux — so "install the embedding extra" does not say what you
+# get. These two say it. Each pins torch to one of PyTorch's own indexes; pick
+# one beside `embedding`:
+#
+#   uv sync --extra embedding --extra embedding-cuda
+#   uv sync --extra embedding --extra embedding-cpu
+#
+# They are mutually exclusive (declared under [tool.uv]) and deliberately absent
+# from `all`: an accelerator build is a property of the machine, not a capability
+# of the platform, and folding a multi-gigabyte CUDA wheel into `all` would make
+# the everything-extra unusable for everyone without a GPU.
+embedding-cuda = [
+  "sentence-transformers>=3.0.0",
+  "torch>=2.0.0",
+]
+embedding-cpu = [
+  "sentence-transformers>=3.0.0",
+  "torch>=2.0.0",
+]
+pdf = [
+  "pdfminer.six>=20231228",
+]
 stores = [
   "opensearch-py>=2.0.0",
   "qdrant-client>=1.9.0",
 ]
 all = [
-  "nlght-ai[docker,web-search,hive-mind,nlp,anthropic,openai,google,metrics,stores]",
+  "nlght-ai[docker,web-search,hive-mind,nlp,anthropic,openai,google,metrics,stores,embedding,pdf]",
 ]
 
 [dependency-groups]
@@ -96,10 +127,11 @@ dev = [
   "mypy>=1.11.0",
   "pytestarch>=4.0.1",
   "types-PyYAML>=6.0.0",
+  "types-Pygments>=2.18.0",
   "anybadge>=1.14.0",
   "bandit[sarif]>=1.7.9",
   "pip-audit>=2.7.0",
-  "nlght-ai[anthropic,google,openai]",
+  "nlght-ai[all]",
 ]
 
 [project.scripts]
@@ -117,26 +149,32 @@ include = ["nlght*"]
   "adapters/inbound/http/admin/templates/**/*.html",
   "adapters/inbound/http/admin/static/*",
   "alembic.ini",
+  "knowledge_alembic.ini",
+  "knowledge_migrations/*",
+  "knowledge_migrations/versions/*.py",
   "py.typed",
 ]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-pythonpath = ["src", "tests"]
+# "." puts the standalone review backend on the path; it is a service beside
+# the package, not part of it.
+pythonpath = ["src", "tests", "."]
 addopts = [
   "-ra",
   "--strict-markers",
   "--strict-config",
-  # local_e2e needs a live local Ollama daemon and never runs in CI — deselect
-  # by default. Run it explicitly with: pytest tests/local_e2e -m local_e2e
-  "-m", "not local_e2e",
+  # local_e2e needs a live local Ollama daemon; external_corpus depends on
+  # fixtures outside this repository. Both are opt-in.
+  "-m", "not local_e2e and not external_corpus",
 ]
 markers = [
   "architecture: architectural dependency tests",
   "integration: tests with external systems",
   "e2e: end-to-end tests",
   "local_e2e: e2e against a live local Ollama daemon (local-only; excluded by default)",
+  "external_corpus: assertions against test data stored outside this repository (opt-in)",
 ]
 asyncio_mode = "auto"
 
@@ -144,10 +182,12 @@ asyncio_mode = "auto"
 line-length = 160
 target-version = "py311"
 src = ["src", "tests"]
+force-exclude = true
 exclude = [
   "build",
   ".venv",
   "venv",
+  "next-integration",
 ]
 
 [tool.ruff.lint]
@@ -187,6 +227,11 @@ module = [
   "prometheus_client.*",
   "bs4.*",
   "ifaddr.*",
+  "sentence_transformers.*",
+  # Reached by the embedding adapter to ask which accelerator is usable. Same
+  # reason as spacy above: following it lands in numpy's PEP 695 stubs.
+  "torch.*",
+  "pdfminer.*",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
@@ -207,8 +252,39 @@ omit = [
   "src/nlght/adapters/outbound/model/ollama_local.py",
 ]
 
+[tool.uv]
+# One machine has one torch build. Declaring the pair as conflicting is what lets
+# the lock carry both resolutions instead of failing to find one that satisfies
+# both at once.
+conflicts = [
+  [
+    { extra = "embedding-cuda" },
+    { extra = "embedding-cpu" },
+  ],
+]
+
+# PyTorch publishes its accelerator builds from its own indexes rather than PyPI.
+# `explicit = true` keeps them out of resolution for everything else: only the
+# packages pointed at them below may come from here.
+#
+# The CUDA line is part of the URL. Moving to a different one — a newer driver,
+# an older card — is a change to this URL and nothing else.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.uv.sources]
 nlght-ai = { workspace = true }
+torch = [
+  { index = "pytorch-cu124", extra = "embedding-cuda" },
+  { index = "pytorch-cpu", extra = "embedding-cpu" },
+]
 
 [project.urls]
 Homepage = "https://nlght.ai"

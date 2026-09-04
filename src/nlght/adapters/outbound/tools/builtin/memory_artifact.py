@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import READ_SESSION
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class LoadMemoryArtifactTool(ToolBase):
                         description="Artifact ID from the [memory_artifact] reference.",
                     ),
                 ],
+                action=READ_SESSION,
             ),
             ToolSignature(
                 name="load_memory_artifact_range",
@@ -88,6 +90,7 @@ class LoadMemoryArtifactTool(ToolBase):
                         description="Last line to return (1-based, inclusive).",
                     ),
                 ],
+                action=READ_SESSION,
             ),
         ]
 

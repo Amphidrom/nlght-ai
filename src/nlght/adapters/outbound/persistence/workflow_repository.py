@@ -49,7 +49,9 @@ def _to_workflow_def(workflow: Workflow) -> WorkflowDef:
         name=workflow.name,
         enabled=workflow.enabled,
         capabilities=workflow.capabilities,
+        max_hops=workflow.max_hops,
         description=workflow.description,
+        concurrency=workflow.concurrency,
     )
 
 
@@ -63,6 +65,11 @@ class SqlAlchemyWorkflowRepository(WorkflowRepository):
                 select(Workflow).where(Workflow.name == name)
             )
             row = result.scalar_one_or_none()
+            return _to_workflow_def(row) if row is not None else None
+
+    async def find_by_id(self, workflow_id: uuid.UUID) -> WorkflowDef | None:
+        async with AsyncSession(self._engine) as session:
+            row = await session.get(Workflow, workflow_id)
             return _to_workflow_def(row) if row is not None else None
 
     async def list_enabled(self) -> list[WorkflowDef]:
@@ -81,6 +88,23 @@ class SqlAlchemyWorkflowRepository(WorkflowRepository):
                 .where(
                     WorkflowVersion.workflow_id == workflow_id,
                     WorkflowVersion.status == "active",
+                )
+                .options(selectinload(WorkflowVersion.steps))
+            )
+            row = result.scalar_one_or_none()
+            return _to_version_def(row) if row is not None else None
+
+    async def find_version(
+        self,
+        workflow_id: uuid.UUID,
+        workflow_version_id: uuid.UUID,
+    ) -> WorkflowVersionDef | None:
+        async with AsyncSession(self._engine) as session:
+            result = await session.execute(
+                select(WorkflowVersion)
+                .where(
+                    WorkflowVersion.workflow_id == workflow_id,
+                    WorkflowVersion.workflow_version_id == workflow_version_id,
                 )
                 .options(selectinload(WorkflowVersion.steps))
             )

@@ -17,8 +17,6 @@ from nlght.adapters.outbound.hive_mind.simple import (
 )
 from nlght.core.hive_mind.models import (
     AtomType,
-    Directive,
-    DirectivePriority,
     PromotionStatus,
     SessionResult,
     SessionSnapshot,
@@ -33,10 +31,8 @@ def _turn(n: int = 1) -> TurnSummary:
 
 def test_simple_coordinator_task_branches_context_payload_slots_and_dump(tmp_path) -> None:
     store = SimpleStoreCoordinator()
-    store.set_directive("tone", "brief", source="user", priority=DirectivePriority.HIGH)
     turn = _turn()
     store.record_turn(turn)
-    assert store.get_directives() == {"tone": "brief"}
     assert store.next_turn_nr() == 2
     assert store.get_recent_turns(5) == [turn]
 
@@ -91,11 +87,6 @@ def test_simple_factory_reuses_saves_and_evicts_expired() -> None:
 def test_hive_coordinator_directives_tasks_payload_conflicts_artifacts_and_dump(tmp_path) -> None:
     invalidated: list[list[str]] = []
     store = HiveMindStoreCoordinator(on_invalidate=invalidated.append)
-    assert store.set_directive("tone", "brief", source="user") is None
-    assert store.set_directive("tone", "brief", source="inferred") is None
-    assert store.set_directive("tone", "verbose", source="inferred") is None
-    store.set_directive("language", "de")
-    assert len(store.get_directives_list()) == 2
 
     turn = _turn()
     store.record_turn(turn)
@@ -146,7 +137,6 @@ def test_hive_factory_creates_restores_and_preserves_snapshot_creation_time() ->
     now = datetime.now(UTC)
     snapshot = SessionSnapshot(
         session_id="saved",
-        directives=[Directive("tone", "brief")],
         turns=[_turn(2), _turn(1)],
         results=[SessionResult(content="known", status=PromotionStatus.FINAL)],
         interrupted_task_ids=["task"],
@@ -156,7 +146,6 @@ def test_hive_factory_creates_restores_and_preserves_snapshot_creation_time() ->
     )
     backend.load.side_effect = [snapshot]
     restored = factory.get_or_create("saved")
-    assert restored.get_directives() == {"tone": "brief"}
     assert [turn.turn_nr for turn in restored.get_recent_turns(2)] == [1, 2]
     assert restored.get_slot("slot", lambda: None) == "value"
 

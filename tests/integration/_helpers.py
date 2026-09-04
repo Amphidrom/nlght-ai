@@ -42,6 +42,7 @@ from nlght.bootstrap.wiring import Container
 from nlght.core.licensing.entitlements import HIVE_MIND_FILESYSTEM, PROVIDERS_MULTI
 from nlght.core.licensing.license import License, Tier
 from nlght.core.licensing.service import LicenseService
+from nlght.core.session import SessionAccess
 from nlght.core.signals.signal import Signal
 
 
@@ -264,7 +265,10 @@ def build_test_container(
     executor = StepMachineWorkflowExecutor(
         loader=loader,
         model_clients={StubModelClient.PROVIDER_NAME: stub_client},
-        coordinator_factory=coordinator_factory,
+        session_access=(
+            SessionAccess(coordinator_factory, enforced=False)
+            if coordinator_factory is not None else None
+        ),
     )
 
     adapters = []

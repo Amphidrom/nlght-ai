@@ -69,7 +69,10 @@ def _load_db_url() -> str | None:
     return str(url) if url else None
 
 
-_db_url = _load_db_url()
+# `-x url=...` overrides the configured URL, so a database can be migrated
+# without a platform.yaml — what a CI job or a one-off setup usually needs.
+_x_args = context.get_x_argument(as_dictionary=True)
+_db_url = _x_args.get("url") or _load_db_url()
 if _db_url:
     config.set_main_option("sqlalchemy.url", _db_url)
 elif not context.is_offline_mode():

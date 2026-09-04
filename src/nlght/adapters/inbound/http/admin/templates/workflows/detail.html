@@ -9,13 +9,20 @@
     <div style="margin-top:.5rem">
       {% if workflow.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}
       {% for cap in workflow.capabilities %}<span class="badge badge-draft" style="margin-left:.3rem">{{ cap }}</span>{% endfor %}
+      <span class="badge badge-draft" style="margin-left:.3rem">{{ workflow.concurrency }}</span>
+      <span class="badge badge-draft" style="margin-left:.3rem">
+        {% if workflow.max_hops is none %}default hops
+        {% elif workflow.max_hops == 0 %}unlimited hops
+        {% else %}{{ workflow.max_hops }} hops{% endif %}
+      </span>
     </div>
   </div>
-  <div style="display:flex;gap:.75rem">
+  <div class="form-actions" style="margin-top:0">
     <form method="post" action="/admin/workflows/{{ workflow.workflow_id }}/versions/new" style="display:inline">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
       <button type="submit" class="secondary">+ Fork new version</button>
     </form>
+    <a href="/admin/workflows/{{ workflow.workflow_id }}/edit" role="button" class="secondary">Edit workflow</a>
   </div>
 </div>
 

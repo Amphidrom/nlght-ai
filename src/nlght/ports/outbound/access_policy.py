@@ -11,22 +11,52 @@ if TYPE_CHECKING:
 
 
 @runtime_checkable
-class ToolAccessPolicy(Protocol):
-    """Controls which callers may use a given tool resource.
+class ResourceAccessPolicy(Protocol):
+    """Controls which callers may use a given resource *at all*.
 
-    Checked by ToolCatalogBuilder during catalog construction — tools for
-    which this returns False are silently excluded from the request-scoped
-    catalog so steps cannot invoke them. ``model`` is the effective model of
-    the request (None when no model is bound yet); ``caller`` may be None for
-    internal invocations without a request context.
+    A resource is authorized as a whole: whether this caller may activate it.
+    That is the only question for a resource used inside a workflow step, where
+    no tool call happens, and the first of two for one whose signatures a model
+    may call — ``ToolAccessPolicy`` decides the second, and cannot overrule this
+    one.
 
-    Wire a concrete implementation via ToolCatalogBuilder(access_policy=...).
-    If no policy is configured all tools are accessible (default behaviour).
+    ``model`` is the effective model of the request (None when no model is bound
+    yet); ``caller`` may be None for internal invocations without a request
+    context.
+
+    If no policy is configured every resource is accessible (default behaviour).
     """
 
     async def is_allowed(
         self,
         resource: ResourceDef,
+        caller: RequestContext | None,
+        model: str | None,
+    ) -> bool: ...
+
+
+@runtime_checkable
+class ToolAccessPolicy(Protocol):
+    """Controls which single operations of an authorized resource are offered.
+
+    Checked per ``ToolSignature`` during catalog construction; a signature for
+    which this returns False is left out of the request-scoped catalog, so a
+    model is never told it exists.
+
+    It decides *within* a resource the caller may already use. It is asked only
+    after ``ResourceAccessPolicy`` allowed the resource, and allowing a signature
+    of a resource that was denied is not expressible — which is the point of
+    having two.
+
+    Wire concrete implementations via
+    ``ToolCatalogBuilder(resource_access_policy=..., tool_access_policy=...)``.
+    If no policy is configured every signature is offered (default behaviour).
+    """
+
+    async def is_allowed(
+        self,
+        resource: ResourceDef,
+        signature_name: str,
         caller: RequestContext | None,
         model: str | None,
     ) -> bool: ...

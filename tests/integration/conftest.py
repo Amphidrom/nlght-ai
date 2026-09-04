@@ -16,6 +16,11 @@ from nlght.adapters.outbound.persistence.models import Base
 from nlght.adapters.outbound.persistence.resource_repository import SqlAlchemyResourceRepository
 from nlght.adapters.outbound.persistence.workflow_repository import SqlAlchemyWorkflowRepository
 
+# This module imports optional store SDKs and probes three live services during
+# collection. Ordinary directory-based local and CI runs do not collect it. A
+# maintainer can still select the file itself explicitly when the stack exists.
+collect_ignore = ["test_corpus_authority_backends.py"]
+
 
 @pytest.fixture
 async def sqlite_engine():

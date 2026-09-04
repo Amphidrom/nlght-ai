@@ -19,8 +19,6 @@ from typing import Any, TypeVar, cast
 
 from nlght.core.hive_mind.models import (
     AtomType,
-    Directive,
-    DirectivePriority,
     PromotionStatus,
     SessionResult,
     TurnSummary,
@@ -47,7 +45,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
     no conflict detection, no task-graph.  Designed to be fast and
     dependency-free.
 
-    * Directives: last-write-wins regardless of priority.
     * ConversationStore: plain append-only list.
     * SessionResultStore: flat list, no indexing.
     * WorkingMemory: dict keyed by task_id.
@@ -55,35 +52,12 @@ class SimpleStoreCoordinator(StoreCoordinator):
     """
 
     def __init__(self) -> None:
-        self._directives: dict[str, Directive] = {}
         self._turns: list[TurnSummary] = []
         self._results: list[SessionResult] = []
         self._working: dict[str, list[WorkingAtom]] = {}
         self._branch_stack: list[str] = []
         self._active_task: str | None = None
         self._slots: dict[str, Any] = {}
-
-    # ------------------------------------------------------------------
-    # Directives
-    # ------------------------------------------------------------------
-
-    def set_directive(
-        self,
-        key:      str,
-        value:    str,
-        source:   str               = "inferred",
-        priority: DirectivePriority = DirectivePriority.NORMAL,
-    ) -> None:
-        self._directives[key] = Directive(
-            key=key, value=value, source=source, priority=priority,
-        )
-        logger.debug("simple_store.directive.set | key=%s value=%s", key, value)
-
-    def get_directives(self) -> dict[str, str]:
-        return {k: d.value for k, d in self._directives.items()}
-
-    def get_directives_list(self) -> list[Directive]:
-        return list(self._directives.values())
 
     # ------------------------------------------------------------------
     # Conversation
@@ -116,7 +90,10 @@ class SimpleStoreCoordinator(StoreCoordinator):
             atom_type         = intent.atom_type,
             content           = intent.content,
             task_id           = intent.task_id,
+            entities          = intent.entities,
             tags              = intent.tags,
+            key               = intent.key,
+            kind              = intent.kind,
             promote_to_parent = intent.promote_immediately,
         )
         target_task = self._branch_stack[-1] if self._branch_stack else intent.task_id
@@ -228,7 +205,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
         else:
             known = list(self._results)
         return {
-            "directives":    self.get_directives(),
             "recent_turns":  self._turns[-5:],
             "known_results": known,
             "active_atoms":  active_atoms,
@@ -311,14 +287,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
             checkpoint_name,
         )
 
-        directives = self.get_directives()
-        if directives:
-            logger.debug("DIRECTIVES (%d):", len(directives))
-            for k, v in directives.items():
-                logger.debug("  %s = %s", k, v)
-        else:
-            logger.debug("DIRECTIVES: (none)")
-
         recent_turns = self._turns[-4:]
         if recent_turns:
             logger.debug("CONVERSATION last %d turns:", len(recent_turns))
@@ -382,6 +350,10 @@ class SimpleStoreCoordinatorFactory(StoreCoordinatorFactory):
     def __init__(self, session_ttl_seconds: int = 3600) -> None:
         self._ttl = timedelta(seconds=session_ttl_seconds)
         self._sessions: dict[str, tuple[SimpleStoreCoordinator, datetime]] = {}
+        #: Owners, kept beside the sessions and evicted with them. This factory
+        #: never touches a backend, so ownership recorded anywhere else would
+        #: not exist for it.
+        self._owners: dict[str, str] = {}
         logger.info(
             "simple_store.factory.init | ttl_seconds=%d", session_ttl_seconds,
         )
@@ -389,6 +361,13 @@ class SimpleStoreCoordinatorFactory(StoreCoordinatorFactory):
     def exists(self, session_id: str) -> bool:
         self._evict_expired()
         return session_id in self._sessions
+
+    def owner_of(self, session_id: str) -> str | None:
+        self._evict_expired()
+        return self._owners.get(session_id) or None
+
+    def claim_ownership(self, session_id: str, owner_principal_id: str) -> None:
+        self._owners.setdefault(session_id, owner_principal_id)
 
     def get_or_create(self, session_id: str) -> SimpleStoreCoordinator:
         self._evict_expired()
@@ -418,4 +397,8 @@ class SimpleStoreCoordinatorFactory(StoreCoordinatorFactory):
         ]
         for k in expired:
             del self._sessions[k]
+            # The owner goes with the session. Leaving it behind would make an
+            # evicted id un-creatable by anybody else, which is a denial of
+            # service dressed as a security record.
+            self._owners.pop(k, None)
             logger.debug("simple_store.session.evicted | id=%s", k)

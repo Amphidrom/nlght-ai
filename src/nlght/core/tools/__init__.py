@@ -1,12 +1,62 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Core tool abstractions — base class, signature, and parameter model."""
+"""Core tool abstractions and provider-neutral action-security contracts."""
 
+from nlght.core.tools.action import (
+    ActionDecision,
+    ActionDecisionReason,
+    ActionDecisionResult,
+    ActionExecutionContext,
+    ActionResolutionContext,
+    ActionSemanticsResolver,
+    ApprovalDecision,
+    ApprovalResult,
+    BoundDestination,
+    ConcreteAction,
+    DataEgressClass,
+    DestinationKind,
+    ExecutionCapabilities,
+    ExecutionClass,
+    FilesystemCapability,
+    NetworkCapability,
+    PendingAction,
+    ProcessCapability,
+    ScopeClass,
+    SecretsCapability,
+    SideEffectClass,
+    StaticActionSemantics,
+    ToolArgumentBinder,
+    action_fingerprint,
+)
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 __all__ = [
+    "ActionDecision",
+    "ActionDecisionReason",
+    "ActionDecisionResult",
+    "ActionExecutionContext",
+    "ActionResolutionContext",
+    "ActionSemanticsResolver",
+    "ApprovalDecision",
+    "ApprovalResult",
+    "BoundDestination",
+    "ConcreteAction",
+    "DataEgressClass",
+    "DestinationKind",
+    "ExecutionCapabilities",
+    "ExecutionClass",
+    "FilesystemCapability",
+    "NetworkCapability",
+    "PendingAction",
+    "ProcessCapability",
+    "ScopeClass",
+    "SecretsCapability",
+    "SideEffectClass",
+    "StaticActionSemantics",
+    "ToolArgumentBinder",
     "ToolBase",
     "ToolParameter",
     "ToolSignature",
+    "action_fingerprint",
 ]

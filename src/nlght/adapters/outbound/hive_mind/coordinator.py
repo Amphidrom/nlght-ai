@@ -29,8 +29,6 @@ from nlght.adapters.outbound.hive_mind.persistence import FileSystemBackend
 from nlght.core.hive_mind.models import (
     AtomType,
     ConflictReport,
-    Directive,
-    DirectivePriority,
     MentalModelCache,
     PromotionStatus,
     SessionResult,
@@ -42,7 +40,6 @@ from nlght.core.hive_mind.models import (
 )
 from nlght.core.hive_mind.stores import (
     ConversationStore,
-    DirectiveStore,
     SessionResultStore,
     WorkingMemory,
 )
@@ -73,7 +70,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         self,
         on_invalidate: Callable[[list[str]], None] | None = None,
     ) -> None:
-        self.directives          = DirectiveStore()
         self.conversation        = ConversationStore()
         self.results             = SessionResultStore()
         self.working             = WorkingMemory()
@@ -82,50 +78,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         self.mental_model_cache  = MentalModelCache()
 
     # ------------------------------------------------------------------
-    # Directives
-    # ------------------------------------------------------------------
-
-    def set_directive(
-        self,
-        key:      str,
-        value:    str,
-        source:   str               = "inferred",
-        priority: DirectivePriority = DirectivePriority.NORMAL,
-    ) -> ConflictReport | None:
-        existing = self.directives.get(key)
-
-        if existing is not None and existing.value == value:
-            return None
-
-        if source == "user":
-            directive = Directive(key=key, value=value, source=source,
-                                  priority=DirectivePriority.HIGH)
-            self.directives.set(directive)
-            logger.info("hive_mind.directive.set | key=%s source=user", key)
-            return None
-
-        if existing is not None:
-            logger.debug(
-                "hive_mind.directive.skip_inferred | key=%s existing=%r",
-                key, existing.value,
-            )
-            return None
-
-        directive = Directive(key=key, value=value, source=source, priority=priority)
-        self.directives.set(directive)
-        logger.debug("hive_mind.directive.set | key=%s source=inferred", key)
-        return None
-
-    def get_directives(self) -> dict[str, str]:
-        return self.directives.snapshot()
-
-    def get_directives_list(self) -> list[Directive]:
-        return [d for d in self.directives.get_all().values()]
-
-    # ------------------------------------------------------------------
-    # Conversation
-    # ------------------------------------------------------------------
-
     def record_turn(self, turn: TurnSummary) -> None:
         self.conversation.append(turn)
         logger.debug(
@@ -148,7 +100,10 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             atom_type         = intent.atom_type,
             content           = intent.content,
             task_id           = intent.task_id,
+            entities          = intent.entities,
             tags              = intent.tags,
+            key               = intent.key,
+            kind              = intent.kind,
             promote_to_parent = intent.promote_immediately,
         )
         self.working.write(atom)
@@ -253,7 +208,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             else self.results.find_by_entities(entities)
         )
         return {
-            "directives":    self.get_directives(),
             "recent_turns":  self.conversation.last_n(5),
             "known_results": known,
             "active_atoms":  self.working.read_all(),
@@ -396,14 +350,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             checkpoint_name,
         )
 
-        directives = self.get_directives()
-        if directives:
-            logger.debug("DIRECTIVES (%d):", len(directives))
-            for k, v in directives.items():
-                logger.debug("  %s = %s", k, v)
-        else:
-            logger.debug("DIRECTIVES: (none)")
-
         recent_turns = self.conversation.last_n(4)
         if recent_turns:
             logger.debug("CONVERSATION last %d turns:", len(recent_turns))
@@ -484,9 +430,35 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
     ) -> None:
         self._backend      = backend or FileSystemBackend(base_dir)
         self._on_invalidate = on_invalidate
+        #: Owners claimed for sessions that have not been written yet. A session
+        #: is created in memory and only persisted on `save`, so the claim has
+        #: to survive that gap or the first turn of every new session would be
+        #: ownerless.
+        self._claimed: dict[str, str] = {}
 
     def exists(self, session_id: str) -> bool:
         return self._backend.exists(session_id)
+
+    def owner_of(self, session_id: str) -> str | None:
+        snapshot = self._backend.load(session_id)
+        if snapshot is None:
+            return None
+        return snapshot.owner_principal_id or None
+
+    def claim_ownership(self, session_id: str, owner_principal_id: str) -> None:
+        """Write the owner onto the stored session, once.
+
+        A session with an owner keeps it. Ownership is established when a
+        session is created and is not a thing a later request may change.
+        """
+        snapshot = self._backend.load(session_id)
+        if snapshot is None:
+            self._claimed[session_id] = owner_principal_id
+            return
+        if snapshot.owner_principal_id:
+            return
+        snapshot.owner_principal_id = owner_principal_id
+        self._backend.save(snapshot)
 
     def get_or_create(self, session_id: str) -> HiveMindStoreCoordinator:
         if self._backend.exists(session_id):
@@ -494,11 +466,10 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
             if snapshot:
                 coordinator = self._restore(snapshot)
                 logger.info(
-                    "hive_mind.session.restored | id=%s turns=%d results=%d directives=%d",
+                    "hive_mind.session.restored | id=%s turns=%d results=%d",
                     session_id,
                     len(snapshot.turns),
                     len(snapshot.results),
-                    len(snapshot.directives),
                 )
                 return coordinator
 
@@ -518,7 +489,6 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
         now = datetime.now(UTC)
         snapshot = SessionSnapshot(
             session_id           = session_id,
-            directives           = list(coordinator.directives.get_all().values()),
             turns                = coordinator.conversation.last_n(9999),
             results              = coordinator.results.all_final(),
             interrupted_task_ids = interrupted,
@@ -529,6 +499,11 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
         existing = self._backend.load(session_id)
         if existing:
             snapshot.created_at = existing.created_at
+            # An owner is never rewritten by a save: it was settled at creation.
+            snapshot.owner_principal_id = existing.owner_principal_id
+        snapshot.owner_principal_id = (
+            snapshot.owner_principal_id or self._claimed.pop(session_id, "")
+        )
 
         self._backend.save(snapshot)
         logger.info(
@@ -538,8 +513,6 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
 
     def _restore(self, snapshot: SessionSnapshot) -> HiveMindStoreCoordinator:
         coordinator = HiveMindStoreCoordinator(on_invalidate=self._on_invalidate)
-        for directive in snapshot.directives:
-            coordinator.directives.set(directive)
         for turn in sorted(snapshot.turns, key=lambda t: t.turn_nr):
             coordinator.conversation.append(turn)
         for result in snapshot.results:

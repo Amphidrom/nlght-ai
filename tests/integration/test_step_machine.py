@@ -244,15 +244,20 @@ async def test_unknown_step_type_causes_500(
 # Hop limit — 20 hops stops runaway workflows
 # ---------------------------------------------------------------------------
 
-async def test_hop_limit_stops_workflow_after_20_hops(
+async def test_a_workflow_that_never_finishes_fails_the_request(
     session_factory, workflow_repo, resource_repo,
 ):
-    """A workflow that loops forever is stopped at 20 hops.
+    """A step that keeps routing runs out of hops, and running out is a failure.
 
-    The executor logs a hard-stop warning and breaks out of the loop — it does
-    NOT raise an exception, so the response is still 200.
+    Every move counts, a step routing back to itself included — so one step is
+    enough to reach the limit. The budget belongs to the workflow: this one sets
+    none and gets the runtime default.
+
+    And it fails rather than stopping quietly with a 200. That was the older
+    behaviour, and it is what let a half-finished run be reported as a completed
+    one: the caller saw a result, nothing recorded a failure, and the work that
+    was never done was never mentioned.
     """
-    # Single passthrough that loops back to itself (no target step → uses DEFAULT)
     loop_id = uuid.uuid4()
     await seed_workflow(session_factory, "wf", steps=[
         {
@@ -260,14 +265,15 @@ async def test_hop_limit_stops_workflow_after_20_hops(
             "type": "passthrough",
             "is_start": True,
             "config": dict(_PROVIDER),
-            "transitions": {"DEFAULT": str(loop_id)},  # loops to itself
+            "transitions": {"DEFAULT": str(loop_id)},
         },
     ])
     container = build_test_container(
         workflow_repo, resource_repo, openai_workflow_mapping=_MAPPING,
     )
-    with TestClient(build_test_app(container)) as client:
+    with TestClient(
+        build_test_app(container), raise_server_exceptions=False
+    ) as client:
         resp = _post(client)
 
-    # Executor hard-stops at 20 hops and returns normally
-    assert resp.status_code == 200
+    assert resp.status_code == 500

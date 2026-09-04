@@ -10,7 +10,7 @@
     <h2 style="margin:.25rem 0">Version {{ version.version }}</h2>
     <span class="badge {% if version.status == 'active' %}badge-active{% else %}badge-draft{% endif %}">{{ version.status }}</span>
   </div>
-  <div style="display:flex;gap:.75rem">
+  <div class="form-actions" style="margin-top:0">
     {% if version.status != 'active' %}
     <form method="post" action="/admin/versions/{{ version.workflow_version_id }}/activate">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
@@ -68,50 +68,231 @@
 <h4 style="margin-top:2.5rem">Step Graph <small style="font-weight:400;color:var(--pico-muted-color)">— visual transition editor</small></h4>
 <div class="graph-wrap">
   <div class="graph-toolbar">
-    <strong style="margin-right:.5rem">Add transition:</strong>
     <select id="gFrom"><option value="">From step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
     <input id="gVerdict" type="text" placeholder="verdict (e.g. done)" style="max-width:160px"/>
     <select id="gTo"><option value="">To step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
-    <button id="addEdgeBtn" type="button">Add edge</button>
+    <button id="addTransitionBtn" type="button">Add transition</button>
+    <button id="deleteTransitionBtn" type="button" class="secondary" disabled>Delete transition</button>
     <span style="flex:1"></span>
+    <button id="zoomOutBtn" type="button" class="secondary" title="Zoom out">−</button>
+    <button id="zoomInBtn" type="button" class="secondary" title="Zoom in">+</button>
+    <button id="fitBtn" type="button" class="secondary" title="Fit the whole graph into view">Fit</button>
+    <button id="relayoutBtn" type="button" class="secondary">Re-arrange</button>
     <button id="saveGraphBtn" type="button" style="background:#16a34a;border-color:#16a34a">Save graph</button>
     <span id="saveStatus" style="color:var(--pico-muted-color);font-size:.85em"></span>
   </div>
   <div id="cy"></div>
+  <p class="muted" style="font-size:.85em;margin:.5rem 0 0">
+    Double-click the background to re-centre.
+  </p>
 </div>
 {% endif %}
 
 <script type="application/json" id="stepsData">{{ steps_json | safe }}</script>
 <script src="/admin/static/cytoscape.min.js"></script>
+{% if has_dagre %}
+<script src="/admin/static/dagre.min.js"></script>
+<script src="/admin/static/cytoscape-dagre.min.js"></script>
+{% endif %}
 <script>
 (function() {
   const stepsData = JSON.parse(document.getElementById('stepsData').textContent);
   if (!stepsData.length) return;
 
-  const cols = 4;
-  const xStep = 200, yStep = 130;
+  const versionId = '{{ version.workflow_version_id }}';
   const stepNameById = Object.fromEntries(stepsData.map(s => [s.id, s.name]));
+  const container = document.getElementById('cy');
 
-  const nodes = stepsData.map((s, i) => ({
-    data: { ...s, label: s.name + '\n[' + s.type + ']' },
+  // No stored positions. The graph is what the layout computes, every time —
+  // dragging a step is a passing adjustment to the current view, not a fact
+  // about the workflow.
+  const nodes = stepsData.map(s => ({
+    data: { id: s.id, label: s.name + '\n[' + s.type + ']' },
     classes: s.is_start ? 'start' : s.is_terminal ? 'terminal' : s.is_resume ? 'resume' : 'normal',
-    position: { x: (i % cols) * xStep + 100, y: Math.floor(i / cols) * yStep + 80 },
   }));
 
   const edges = [];
   stepsData.forEach(s => {
     Object.entries(s.transitions || {}).forEach(([verdict, target]) => {
+      // A transition can still name a step that was deleted since. Adding an
+      // edge to a node that does not exist throws and takes the whole graph
+      // down with it; the step table above still lists the stale entry.
+      if (!stepNameById[target]) return;
       edges.push({ data: { id: s.id + '__' + verdict + '__' + target, source: s.id, target, label: verdict } });
     });
   });
 
+  // A layered layout, computed here rather than pulled in.
+  //
+  // Cytoscape's built-in breadthfirst assigns ranks but never reorders within
+  // them, so a pipeline with any branching comes out with edges crossing for no
+  // reason. dagre does that reordering and is what workflow tools normally use,
+  // but it is an extension that would have to be vendored — and asking for two
+  // downloads before the page looks right is not a fix. The two passes below are
+  // what dagre does in its first two phases, which for a workflow of tens of
+  // steps is the part that matters.
+  // Left to right: a pipeline is read the way a sentence is, and a workflow of
+  // twenty steps is far wider than a browser is tall. RANK_GAP separates one
+  // layer from the next along the flow; NODE_GAP separates the steps that share
+  // a layer, across it.
+  const NODE_W = 150, NODE_H = 60, RANK_GAP = 90, NODE_GAP = 30;
+
+  // Which way the flow ended up running. Self-loops are drawn square across that
+  // axis, so they never sit on top of the transitions entering and leaving.
+  let flowIsHorizontal = true;
+
+  function loopStyle() {
+    return {
+      'loop-direction': flowIsHorizontal ? '0deg' : '90deg',
+      'loop-sweep': '-55deg',
+      // What lifts the arc clear of a 150x60 box rather than tucking it inside.
+      'control-point-step-size': 95,
+      'text-margin-y': flowIsHorizontal ? -6 : 0,
+      'text-margin-x': flowIsHorizontal ? 0 : 6,
+    };
+  }
+
+  function layeredPositions(links) {
+    const ids = stepsData.map(s => s.id);
+    const outgoing = new Map(ids.map(id => [id, []]));
+    const incoming = new Map(ids.map(id => [id, []]));
+    links.forEach(({ source, target }) => {
+      if (source === target) return;         // a self-loop constrains nothing
+      if (!outgoing.has(source) || !incoming.has(target)) return;
+      outgoing.get(source).push(target);
+      incoming.get(target).push(source);
+    });
+
+    // Cycles first. A workflow routes backwards — a review step that sends an
+    // assertion back for another pass, a batching step that repeats — and
+    // ranking by longest path is only meaningful on a graph without them. A
+    // depth-first walk marks the edges that close a cycle; they are still drawn,
+    // they just do not get to say what sits below what. Without this a back edge
+    // drags its own predecessor beneath its successors, which is worse than no
+    // layout at all.
+    const WHITE = 0, GREY = 1, BLACK = 2;
+    const colour = new Map(ids.map(id => [id, WHITE]));
+    const backEdges = new Set();
+    const rootIds = stepsData.filter(s => s.is_start).map(s => s.id);
+    const walkOrder = rootIds.concat(ids.filter(id => rootIds.indexOf(id) < 0));
+    walkOrder.forEach(start => {
+      if (colour.get(start) !== WHITE) return;
+      colour.set(start, GREY);
+      const stack = [{ id: start, next: 0 }];
+      while (stack.length) {
+        const frame = stack[stack.length - 1];
+        const children = outgoing.get(frame.id);
+        if (frame.next >= children.length) {
+          colour.set(frame.id, BLACK);
+          stack.pop();
+          continue;
+        }
+        const child = children[frame.next++];
+        if (colour.get(child) === GREY) {
+          backEdges.add(frame.id + '->' + child);   // closes a cycle
+        } else if (colour.get(child) === WHITE) {
+          colour.set(child, GREY);
+          stack.push({ id: child, next: 0 });
+        }
+      }
+    });
+
+    // Rank: one below the deepest predecessor, over the forward edges only.
+    const rank = new Map(ids.map(id => [id, 0]));
+    for (let pass = 0; pass < ids.length; pass++) {
+      let moved = false;
+      links.forEach(({ source, target }) => {
+        if (source === target || !rank.has(source) || !rank.has(target)) return;
+        if (backEdges.has(source + '->' + target)) return;
+        if (rank.get(target) < rank.get(source) + 1) {
+          rank.set(target, rank.get(source) + 1);
+          moved = true;
+        }
+      });
+      if (!moved) break;
+    }
+
+    const layers = [];
+    ids.forEach(id => {
+      const r = rank.get(id);
+      (layers[r] = layers[r] || []).push(id);
+    });
+
+    // Order within a layer by the average position of the neighbours in the
+    // layer before, then after, a few times over. This is the crossing reduction
+    // breadthfirst does not do, and it is what makes a branch read as a branch.
+    const orderOf = id => layers[rank.get(id)].indexOf(id);
+    const barycentre = (id, neighbours) => {
+      const seen = neighbours.get(id).filter(other => rank.get(other) !== rank.get(id));
+      if (!seen.length) return orderOf(id);
+      return seen.reduce((sum, other) => sum + orderOf(other), 0) / seen.length;
+    };
+    for (let sweep = 0; sweep < 4; sweep++) {
+      const downwards = sweep % 2 === 0;
+      const order = downwards ? layers : layers.slice().reverse();
+      order.forEach(layer => {
+        const key = new Map(layer.map(id => [id, barycentre(id, downwards ? incoming : outgoing)]));
+        layer.sort((a, b) => key.get(a) - key.get(b));
+      });
+    }
+
+    // Which way the flow runs is decided by the space there is to run in, not
+    // by a fixed preference. A pipeline of twenty steps stacked downwards in a
+    // canvas that is three times wider than it is tall wastes the width and
+    // shrinks every step to fit the height. So both orientations are measured
+    // against the canvas and the one that lets the graph be largest wins —
+    // which on any ordinary desktop field means left to right.
+    const rankCount = layers.length;
+    const widest = layers.reduce((max, layer) => Math.max(max, layer.length), 1);
+    const canvasW = container.clientWidth || 900;
+    const canvasH = container.clientHeight || 480;
+    const scaleFor = (extentW, extentH) =>
+      Math.min(canvasW / Math.max(extentW, 1), canvasH / Math.max(extentH, 1));
+    const acrossFlow = (NODE_H + NODE_GAP) * widest;
+    const alongFlow = (NODE_W + RANK_GAP) * rankCount;
+    const horizontal = scaleFor(alongFlow, acrossFlow)
+                    >= scaleFor((NODE_W + NODE_GAP) * widest, (NODE_H + RANK_GAP) * rankCount);
+    flowIsHorizontal = horizontal;
+
+    const positions = {};
+    layers.forEach((layer, r) => {
+      layer.forEach((id, index) => {
+        // Centred across the flow, so a layer holding one step lines up with the
+        // middle of the branch beside it instead of hugging an edge.
+        const across = (index - (layer.length - 1) / 2) * (NODE_H + NODE_GAP)
+                     + widest * (NODE_H + NODE_GAP) / 2;
+        const along = r * (NODE_W + RANK_GAP) + NODE_W;
+        positions[id] = horizontal ? { x: along, y: across } : { x: across, y: along };
+      });
+    });
+    return positions;
+  }
+
+  // dagre, when it has been vendored, does the same job with a more thorough
+  // crossing pass — so it wins if it is there, and the layout above is what
+  // makes the page look right without it.
+  let useDagre = false;
+  if (typeof window.cytoscapeDagre === 'function') {
+    try { cytoscape.use(window.cytoscapeDagre); useDagre = true; }
+    catch (err) { useDagre = false; }   // already registered, or incompatible
+  }
+  const dagreOptions = {
+    name: 'dagre', rankDir: 'LR', nodeSep: NODE_GAP, rankSep: RANK_GAP, edgeSep: 20,
+    padding: 30, animate: false, fit: true,
+  };
+
+  if (!useDagre) {
+    const positions = layeredPositions(edges.map(e => e.data));
+    nodes.forEach(node => { node.position = Object.assign({}, positions[node.data.id]); });
+  }
+
   const cy = window._cy = cytoscape({
-    container: document.getElementById('cy'),
+    container: container,
     elements: { nodes, edges },
     style: [
       { selector: 'node', style: {
           'background-color': '#e5e7eb', 'label': 'data(label)', 'text-valign': 'center',
-          'text-halign': 'center', 'width': 140, 'height': 60, 'font-size': 11,
+          'text-halign': 'center', 'width': 150, 'height': 60, 'font-size': 11,
           'text-wrap': 'wrap', 'shape': 'roundrectangle', 'border-width': 2, 'border-color': '#9ca3af',
         }
       },
@@ -122,59 +303,151 @@
       { selector: 'edge', style: {
           'width': 2, 'line-color': '#6b7280', 'target-arrow-color': '#6b7280',
           'target-arrow-shape': 'triangle', 'curve-style': 'bezier',
+          // Several verdicts between the same two steps used to be drawn on top
+          // of each other; this fans them apart so three transitions look like
+          // three.
+          'control-point-step-size': 60,
           'label': 'data(label)', 'font-size': 10, 'text-background-color': '#fff',
           'text-background-opacity': 1, 'text-background-padding': '2px',
         }
       },
-      { selector: 'edge:selected', style: { 'line-color': '#7c3aed', 'target-arrow-color': '#7c3aed' } },
+      // A step routing to itself is how a batching step continues its own work —
+      // ingestion.write does it once per document, so these are common and worth
+      // reading at a glance.
+      //
+      // `:loop` is the selector for it. The obvious-looking `[source = "target"]`
+      // is not: that asks whether the edge's *source data field* holds the string
+      // "target", which it never does, so the rule silently matched nothing and
+      // every loop fell back to cytoscape's default — a small arc tucked into the
+      // node's upper-left corner, half hidden behind the box and with its verdict
+      // written across it.
+      //
+      // Drawn square across the flow: the loop leaves and re-enters on the side
+      // where no other transition runs, clear of the box and of the arrows going
+      // in and out. The step size is what lifts the arc off a 150x60 node.
+      { selector: 'edge:loop', style: loopStyle() },
+      { selector: 'edge:selected', style: { 'line-color': '#7c3aed', 'target-arrow-color': '#7c3aed', 'width': 3 } },
     ],
-    layout: { name: 'preset' },
+    layout: useDagre ? dagreOptions : { name: 'preset', fit: true, padding: 30 },
     userZoomingEnabled: true,
     userPanningEnabled: true,
+    // Without bounds cytoscape allows 1e-50 to 1e50. A few turns of the wheel
+    // put the graph at a scale where it is still there and nothing is visible,
+    // and with no way back the only recovery was reloading the page.
+    minZoom: 0.15,
+    maxZoom: 4,
   });
 
-  // Delete selected edge on Delete/Backspace key
-  document.addEventListener('keydown', e => {
-    if ((e.key === 'Delete' || e.key === 'Backspace') && document.activeElement === document.body) {
-      cy.$(':selected').remove();
+  // Zooming anchors on the pointer by converting client coordinates with a
+  // cached container rectangle. Cytoscape refreshes that cache from events it
+  // subscribed to at startup, so anything that moves the container without one
+  // of them leaves the anchor off by however far the container travelled — the
+  // zoom then walks away from the cursor. Invalidating right before a gesture
+  // costs one field write and makes the rectangle unconditionally current.
+  function refreshContainerRect() {
+    const renderer = typeof cy.renderer === 'function' ? cy.renderer() : null;
+    if (renderer && typeof renderer.invalidateContainerClientCoordsCache === 'function') {
+      renderer.invalidateContainerClientCoordsCache();
+    } else {
+      cy.resize();   // public equivalent, should the internal ever move
     }
+  }
+  ['wheel', 'pointerdown', 'touchstart'].forEach(event => {
+    container.addEventListener(event, refreshContainerRect, { capture: true, passive: true });
+  });
+  let rectRefreshQueued = false;
+  ['scroll', 'resize'].forEach(event => {
+    window.addEventListener(event, () => {
+      if (rectRefreshQueued) return;
+      rectRefreshQueued = true;
+      requestAnimationFrame(() => { rectRefreshQueued = false; refreshContainerRect(); });
+    }, { passive: true });
   });
 
-  // Add edge from toolbar
-  document.getElementById('addEdgeBtn').addEventListener('click', () => {
+  function fit() { cy.fit(undefined, 40); }
+  function zoomBy(factor) {
+    // Around the middle of the viewport, which is where the eye is when the
+    // buttons are used rather than the wheel.
+    cy.zoom({
+      level: cy.zoom() * factor,
+      renderedPosition: { x: container.clientWidth / 2, y: container.clientHeight / 2 },
+    });
+  }
+  document.getElementById('fitBtn').addEventListener('click', fit);
+  document.getElementById('zoomInBtn').addEventListener('click', () => zoomBy(1.25));
+  document.getElementById('zoomOutBtn').addEventListener('click', () => zoomBy(0.8));
+  // A double-click on empty canvas is the reflex when a view has got away.
+  cy.on('dblclick', event => { if (event.target === cy) fit(); });
+
+  const deleteTransitionBtn = document.getElementById('deleteTransitionBtn');
+  function syncDeleteButton() {
+    deleteTransitionBtn.disabled = cy.edges(':selected').length === 0;
+  }
+  cy.on('select unselect', syncDeleteButton);
+  syncDeleteButton();
+
+  function deleteSelectedTransitions() {
+    // Transitions only. Selecting a step and pressing Delete used to remove it
+    // from the canvas, and Save then wrote a transition map without it —
+    // quietly dropping that step's routing while the step still existed.
+    const selected = cy.edges(':selected');
+    if (selected.length) { selected.remove(); syncDeleteButton(); }
+  }
+
+  deleteTransitionBtn.addEventListener('click', deleteSelectedTransitions);
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Delete') return;   // Backspace also navigates back in a browser
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    deleteSelectedTransitions();
+  });
+
+  document.getElementById('relayoutBtn').addEventListener('click', () => {
+    if (useDagre) {
+      cy.layout(dagreOptions).run();
+    } else {
+      // From the transitions on the canvas now, not the ones the page loaded
+      // with — the point of re-arranging is usually that they have changed.
+      const positions = layeredPositions(
+        cy.edges().map(e => ({ source: e.data('source'), target: e.data('target') }))
+      );
+      cy.nodes().positions(node => positions[node.id()] || node.position());
+      // The orientation may have flipped with the window; loops follow it.
+      cy.style().selector('edge:loop').style(loopStyle()).update();
+    }
+    fit();
+  });
+
+  document.getElementById('addTransitionBtn').addEventListener('click', () => {
     const from = document.getElementById('gFrom').value;
     const verdict = document.getElementById('gVerdict').value.trim();
     const to = document.getElementById('gTo').value;
     if (!from || !verdict || !to) { alert('Please fill in all three fields.'); return; }
     const edgeId = from + '__' + verdict + '__' + to;
     if (cy.getElementById(edgeId).length) { alert('This transition already exists.'); return; }
+    // One verdict routes to one step. A second target for a verdict that already
+    // has one would silently replace it on save, so refuse it here instead.
+    const clash = cy.edges().filter(e => e.data('source') === from && e.data('label') === verdict);
+    if (clash.length) {
+      alert(stepNameById[from] + " already routes '" + verdict + "' to "
+            + stepNameById[clash[0].data('target')] + '. Delete that transition first.');
+      return;
+    }
     cy.add({ data: { id: edgeId, source: from, target: to, label: verdict } });
     document.getElementById('gVerdict').value = '';
   });
-
-  // Save graph — collect edges into { stepName: { verdict: target } }
-  function refreshEdgeLabels() {
-    cy.edges().forEach(e => {
-      const src = stepNameById[e.data('source')] || e.data('source');
-      const tgt = stepNameById[e.data('target')] || e.data('target');
-      e.data('displayLabel', e.data('label') + ': ' + src + ' -> ' + tgt);
-    });
-  }
-
-  refreshEdgeLabels();
 
   document.getElementById('saveGraphBtn').addEventListener('click', async () => {
     const transitions = {};
     cy.nodes().forEach(n => { transitions[n.id()] = {}; });
     cy.edges().forEach(e => {
-      const src = e.data('source'), label = e.data('label'), tgt = e.data('target');
-      if (!transitions[src]) transitions[src] = {};
-      transitions[src][label] = tgt;
+      transitions[e.data('source')][e.data('label')] = e.data('target');
     });
     const status = document.getElementById('saveStatus');
     status.textContent = 'Saving…';
     try {
-      const resp = await fetch('/admin/versions/{{ version.workflow_version_id }}/graph', {
+      const resp = await fetch('/admin/versions/' + versionId + '/graph', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.nlghtCsrfToken },
         body: JSON.stringify({ transitions }),

@@ -23,7 +23,26 @@
     Capabilities <small>(one per line — matched against incoming request triggers)</small>
     <textarea name="capabilities" rows="4" placeholder="chat&#10;completion">{{ workflow.capabilities | join('\n') if workflow else '' }}</textarea>
   </label>
-  <div style="display:flex;gap:1rem;margin-top:1rem">
+  <label>
+    Concurrency <small>(blocking runs one execution at a time; non-blocking runs any number in parallel)</small>
+    {% set current = workflow.concurrency if workflow else 'non-blocking' %}
+    <select name="concurrency">
+      <option value="non-blocking" {% if current != 'blocking' %}selected{% endif %}>non-blocking</option>
+      <option value="blocking" {% if current == 'blocking' %}selected{% endif %}>blocking</option>
+    </select>
+  </label>
+  <label>
+    Max hops <small>(steps one run may take — empty uses the runtime default of 20, <code>0</code> removes the guard)</small>
+    <input type="number" name="max_hops" min="0" step="1"
+           value="{{ workflow.max_hops if workflow and workflow.max_hops is not none else '' }}"
+           placeholder="default"/>
+  </label>
+  <p class="muted" style="font-size:.85em;margin:-.5rem 0 1rem">
+    A workflow that works through a corpus spends one hop per document, so a large one needs a
+    number that fits it. Running out fails the run rather than stopping it quietly — a half-done
+    run reported as finished is the failure this guards against, not a long one.
+  </p>
+  <div class="form-actions">
     <button type="submit">{% if workflow %}Save changes{% else %}Create workflow{% endif %}</button>
     <a href="/admin/workflows" role="button" class="secondary">Cancel</a>
   </div>

@@ -29,14 +29,20 @@ class PostgresPersistenceSubsystem:
         self,
         runtime: PersistenceSubsystemRuntime,
         engine_factory: _EngineFactory | None = None,
+        *,
+        engine_options: dict[str, object] | None = None,
+        verify_migrations: bool = True,
     ) -> None:
         self._runtime = runtime
         self._engine_factory = engine_factory or _default_engine_factory
+        self._engine_options = engine_options or {}
+        self._verify_migrations = verify_migrations
         self._engine: AsyncEngine | None = None
 
     async def start(self) -> None:
-        self._engine = self._engine_factory(self._runtime.url)
-        await self._assert_migrations_applied()
+        self._engine = self._engine_factory(self._runtime.url, **self._engine_options)
+        if self._verify_migrations:
+            await self._assert_migrations_applied()
 
     async def _assert_migrations_applied(self) -> None:
         from alembic.config import Config  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)

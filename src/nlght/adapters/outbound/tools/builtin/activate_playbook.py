@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 
@@ -35,7 +36,7 @@ class ActivatePlaybookTool(ToolBase):
                         name="name",
                         type="string",
                         description=(
-                            "Playbook name to activate (from the available playbooks in the system prompt), "
+                            "Playbook name to activate (from the available playbooks in model context), "
                             "or 'none' if no playbook matches."
                         ),
                         required=True,
@@ -47,6 +48,7 @@ class ActivatePlaybookTool(ToolBase):
                         required=False,
                     ),
                 ],
+                action=READ_REQUEST,
             )
         ]
 

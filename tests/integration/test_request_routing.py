@@ -12,7 +12,9 @@ Tests the contracts documented in the quickstart and creating-workflows docs:
   - Invalid request body → 422.
   - A workflow present in the mapping but absent from the DB → unhandled
     WorkflowNotFoundError → 500 (adapter does not catch it).
-  - Generic-JSON adapter: unknown workflow → 404, unsupported protocol → 400.
+  - Generic-JSON adapter: it is the catch-all, so any path/method resolves; an
+    unmapped-but-absent workflow → 404. (A bodyless GET resolves too — the
+    detector no longer demands a JSON body.)
 """
 
 from __future__ import annotations

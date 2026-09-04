@@ -8,8 +8,6 @@ import pytest
 
 from nlght.core.hive_mind.models import (
     AtomType,
-    Directive,
-    DirectivePriority,
     PromotionStatus,
     SessionResult,
     TurnSummary,
@@ -17,72 +15,9 @@ from nlght.core.hive_mind.models import (
 )
 from nlght.core.hive_mind.stores import (
     ConversationStore,
-    DirectiveStore,
     SessionResultStore,
     WorkingMemory,
 )
-
-# ---------------------------------------------------------------------------
-# DirectiveStore
-# ---------------------------------------------------------------------------
-
-def test_directive_store_set_and_get() -> None:
-    store = DirectiveStore()
-    d = Directive(key="lang", value="de")
-    store.set(d)
-    assert store.get("lang") is d
-
-def test_directive_store_override_lower_priority() -> None:
-    store = DirectiveStore()
-    low  = Directive(key="lang", value="en", priority=DirectivePriority.LOW)
-    high = Directive(key="lang", value="de", priority=DirectivePriority.HIGH)
-    store.set(low)
-    store.set(high)
-    assert store.get("lang").value == "de"
-
-def test_directive_store_skip_lower_priority() -> None:
-    store = DirectiveStore()
-    high = Directive(key="lang", value="de", priority=DirectivePriority.HIGH)
-    low  = Directive(key="lang", value="en", priority=DirectivePriority.LOW)
-    store.set(high)
-    report = store.set(low)
-    assert report is not None
-    assert report.resolution == "SKIP"
-    assert store.get("lang").value == "de"
-
-def test_directive_store_override_same_priority_returns_conflict() -> None:
-    store = DirectiveStore()
-    d1 = Directive(key="tone", value="formal")
-    d2 = Directive(key="tone", value="casual")
-    store.set(d1)
-    report = store.set(d2)
-    assert report is not None
-    assert report.resolution == "OVERRIDE"
-    assert store.get("tone").value == "casual"
-
-def test_directive_store_remove() -> None:
-    store = DirectiveStore()
-    store.set(Directive(key="x", value="y"))
-    assert store.remove("x") is True
-    assert store.get("x") is None
-
-def test_directive_store_remove_missing() -> None:
-    store = DirectiveStore()
-    assert store.remove("nonexistent") is False
-
-def test_directive_store_snapshot() -> None:
-    store = DirectiveStore()
-    store.set(Directive(key="lang", value="fr"))
-    snap = store.snapshot()
-    assert snap == {"lang": "fr"}
-
-def test_directive_store_get_all() -> None:
-    store = DirectiveStore()
-    store.set(Directive(key="a", value="1"))
-    store.set(Directive(key="b", value="2"))
-    all_d = store.get_all()
-    assert set(all_d.keys()) == {"a", "b"}
-
 
 # ---------------------------------------------------------------------------
 # ConversationStore

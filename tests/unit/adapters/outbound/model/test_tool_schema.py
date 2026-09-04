@@ -14,6 +14,7 @@ from nlght.adapters.outbound.model._tool_helpers import (
     params_to_json_schema,
 )
 from nlght.adapters.outbound.model.anthropic import _to_anthropic_tool
+from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
 from nlght.adapters.outbound.tools.contract import CallbackToolContract
 from nlght.core.tools.tool import ToolParameter
 
@@ -33,6 +34,7 @@ def _contract() -> CallbackToolContract:
         description="Report a chain.",
         parameters=_params(),
         callback=lambda **_: "ok",
+        action=READ_REQUEST,
     )
 
 

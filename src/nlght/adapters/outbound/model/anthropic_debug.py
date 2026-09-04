@@ -4,14 +4,15 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nlght.adapters.outbound.model._tool_helpers import (
-    append_ollama_native_tool_turn,
     contract_to_openai_tool,
     terminal_tool_names,
 )
+from nlght.adapters.outbound.model.anthropic import _to_anthropic_wire_messages
+from nlght.core.model.messages import CanonicalMessage, MessageLike, append_canonical_tool_turn
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -415,7 +416,13 @@ class BoundAnthropicModelClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_anthropic_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
                 messages=messages,
@@ -435,7 +442,8 @@ class BoundAnthropicModelClient(ModelClient):
         anthropic_tools = [_to_anthropic_tool(t) for t in openai_tools] if openai_tools else None
         terminal_names = terminal_tool_names(self._tool_catalog)
 
-        system, current_messages = _split_messages(_convert_messages_for_anthropic(messages))
+        system, unprivileged_messages = _split_messages(messages)
+        current_messages = _convert_messages_for_anthropic(unprivileged_messages)
         input_t = output_t = 0
 
         for _round in range(10):
@@ -512,12 +520,13 @@ class BoundAnthropicModelClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_anthropic_wire_messages(messages)
         # Derive tool definitions: explicit > catalog > none
         effective_tools = tools
         if effective_tools is None and self._tool_catalog is not None:
@@ -526,8 +535,8 @@ class BoundAnthropicModelClient(ModelClient):
 
         if effective_tools:
             anthropic_tools = [_to_anthropic_tool(t) for t in effective_tools]
-            converted = _convert_messages_for_anthropic(messages)
-            system, current_messages = _split_messages(converted)
+            system, unprivileged_messages = _split_messages(messages)
+            current_messages = _convert_messages_for_anthropic(unprivileged_messages)
             anthropic_tool_choice = _to_anthropic_tool_choice(tool_choice) if tool_choice is not None else None
         else:
             anthropic_tools = None
@@ -638,12 +647,9 @@ class BoundAnthropicModelClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        """Append in canonical (Ollama-style) shape — ``_convert_messages_for_anthropic``
-        converts it to Anthropic's tool_use/tool_result block format on the next call.
-        """
-        return append_ollama_native_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

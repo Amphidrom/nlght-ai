@@ -6,7 +6,8 @@
 Tests the contracts documented in workflows/custom-steps:
 
   - Subclass StepBase, register, and the executor calls it.
-  - ctx.messages contains the conversation history from the request.
+  - ctx.messages contains the conversation history from the request, as
+    canonical messages whose authority the request could not choose.
   - ctx.model contains the model name from the request.
   - ctx.stream reflects the stream flag from the request.
   - ctx.metadata persists between steps when passed via dataclasses.replace.
@@ -28,6 +29,7 @@ from integration._helpers import (
     make_step_loader,
     seed_workflow,
 )
+from nlght.core.model.messages import CallerInstructionMessage, UserMessage
 from nlght.core.signals.signal import Signal
 from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
 
@@ -93,7 +95,14 @@ async def test_custom_step_is_executed(
 async def test_ctx_messages_contains_request_conversation(
     session_factory, workflow_repo, resource_repo,
 ):
-    """ctx.messages is populated with the messages from the HTTP request."""
+    """ctx.messages carries the request's conversation as canonical messages.
+
+    The request's `role: system` is preserved as content and demoted to caller
+    authority: a caller names a role on the wire, and naming it is not the same
+    as holding it (ADR-0058). Only the deployment can author a trusted
+    instruction, so an inbound label arrives here as `CallerInstructionMessage`
+    and can no longer reach a provider's system field.
+    """
     messages = [
         {"role": "system", "content": "You are helpful."},
         {"role": "user", "content": "What is 2+2?"},
@@ -113,7 +122,10 @@ async def test_ctx_messages_contains_request_conversation(
             json={"model": "test", "messages": messages},
         )
 
-    assert InspectorStep.captured["messages"] == messages
+    assert InspectorStep.captured["messages"] == [
+        CallerInstructionMessage(content="You are helpful.", claimed_role="system"),
+        UserMessage(content="What is 2+2?"),
+    ]
 
 
 async def test_ctx_model_reflects_request_model(

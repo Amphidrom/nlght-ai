@@ -9,7 +9,6 @@ an LLM call in OrientStep and is passed in from outside.
 Usage::
 
     snapshot = ContextSnapshot(
-        directives    = coordinator.get_directives_list(),
         recent_turns  = coordinator.conversation.last_n(5),
         known_results = coordinator.results.find_by_entities(entities),
         active_atoms  = coordinator.working.read_active(),
@@ -56,13 +55,11 @@ class ContextSnapshot:
 
     def __init__(
         self,
-        directives:     list[Any] | None = None,
         recent_turns:   list[Any] | None = None,
         known_results:  list[Any] | None = None,
         active_atoms:   list[Any] | None = None,
         dependency_ids: set[str]  | None = None,
     ) -> None:
-        self.directives     = directives    or []
         self.recent_turns   = recent_turns  or []
         self.known_results  = known_results or []
         self.active_atoms   = active_atoms  or []
@@ -77,26 +74,26 @@ class MentalModelBuilder:
     """Assembles a MentalModel from a store snapshot and the current signal.
 
     Parameters:
-        relevance_engine:    Pre-configured RelevanceEngine.
-        relevance_threshold: Objects below this score are dropped.
-        max_atoms:           Maximum atoms in the assembled model.
-        max_results:         Maximum session results in the assembled model.
-        max_turns:           Maximum recent turns included.
+        relevance_engine: Pre-configured RelevanceEngine.
+
+    **It selects nothing.** It assembles and scores; what the model is actually
+    told is decided once, later, by the reduction, which is the only place that
+    can see retention, cost and everything competing for the same room at the
+    same time.
+
+    The caps it used to apply — `max_atoms`, `max_results`, `max_turns` — and the
+    `relevance_threshold` are gone. Three storage types had three different
+    selection rules, none of which knew what it would cost to lose what they were
+    dropping. If a store ever grows large enough to need a *loading* limit, that
+    is acquisition and has to be named and reported as such: information lost to
+    a cap is degradation, not the relevance engine finding it unimportant.
+
+    (`relevance_threshold` was additionally never read: it was assigned to
+    `self.threshold` and nothing consulted it.)
     """
 
-    def __init__(
-        self,
-        relevance_engine:    RelevanceEngine,
-        relevance_threshold: float = 0.20,
-        max_atoms:           int   = 15,
-        max_results:         int   = 10,
-        max_turns:           int   = 8,
-    ) -> None:
-        self.engine      = relevance_engine
-        self.threshold   = relevance_threshold
-        self.max_atoms   = max_atoms
-        self.max_results = max_results
-        self.max_turns   = max_turns
+    def __init__(self, relevance_engine: RelevanceEngine) -> None:
+        self.engine = relevance_engine
 
     @classmethod
     def from_step_config(cls, step_config: Mapping[str, object]) -> MentalModelBuilder:
@@ -127,17 +124,21 @@ class MentalModelBuilder:
                 f"session_memory.relevance.strategy must be one of: {choices}"
             ) from exc
 
-        engine = RelevanceEngine(
-            weights=weights,
-            strategy=strategy,
-            threshold=_float_value(relevance, "threshold", 0.15),
-        )
-        return cls(
-            relevance_engine=engine,
-            max_atoms=_positive_int_value(mental_model, "max_atoms", 15),
-            max_results=_positive_int_value(mental_model, "max_results", 10),
-            max_turns=_positive_int_value(mental_model, "max_turns", 8),
-        )
+        # Settings that no longer do anything are refused rather than accepted
+        # in silence. `relevance.threshold` and the `mental_model` caps used to
+        # remove candidates before anything could weigh them (ADR-0056); a
+        # deployment that still sets one is asking for a behaviour that is gone,
+        # and letting it start would be the worst of both — configured, ignored,
+        # and no way to tell.
+        for gone, where in (("threshold", relevance), ("max_atoms", mental_model),
+                            ("max_results", mental_model), ("max_turns", mental_model)):
+            if gone in where:
+                raise ValueError(
+                    f"session_memory sets '{gone}', which no longer exists: nothing "
+                    f"is discarded before it becomes an element, and what a model "
+                    f"is told is decided once by the prompt budget (ADR-0056)."
+                )
+        return cls(relevance_engine=RelevanceEngine(weights=weights, strategy=strategy))
 
     def build(
         self,
@@ -167,25 +168,31 @@ class MentalModelBuilder:
             len(context.active_atoms), len(context.known_results),
         )
 
-        scored_atoms = self.engine.filter_atoms(
+        # Scored and ordered, and **nothing discarded**. What may be forgotten
+        # is decided once, later, with retention and cost in view — a score
+        # threshold and a per-type count answered it here, before either
+        # existed, and a durable fact about the user could be dropped for being
+        # the eleventh session result.
+        scored_atoms = self.engine.rank_atoms(
             atoms           = context.active_atoms,
             signal_entities = signal_entities,
             intent          = intent_str,
             now             = now,
             dependency_ids  = context.dependency_ids,
-            limit           = self.max_atoms,
         )
 
-        scored_results = self.engine.filter_results(
+        scored_results = self.engine.rank_results(
             results         = context.known_results,
             signal_entities = signal_entities,
             intent          = intent_str,
             now             = now,
             dependency_ids  = context.dependency_ids,
-            limit           = self.max_results,
         )
 
-        recent_turns = context.recent_turns[-self.max_turns:]
+        # Every turn the snapshot holds. `[-max_turns:]` was the third selection
+        # rule for the third storage type, and the only one that never even
+        # consulted relevance.
+        recent_turns = context.recent_turns
 
         all_entities = _deduplicate_entities(signal_entities, scored_atoms, scored_results)
 
@@ -201,7 +208,6 @@ class MentalModelBuilder:
             turn_id       = turn_id,
             built_at      = now,
             is_valid      = True,
-            directives    = context.directives,
             recent_turns  = recent_turns,
             known_results = scored_results,
             active_atoms  = scored_atoms,
@@ -213,10 +219,10 @@ class MentalModelBuilder:
 
         logger.info(
             "[%s] MentalModelBuilder: built | atoms=%d results=%d "
-            "directives=%d turns=%d intents=%s summary=%s",
+            "turns=%d intents=%s summary=%s",
             turn_id,
             len(scored_atoms), len(scored_results),
-            len(context.directives), len(recent_turns),
+            len(recent_turns),
             intents,
             "yes" if summary else "no",
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import httpx2
@@ -21,6 +21,10 @@ from nlght.adapters.outbound.model._tool_helpers import (
     contract_to_openai_tool,
     terminal_tool_names,
 )
+from nlght.adapters.outbound.model.openai_cloud import (
+    _to_openai_messages as _to_ollama_cloud_messages,
+)
+from nlght.core.model.messages import CanonicalMessage, MessageLike, append_canonical_tool_turn
 from nlght.core.model.model_info import ModelInfo, RunningModelInfo
 from nlght.core.signals.signal import Signal
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -34,10 +38,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded context windows for known Ollama Cloud models. Ollama Cloud serves
-# the OpenAI-compatible /v1 endpoints and does NOT expose the native /api/show
-# used by the local daemon, so the window is resolved from this provider-specific
-# table (prefix-matched) instead of querying the model. Last resort: the default.
+# Hardcoded context windows for known Ollama Cloud models. Cloud inference uses
+# the OpenAI-compatible /v1 endpoint and does NOT expose the native /api/show
+# metadata used by the local daemon, so the window is resolved from this
+# provider-specific table (prefix-matched) instead. Last resort: the default.
 _CONTEXT_WINDOWS: dict[str, int] = {
     "qwen3-coder:480b": 262_144,
     "qwen3-coder": 262_144,
@@ -61,8 +65,9 @@ DEFAULT_CLOUD_BASE_URL = "https://ollama.com"
 class OllamaCloudClient(ModelProviderBackend):
     """Cloud/remote Ollama provider.
 
-    All requests use the OpenAI-compatible ``/v1/chat/completions`` SSE wire format.
-    Defaults to ``https://ollama.com``; pass ``base_url`` for a self-hosted remote.
+    Inference uses the OpenAI-compatible ``/v1/chat/completions`` wire format;
+    model discovery still uses Ollama's ``/api/tags`` and ``/api/ps`` endpoints.
+    Defaults to ``https://ollama.com``; pass ``base_url`` for a remote endpoint.
     """
 
     def __init__(
@@ -161,7 +166,13 @@ class BoundOllamaCloudClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_ollama_cloud_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
             if chunks:
@@ -235,12 +246,13 @@ class BoundOllamaCloudClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_ollama_cloud_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
             if chunks:
@@ -333,9 +345,9 @@ class BoundOllamaCloudClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        return append_openai_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

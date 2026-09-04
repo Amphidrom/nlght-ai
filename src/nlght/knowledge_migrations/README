@@ -1,0 +1,9 @@
+Migrations for the knowledge graph database.
+
+Separate from the platform chain in ../migrations on purpose: the knowledge
+graph is not runtime metadata, has its own connection URL
+(integrations.persistence.knowledge.url), and may live on another server.
+
+    nlght-ai migrate-knowledge                # upgrade head
+    nlght-ai migrate-knowledge downgrade -1
+    nlght-ai migrate-knowledge current

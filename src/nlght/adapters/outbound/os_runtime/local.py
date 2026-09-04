@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nlght.core.tools.action import ExecutionCapabilities
 from nlght.ports.outbound.os_runtime import OsRuntime, OsRuntimeFactory
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,10 @@ class LocalOsRuntime(OsRuntimeFactory, OsRuntime):
 
     def shell(self) -> tuple[str, str]:
         return ("powershell", "-Command") if _WINDOWS else ("sh", "-c")
+
+    def security_capabilities(self) -> ExecutionCapabilities:
+        """Local execution is host execution; no weaker claim is supportable."""
+        return ExecutionCapabilities.unconfined()
 
     # ── OsRuntimeFactory — shared instance, bind/create return self ──────────
 

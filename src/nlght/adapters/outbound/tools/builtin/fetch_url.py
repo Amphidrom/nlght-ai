@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 import httpx2
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import ARBITRARY_NETWORK_READ
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 logger = logging.getLogger(__name__)
@@ -166,6 +167,7 @@ class FetchUrlTool(ToolBase):
                         description="The full URL to fetch (must start with http:// or https://).",
                     ),
                 ],
+                action=ARBITRARY_NETWORK_READ,
             )
         ]
 

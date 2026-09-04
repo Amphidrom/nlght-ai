@@ -1,0 +1,24 @@
+# The review image builds from the repository root, because its backend installs
+# the nlght package from this checkout. Everything below is either irrelevant to
+# that, or would be copied only to be rebuilt inside the image anyway.
+.git
+.github
+__pycache__
+**/__pycache__
+*.pyc
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+node_modules
+**/node_modules
+review/frontend/dist
+docs
+next-integration
+tests
+logs
+results
+test-output
+dist
+.uv-release-cache
+.DS_Store

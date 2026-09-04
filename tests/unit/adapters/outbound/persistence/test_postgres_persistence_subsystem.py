@@ -45,6 +45,31 @@ async def test_start_creates_engine() -> None:
     assert subsystem.engine is engine
 
 
+async def test_start_forwards_bounded_pool_options_without_duplicate_migration_check() -> None:
+    engine = _StubEngine()
+    received: dict[str, object] = {}
+
+    def fake_factory(url: str, **kwargs: object) -> _StubEngine:
+        received.update(kwargs)
+        return engine
+
+    subsystem = PostgresPersistenceSubsystem(
+        _runtime(),
+        engine_factory=fake_factory,
+        engine_options={"pool_size": 3, "max_overflow": 0, "pool_timeout": 5},
+        verify_migrations=False,
+    )
+    with patch.object(
+        PostgresPersistenceSubsystem,
+        "_assert_migrations_applied",
+        new=AsyncMock(),
+    ) as migration_check:
+        await subsystem.start()
+
+    assert received == {"pool_size": 3, "max_overflow": 0, "pool_timeout": 5}
+    migration_check.assert_not_awaited()
+
+
 async def test_stop_disposes_engine() -> None:
     engine = _StubEngine()
 

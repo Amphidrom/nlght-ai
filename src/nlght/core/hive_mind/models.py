@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum, StrEnum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -31,9 +31,9 @@ class AtomType(StrEnum):
         coordinator.write(WriteIntent(atom_type="ooda:approval", ...))
         coordinator.write(WriteIntent(atom_type="myapp:diff_patch", ...))
 
-    Custom types are treated as *non-promotable* by default — they are
-    discarded when ``finish_task`` runs.  Pass ``promote_immediately=True``
-    on the ``WriteIntent`` if the result should land in the SessionResultStore.
+    Custom types can be marked for movement between WorkingMemory branches,
+    but ``store_promoted_atoms`` and the legacy ``finish_task`` persist only
+    ``RESULT`` and ``EVAL`` atoms in the SessionResultStore.
     """
 
     SPEC    = "SPEC"
@@ -61,25 +61,6 @@ class PromotionStatus(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
-class DirectivePriority(int, Enum):
-    LOW    = 0
-    NORMAL = 1
-    HIGH   = 2
-
-
-# ---------------------------------------------------------------------------
-# DirectiveStore models
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Directive:
-    key:       str
-    value:     str
-    source:    str              = "inferred"   # "user" | "inferred"
-    priority:  DirectivePriority = DirectivePriority.NORMAL
-    created_at: datetime        = field(default_factory=lambda: datetime.now(UTC))
-    overrides: str | None    = None
-    id:        str              = field(default_factory=lambda: str(uuid4()))
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +76,6 @@ class TurnSummary:
     entities:       list[str]       = field(default_factory=list)
     result_summary: str             = ""
     correction_of:  int | None   = None
-    directive:      str | None   = None
     timestamp:      datetime        = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -139,32 +119,12 @@ class SessionResult:
 # session_backend.py) needs this type, and ports must not import adapters.
 # ---------------------------------------------------------------------------
 
-def _ser_directive(d: Directive) -> dict[str, Any]:
-    return {
-        "id": d.id, "key": d.key, "value": d.value,
-        "source": d.source, "priority": d.priority.value,
-        "created_at": d.created_at.isoformat(), "overrides": d.overrides,
-    }
-
-
-def _de_directive(data: dict[str, Any]) -> Directive:
-    d = Directive(
-        key=data["key"], value=data["value"],
-        source=data.get("source", "inferred"),
-        priority=DirectivePriority(data["priority"]),
-        overrides=data.get("overrides"),
-    )
-    d.id = data["id"]
-    d.created_at = datetime.fromisoformat(data["created_at"])
-    return d
-
-
 def _ser_turn(t: TurnSummary) -> dict[str, Any]:
     return {
         "turn_nr": t.turn_nr, "user_input": t.user_input,
         "intent": t.intent, "topic": t.topic,
         "entities": t.entities, "result_summary": t.result_summary,
-        "correction_of": t.correction_of, "directive": t.directive,
+        "correction_of": t.correction_of,
         "timestamp": t.timestamp.isoformat(),
     }
 
@@ -176,7 +136,6 @@ def _de_turn(data: dict[str, Any]) -> TurnSummary:
         entities=data.get("entities", []),
         result_summary=data.get("result_summary", ""),
         correction_of=data.get("correction_of"),
-        directive=data.get("directive"),
     )
     t.timestamp = datetime.fromisoformat(data["timestamp"])
     return t
@@ -219,13 +178,19 @@ def _slots_to_json(slots: dict[str, Any]) -> dict[str, Any]:
 @dataclass
 class SessionSnapshot:
     session_id:           str
-    directives:           list[Directive]
     turns:                list[TurnSummary]
     results:              list[SessionResult]
     interrupted_task_ids: list[str]
     created_at:           datetime
     updated_at:           datetime
     slots:                dict[str, Any] = field(default_factory=dict)
+    #: Which principal this session belongs to, recorded when it was created.
+    #:
+    #: Empty means **unowned**, and that is not a permission. A session written
+    #: before ownership existed has no owner and cannot be given one by whoever
+    #: asks for it next — "first caller wins" would be an account-takeover
+    #: migration (ADR-0061).
+    owner_principal_id:   str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -233,7 +198,7 @@ class SessionSnapshot:
             "created_at":           self.created_at.isoformat(),
             "updated_at":           self.updated_at.isoformat(),
             "interrupted_task_ids": self.interrupted_task_ids,
-            "directives":           [_ser_directive(d) for d in self.directives],
+            "owner_principal_id":   self.owner_principal_id,
             "turns":                [_ser_turn(t) for t in self.turns],
             "results":              [_ser_result(r) for r in self.results],
             "slots":                self.slots,
@@ -243,7 +208,7 @@ class SessionSnapshot:
     def from_dict(cls, data: dict[str, Any]) -> SessionSnapshot:
         return cls(
             session_id           = data["session_id"],
-            directives           = [_de_directive(d) for d in data.get("directives", [])],
+            owner_principal_id   = data.get("owner_principal_id", ""),
             turns                = [_de_turn(t) for t in data.get("turns", [])],
             results              = [_de_result(r) for r in data.get("results", [])],
             interrupted_task_ids = data.get("interrupted_task_ids", []),
@@ -262,7 +227,27 @@ class WorkingAtom:
     atom_type:         str   # AtomType member or any "namespace:label" string
     content:           str
     task_id:           str
+    #: What this atom is about. The caller has always supplied them on
+    #: `WriteIntent`, and every `write()` implementation dropped them here — so
+    #: proximity scored every atom against an empty list and returned the same
+    #: floor for all of them (ADR-0057). Carried now, and nothing else changes:
+    #: the field the caller already fills reaches the scorer that already reads
+    #: it.
+    entities:          list[str] = field(default_factory=list)
     tags:              list[str] = field(default_factory=list)
+    #: What this atom is *about*, as a stable short name — a `MemoryCandidate`'s
+    #: key. It has always existed upstream and reached the atom only as a prefix
+    #: inside `content`, which is a shorthand hiding in free text: readable to a
+    #: person, unusable to anything that wants to say the same thing briefly.
+    #:
+    #: Empty for an atom written by anything that has no such name, and an
+    #: adapter offers no short form for those rather than parsing one back out.
+    key:               str      = ""
+    #: What sort of remembered thing it is — fact, artifact, relation, request.
+    #: **Not** `atom_type`: that says where in the pipeline this was
+    #: written (SPEC, RESULT, EVAL), which is a different axis entirely. An
+    #: artifact can be written at any stage and a SPEC can be about anything.
+    kind:              str      = ""
     promote_to_parent: bool     = False
     created_at:        datetime = field(default_factory=lambda: datetime.now(UTC))
     id:                str      = field(default_factory=lambda: str(uuid4()))
@@ -279,6 +264,11 @@ class WriteIntent:
     task_id:           str
     entities:          list[str] = field(default_factory=list)
     tags:              list[str] = field(default_factory=list)
+    #: The stable short name of what this is about, and what sort of thing it
+    #: is. Carried so an adapter can offer a compact representation without
+    #: parsing one back out of the content (ADR-0059).
+    key:               str       = ""
+    kind:              str       = ""
     turn_nr:           int       = 0
     promote_immediately: bool    = False
 
@@ -424,7 +414,6 @@ class RelevanceScore:
 class ScoredAtom:
     atom:  WorkingAtom
     score: RelevanceScore
-    depth: int = 2
 
 
 @dataclass
@@ -442,7 +431,6 @@ class MentalModel:
     turn_id:       str
     built_at:      datetime
     is_valid:      bool             = True
-    directives:    list[Directive]  = field(default_factory=list)
     recent_turns:  list[TurnSummary]  = field(default_factory=list)
     known_results: list[ScoredResult] = field(default_factory=list)
     active_atoms:  list[ScoredAtom]   = field(default_factory=list)
@@ -450,6 +438,14 @@ class MentalModel:
     summary:       str | None         = None
     intents:       list[str]          = field(default_factory=list)
     entities:      list[str]          = field(default_factory=list)
+    #: Knowledge that arrives already adapted, from wherever it came from.
+    #:
+    #: The four fields above are the session's own stores and keep their types.
+    #: This is for everything else the model should currently know — a retrieved
+    #: passage is the first — and it is deliberately **not** a second typed list
+    #: per source: a `passages` field here would be the retrieval special case
+    #: rebuilt one level up, and the next source would want its own.
+    elements:      tuple[Any, ...]     = ()
 
     def top_atoms(self, n: int = 5) -> list[ScoredAtom]:
         return sorted(self.active_atoms, key=lambda a: a.score.total, reverse=True)[:n]
@@ -464,8 +460,221 @@ class MentalModel:
         return (
             f"MentalModel(turn={self.turn_id[:8]} "
             f"atoms={len(self.active_atoms)} results={len(self.known_results)} "
-            f"directives={len(self.directives)} valid={self.is_valid})"
+            f"valid={self.is_valid})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Orient: one element, whatever it is made of
+# ---------------------------------------------------------------------------
+#
+# A turn, an atom, a session result and a retrieved passage are four different
+# things and stay four different things — they mean different things to
+# a reader and to the business. What they have in common is only visible at the
+# moment a budget forces a choice: each is some information, worth something,
+# costing something, and expressible more cheaply or not at all.
+#
+# That common layer is what these types are. Everything type-specific lives in
+# the adapter that produces a `MentalElement`; nothing below this line knows what
+# a SessionResult is, and no reduction rule may ever ask.
+
+
+class Level(StrEnum):
+    """How fully an element is being said.
+
+    Ordered from fullest to cheapest, and that order is the contract: a reduction
+    may move an element *down* this list and never up.
+
+    `OMIT` is a level rather than the absence of one. "Choose exactly one level
+    per element" is then a total function, which is what makes monotonicity a
+    property of the algorithm instead of something tests hope for.
+    """
+
+    FULL = "full"
+    COMPACT = "compact"
+    OMIT = "omit"
+
+
+#: Fullest first. The single place this order is written down.
+LEVELS: tuple[Level, ...] = (Level.FULL, Level.COMPACT, Level.OMIT)
+
+
+class Retention(StrEnum):
+    """How hard this element should be held on to under pressure.
+
+    Declared by whatever produced the element, never derived from its relevance
+    score. The two are different questions: relevance says *how well this matches
+    the moment*, retention says *what it costs to be wrong about dropping it*. A
+    result nobody's question mentions may still be one that must not be dropped.
+
+    It is a property of the element and not of its kind, so the reduction can
+    honour it without knowing what kind of thing it is holding.
+    """
+
+    #: Never omitted. It may still be compacted, and a mandatory set too large
+    #: for the budget is reported rather than silently trimmed.
+    MANDATORY = "mandatory"
+    #: Compacted before it is omitted — losing it entirely costs more than
+    #: saying it briefly.
+    IMPORTANT = "important"
+    #: Kept while there is room; dropped without ceremony when there is not.
+    USEFUL = "useful"
+    #: The first thing to go.
+    DISPENSABLE = "dispensable"
+
+
+@dataclass(frozen=True, slots=True)
+class Representation:
+    """One way of saying an element, and what saying it costs.
+
+    Produced by the adapter that knows what the element is. The reduction picks
+    between representations; it never writes one, because writing one requires
+    knowing what the thing is and that is exactly the knowledge the reduction
+    must not have.
+    """
+
+    level: Level
+    text: str
+    #: In the same estimated tokens the prompt path already counts in. A number
+    #: the producer states, so nothing here has to guess at a unit.
+    cost: int = 0
+    #: Whether this wording was derived rather than quoted. A compacted form of
+    #: source-backed text is **not** a verbatim quote of the source, and anything
+    #: that cites must be able to tell the difference (ADR-0053).
+    derived: bool = False
+
+    def __post_init__(self) -> None:
+        if self.cost < 0:
+            raise ValueError("a representation cannot cost less than nothing")
+        if self.level is Level.OMIT and self.cost:
+            raise ValueError("an omitted element costs nothing to say")
+
+
+def estimate_tokens(text: str) -> int:
+    """What saying this is expected to cost.
+
+    The prompt path has counted in this estimate for as long as it has had a
+    budget, and it lives here now because `Representation.cost` is the concept it
+    serves. One definition: a second answer to "how big is this" is two numbers
+    that drift, and the platform already carries one duplicate of this constant.
+    """
+    return max(1, int(len(text) / 3.5))
+
+
+@dataclass(frozen=True, slots=True)
+class RelevanceInputs:
+    """What relevance is computed from, in the one shape it is computed from.
+
+    Every sort of knowledge answers these four questions differently — an atom
+    knows when it was last mutated, a session result never mutates at all, a
+    passage was ranked by a fusion — and that difference is real. What is *not*
+    real is a scoring function per sort: "session results do not mutate" is the
+    input `mutation_count=0`, not a second definition of relevance.
+
+    So the adapter maps its domain fields onto this, and the engine reads only
+    this. After the adapter, nothing scoring anything knows what it is holding.
+    """
+
+    #: When this last changed. `None` means "no age known", which scores as
+    #: freshly relevant rather than as infinitely stale — absence of a timestamp
+    #: is not evidence of age.
+    updated_at: datetime | None = None
+    #: What this is about, for closeness to the current question.
+    entities: tuple[str, ...] = ()
+    #: How often it has been rewritten. Zero for anything immutable, which is a
+    #: fact about that thing and not a gap in it.
+    mutation_count: int = 0
+    #: The id a dependency chain would name it by, where it has one.
+    identity: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Presentation:
+    """Where a representation belongs in the prompt, and nothing more.
+
+    Produced by the adapter, because deciding that a user fact belongs under
+    "Known facts about the user" is an interpretation of what a session result
+    *is* — and that interpretation is exactly what the renderer must not make.
+
+    Deliberately two fields. It is not an ontology of prompt structure; it is the
+    smallest thing that answers "which heading, in what order", which is all a
+    generic renderer needs to reproduce the prompt the special cases used to
+    produce.
+    """
+
+    #: The heading this element renders under, verbatim.
+    section: str
+    #: Position among sections. Two elements naming one section agree on it in
+    #: practice; where they disagree the lowest wins, so ordering never depends
+    #: on which element happened to be seen first.
+    order: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class MentalElement:
+    """One thing the model might be told, in whichever form survives.
+
+    The payload stays whatever it was — a `SessionResult`, a `ContextPassage`,
+    a `WorkingAtom` — and is carried rather than converted. Everything the reduction
+    needs is on the wrapper, so a new sort of knowledge becomes reducible by
+    being adapted, never by the reduction learning about it.
+    """
+
+    element_id: str
+    #: What sort of thing this is. A **label**, for diagnosis, provenance and
+    #: choosing an adapter. Neither the reduction nor the renderer reads it, and
+    #: the moment something branches on it, storage types are deciding again.
+    #: Where an element belongs in the prompt is `presentation`, which the
+    #: adapter decides — a session result tagged `user_fact` and one without it
+    #: are the same `kind` and render under different headings.
+    kind: str
+    representations: tuple[Representation, ...]
+    presentation: Presentation = field(
+        default_factory=lambda: Presentation(section="")
+    )
+    #: What relevance is computed from. Carried rather than computed, so the
+    #: engine scores an element without ever asking what it was made of.
+    signals: RelevanceInputs = field(default_factory=lambda: RelevanceInputs())
+    retention: Retention = Retention.USEFUL
+    #: How well this matches the moment, from the `RelevanceEngine`. Orders
+    #: elements *within* a retention band and decides nothing across bands.
+    relevance: float = 0.0
+    #: Where the information came from, if it can say. Survives every change of
+    #: representation, because how much of a thing is being said has nothing to
+    #: do with where it came from.
+    provenance: Any = None
+    payload: Any = None
+
+    def __post_init__(self) -> None:
+        if not self.representations:
+            raise ValueError(f"element '{self.element_id}' offers no representation")
+        levels = [item.level for item in self.representations]
+        if len(set(levels)) != len(levels):
+            raise ValueError(f"element '{self.element_id}' offers a level twice")
+        # Cheaper as it gets shorter, and this is load-bearing rather than
+        # tidy: the reduction guarantees that more budget never yields a less
+        # complete view, and it earns that by applying a prefix of one fixed
+        # order of reductions. A "compact" form costing more than the full one
+        # would make a reduction step *raise* the total, and the guarantee would
+        # hold only by luck of the data.
+        offered = sorted(self.representations, key=lambda item: LEVELS.index(item.level))
+        for fuller, shorter in zip(offered, offered[1:], strict=False):
+            if shorter.cost > fuller.cost:
+                raise ValueError(
+                    f"element '{self.element_id}' says {shorter.level} costs "
+                    f"{shorter.cost} and {fuller.level} costs {fuller.cost}; a "
+                    f"shorter form that costs more is not a shorter form"
+                )
+
+    def at(self, level: Level) -> Representation | None:
+        """This element said at that level, where it can be."""
+        return next((item for item in self.representations if item.level is level), None)
+
+    @property
+    def levels(self) -> tuple[Level, ...]:
+        """The levels this element can be said at, fullest first."""
+        offered = {item.level for item in self.representations}
+        return tuple(level for level in LEVELS if level in offered)
 
 
 class MentalModelCache:
@@ -532,4 +741,3 @@ class ControlSignalDecision:
         if self.scope_change:
             parts.append(f"scope={self.scope_change!r}")
         return f"ControlSignalDecision({', '.join(parts)})"
-

@@ -43,7 +43,7 @@
     Conditions <small>(JSON — keys AND, values OR, globs; keys: <code>model</code>, <code>header:&lt;name&gt;</code>, <code>client_host</code>; empty = matches always)</small>
     <textarea name="conditions_json" rows="6" placeholder='{"model": ["llama3*"], "header:x-org": ["acme"]}'>{{ policy.conditions | tojson(indent=2) if policy else '{}' }}</textarea>
   </label>
-  <div style="display:flex;gap:1rem;margin-top:1rem">
+  <div class="form-actions">
     <button type="submit">{% if policy %}Save changes{% else %}Create policy{% endif %}</button>
     <a href="/admin/policies" role="button" class="secondary">Cancel</a>
     {% if policy %}

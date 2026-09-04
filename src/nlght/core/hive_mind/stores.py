@@ -16,8 +16,6 @@ from datetime import datetime
 from typing import Any
 
 from nlght.core.hive_mind.models import (
-    ConflictReport,
-    Directive,
     PromotionStatus,
     SessionResult,
     TurnSummary,
@@ -25,60 +23,7 @@ from nlght.core.hive_mind.models import (
 )
 
 # ---------------------------------------------------------------------------
-# 1. DirectiveStore — WHO AM I RIGHT NOW?
-# ---------------------------------------------------------------------------
-
-class DirectiveStore:
-    """Persistent behavioral rules for the whole session.
-
-    Directives survive individual turns and tasks.
-    """
-
-    def __init__(self) -> None:
-        self._directives: dict[str, Directive] = {}
-
-    def set(self, directive: Directive) -> ConflictReport | None:
-        if directive.key in self._directives:
-            existing = self._directives[directive.key]
-            if existing.priority > directive.priority:
-                return ConflictReport(
-                    existing_id           = existing.id,
-                    existing_content      = f"{existing.key}={existing.value}",
-                    new_content           = f"{directive.key}={directive.value}",
-                    conflicting_entities  = [directive.key],
-                    resolution            = "SKIP",
-                )
-            conflict = ConflictReport(
-                existing_id           = existing.id,
-                existing_content      = f"{existing.key}={existing.value}",
-                new_content           = f"{directive.key}={directive.value}",
-                conflicting_entities  = [directive.key],
-                resolution            = "OVERRIDE",
-            )
-            self._directives[directive.key] = directive
-            return conflict
-
-        self._directives[directive.key] = directive
-        return None
-
-    def get(self, key: str) -> Directive | None:
-        return self._directives.get(key)
-
-    def get_all(self) -> dict[str, Directive]:
-        return dict(self._directives)
-
-    def remove(self, key: str) -> bool:
-        if key in self._directives:
-            del self._directives[key]
-            return True
-        return False
-
-    def snapshot(self) -> dict[str, str]:
-        return {k: d.value for k, d in self._directives.items()}
-
-
-# ---------------------------------------------------------------------------
-# 2. ConversationStore — WHERE AM I IN THE CONVERSATION?
+# 1. ConversationStore — WHERE AM I IN THE CONVERSATION?
 # ---------------------------------------------------------------------------
 
 class ConversationStore:

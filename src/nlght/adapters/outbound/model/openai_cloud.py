@@ -5,13 +5,28 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from nlght.adapters.outbound.model._messages import (
+    serialize_caller_instruction,
+    serialize_untrusted_context,
+)
 from nlght.adapters.outbound.model._tool_helpers import (
     append_openai_tool_turn,
     contract_to_openai_tool,
     terminal_tool_names,
+)
+from nlght.core.model.messages import (
+    AssistantMessage,
+    CallerInstructionMessage,
+    CanonicalMessage,
+    MessageLike,
+    ToolResultMessage,
+    TrustedInstructionMessage,
+    UntrustedContextMessage,
+    UserMessage,
+    append_canonical_tool_turn,
 )
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
@@ -41,6 +56,48 @@ _CONTEXT_WINDOWS: dict[str, int] = {
 }
 _DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+
+def _to_openai_messages(messages: Sequence[MessageLike]) -> list[dict[str, Any]]:
+    """Map every canonical authority type to the OpenAI Chat wire format."""
+
+    lowered: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            lowered.append(dict(message))
+        elif isinstance(message, TrustedInstructionMessage):
+            lowered.append({"role": "system", "content": message.content})
+        elif isinstance(message, CallerInstructionMessage):
+            lowered.append({"role": "user", "content": serialize_caller_instruction(message)})
+        elif isinstance(message, UserMessage):
+            lowered.append({"role": "user", "content": message.content, **dict(message.attributes)})
+        elif isinstance(message, AssistantMessage):
+            wire = {"role": "assistant", "content": message.content, **dict(message.attributes)}
+            if message.tool_calls:
+                wire["tool_calls"] = [
+                    {
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(dict(call.arguments)),
+                        },
+                    }
+                    for call in message.tool_calls
+                ]
+            lowered.append(wire)
+        elif isinstance(message, ToolResultMessage):
+            wire = {"role": message.original_role, "content": message.content, **dict(message.attributes)}
+            if message.tool_call_id:
+                wire["tool_call_id"] = message.tool_call_id
+            if message.name:
+                wire["name"] = message.name
+            lowered.append(wire)
+        elif isinstance(message, UntrustedContextMessage):
+            lowered.append({"role": "user", "content": serialize_untrusted_context(message)})
+        else:
+            raise TypeError(f"unsupported OpenAI canonical message type '{type(message).__name__}'")
+    return lowered
 
 
 class OpenAICloudModelClient(ModelProviderBackend):
@@ -304,7 +361,13 @@ class BoundOpenAICloudModelClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = _to_openai_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
                 messages=messages,
@@ -377,12 +440,13 @@ class BoundOpenAICloudModelClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = _to_openai_messages(messages)
         # Derive tools from catalog if none explicitly passed
         effective_tools = tools
         if effective_tools is None and self._tool_catalog is not None:
@@ -469,9 +533,9 @@ class BoundOpenAICloudModelClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        return append_openai_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

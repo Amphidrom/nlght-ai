@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 import httpx2
@@ -16,12 +16,14 @@ from nlght.adapters.outbound.model._context_chunking import (
     prepare_chunked_session,
 )
 from nlght.adapters.outbound.model._ollama_http_debug import _OllamaHttp
+from nlght.adapters.outbound.model._ollama_messages import to_ollama_messages
 from nlght.adapters.outbound.model._tool_helpers import (
     append_ollama_native_tool_turn,
     append_openai_tool_turn,
     contract_to_openai_tool,
     terminal_tool_names,
 )
+from nlght.core.model.messages import CanonicalMessage, MessageLike, append_canonical_tool_turn
 from nlght.core.model.model_info import ModelInfo, RunningModelInfo
 from nlght.core.signals.signal import Signal
 from nlght.ports.outbound.model_client import ModelClient, ModelStreamEvent
@@ -142,7 +144,13 @@ class BoundOllamaClient(ModelClient):
         self._metering = metering
         self._tool_catalog = tool_catalog
 
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    @property
+    def token_budget(self) -> TokenBudget | None:
+        """The budget this client will enforce, so a prompt is built to it."""
+        return self._token_budget
+
+    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+        messages = to_ollama_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
             if chunks:
@@ -236,12 +244,13 @@ class BoundOllamaClient(ModelClient):
 
     async def stream(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
         *,
         temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        messages = to_ollama_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
             if chunks:
@@ -358,9 +367,9 @@ class BoundOllamaClient(ModelClient):
 
     def append_tool_turn(
         self,
-        messages: list[dict[str, Any]],
+        messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
         results: list[str],
         assistant_text: str = "",
-    ) -> list[dict[str, Any]]:
-        return append_ollama_native_tool_turn(messages, tool_calls_raw, results, assistant_text)
+    ) -> list[CanonicalMessage]:
+        return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

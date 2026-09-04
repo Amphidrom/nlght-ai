@@ -40,3 +40,5 @@ def test_platform_snapshot_defaults_are_empty() -> None:
     assert snapshot.gateways == []
     assert snapshot.os_runtime is None
     assert snapshot.integrations.model_providers == []
+    assert snapshot.execution.role == "gateway+worker"
+    assert snapshot.execution.worker.concurrency == 1

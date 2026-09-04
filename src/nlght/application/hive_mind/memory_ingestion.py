@@ -126,6 +126,8 @@ class MemoryIngestionPipeline:
                 content=f"candidate:{candidate.key} | {candidate.content}",
                 task_id=f"extract:{correlation_id}",
                 entities=candidate.entities,
+                key=candidate.key,
+                kind=str(candidate.kind),
                 tags=["memory_candidate", candidate.confidence.value, *candidate.tags],
                 promote_immediately=True,
             ))
@@ -159,6 +161,8 @@ class MemoryIngestionPipeline:
                     task_id=f"validate:{correlation_id}",
                     entities=candidate.entities,
                     tags=["validated", "committed", *candidate.tags],
+                    key=candidate.key,
+                    kind=str(candidate.kind),
                     promote_immediately=True,
                 ))
             else:
@@ -168,6 +172,8 @@ class MemoryIngestionPipeline:
                     content=f"discarded_candidate:{candidate.key} | {candidate.content}",
                     task_id=f"validate:{correlation_id}",
                     entities=candidate.entities,
+                    key=candidate.key,
+                    kind=str(candidate.kind),
                     tags=["discarded", candidate.confidence.value, *candidate.tags],
                     promote_immediately=False,
                 ))

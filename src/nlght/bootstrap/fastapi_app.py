@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
+from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 
 from nlght.bootstrap.wiring import build_container
@@ -32,9 +33,13 @@ def create_app(
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         container = await build_container(config_path=_config_path)
         app.state.container = container
-        for adapter in container.http_protocol_adapters:
-            app.include_router(adapter.build_router())
-            logger.info("Registered protocol adapter: %s", type(adapter).__name__)
+
+        # Register /admin and the metrics endpoint *before* the protocol
+        # adapters. The generic_json adapter is a catch-all — `/{full_path:path}`
+        # for every method — and Starlette matches routes in registration order,
+        # so anything mounted after it is shadowed. Admin and metrics would then
+        # answer as unmapped workflow paths (404 "No enabled workflow found for
+        # operation 'generic_json_request'") instead of serving their own routes.
         if admin_enabled:
             from nlght.adapters.inbound.http.admin.router import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
                 admin_router,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
@@ -43,8 +48,23 @@ def create_app(
             logger.info("Admin UI mounted at /admin")
         metering = getattr(container, "metering", None)
         if metering is not None and hasattr(metering, "make_asgi_app"):
-            app.mount(metering.endpoint, metering.make_asgi_app())
-            logger.info("Metrics scrape endpoint mounted at %s", metering.endpoint)
+            # A mount matches "<endpoint>/..." but never the bare "<endpoint>"
+            # itself; Starlette would normally redirect to the trailing slash,
+            # but only when nothing else matched — and the catch-all below
+            # always matches. Scrapers request the bare path, so it gets an
+            # explicit redirect registered ahead of the catch-all.
+            endpoint = metering.endpoint
+            app.mount(endpoint, metering.make_asgi_app())
+
+            @app.get(endpoint, include_in_schema=False)
+            async def _metrics_bare_path() -> RedirectResponse:
+                return RedirectResponse(f"{endpoint}/")
+
+            logger.info("Metrics scrape endpoint mounted at %s", endpoint)
+
+        for adapter in container.http_protocol_adapters:
+            app.include_router(adapter.build_router())
+            logger.info("Registered protocol adapter: %s", type(adapter).__name__)
         try:
             yield
         finally:

@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from nlght.adapters.inbound.http.admin.services import AdminService
 from nlght.adapters.outbound.persistence.models import Base
+from nlght.core.errors.errors import ResourceAddressAlreadyExists
+from nlght.core.runtime.resource import ResourceDef
 
 
 async def _service() -> tuple[AdminService, object]:
@@ -173,3 +176,150 @@ async def test_admin_service_access_policy_crud() -> None:
         assert await svc.list_policies() == []
     finally:
         await engine.dispose()
+
+
+def test_step_types_expose_their_configuration_options() -> None:
+    catalogue = {entry["type"]: entry for entry in AdminService.step_types()}
+
+    # Every registered step type is offered, so the UI can list them.
+    assert "ingestion.source" in catalogue
+    assert "knowledge.extract" in catalogue
+
+    source = catalogue["ingestion.source"]
+    options = {option["name"]: option for option in source["options"]}
+    assert options["source_id"]["required"] is True
+    assert options["type"]["choices"] == ["confluence", "filesystem"]
+    assert options["include"]["type"] == "array"
+    assert source["doc"]
+
+
+def test_a_step_without_declared_options_still_appears() -> None:
+    catalogue = {entry["type"]: entry for entry in AdminService.step_types()}
+
+    # done/failed declare nothing; they must not vanish from the catalogue, and
+    # the UI falls back to raw JSON for them.
+    assert catalogue["done"]["options"] == []
+
+
+def test_declared_defaults_and_descriptions_reach_the_ui() -> None:
+    catalogue = {entry["type"]: entry for entry in AdminService.step_types()}
+    options = {o["name"]: o for o in catalogue["ingestion.process"]["options"]}
+
+    assert options["chunk_size"]["default"] == 4000
+    assert "overlap" in options["chunk_overlap"]["description"].lower()
+
+
+def test_retrieval_configuration_reaches_the_admin_ui() -> None:
+    catalogue = {entry["type"]: entry for entry in AdminService.step_types()}
+    options = {option["name"]: option for option in catalogue["retrieval.search"]["options"]}
+
+    assert options["fetch_k"]["type"] == "object"
+    assert options["fetch_k"]["default"] == {
+        "lexical": 50, "vector": 50, "knowledge": 20,
+    }
+    assert options["source_weights"]["type"] == "object"
+    assert options["kinds"]["type"] == "array"
+
+
+def test_resource_kinds_expose_their_configuration_options() -> None:
+    catalogue = {entry["kind"]: entry for entry in AdminService.resource_kinds()}
+
+    assert "knowledge_store" in catalogue
+    options = {o["name"]: o for o in catalogue["knowledge_store"]["options"]}
+    # The knowledge connection belongs to the activation, so the form must offer it.
+    assert options["pg_url"]["required"] is True
+    assert catalogue["knowledge_store"]["provider"] == "postgres+opensearch"
+
+
+def test_credentials_are_marked_so_the_form_can_mask_them() -> None:
+    catalogue = {entry["kind"]: entry for entry in AdminService.resource_kinds()}
+    options = {o["name"]: o for o in catalogue["data_store"]["options"]}
+
+    assert options["qdrant_api_key"]["secret"] is True
+    assert options["qdrant_url"]["secret"] is False
+
+
+def test_a_tool_without_declared_options_still_appears() -> None:
+    catalogue = {entry["kind"]: entry for entry in AdminService.resource_kinds()}
+
+    # shell declares none; it must keep the raw JSON editor rather than vanish.
+    assert catalogue["shell"]["options"] == []
+
+
+# ---------------------------------------------------------------------------
+# a resource is at one address, and only one resource is
+# ---------------------------------------------------------------------------
+
+
+async def test_the_same_name_under_two_kinds_is_two_resources() -> None:
+    """The address is `<kind>/<name>`, so the kind is part of what is unique.
+
+    An operator naming both their data store and their knowledge store `main` is
+    not a conflict — `data_store/main` and `knowledge_store/main` are different
+    addresses.
+    """
+    svc, engine = await _service()
+    try:
+        first = await svc.create_resource(
+            name="main", kind="data_store", provider="qdrant+opensearch",
+            config={}, enabled=True,
+        )
+        second = await svc.create_resource(
+            name="main", kind="knowledge_store", provider="postgres+opensearch",
+            config={}, enabled=True,
+        )
+        assert first.resource_id != second.resource_id
+    finally:
+        await engine.dispose()
+
+
+async def test_a_second_resource_at_one_address_is_refused() -> None:
+    """The guarantee is the constraint, and the caller sees a conflict.
+
+    Two rows answering to one address cannot carry an access decision: a rule
+    naming `data_store/main` would be satisfied while the resource actually
+    activated is whichever row sorted first.
+    """
+    svc, engine = await _service()
+    try:
+        await svc.create_resource(
+            name="main", kind="data_store", provider="qdrant+opensearch",
+            config={}, enabled=True,
+        )
+        with pytest.raises(ResourceAddressAlreadyExists) as conflict:
+            await svc.create_resource(
+                name="main", kind="data_store", provider="qdrant+opensearch",
+                config={"other": "config"}, enabled=True,
+            )
+        assert conflict.value.address == "data_store/main"
+    finally:
+        await engine.dispose()
+
+
+async def test_renaming_a_resource_onto_a_taken_address_is_refused() -> None:
+    """The update path is guarded too — creating is not the only way in."""
+    svc, engine = await _service()
+    try:
+        await svc.create_resource(
+            name="main", kind="data_store", provider="qdrant+opensearch",
+            config={}, enabled=True,
+        )
+        other = await svc.create_resource(
+            name="secondary", kind="data_store", provider="qdrant+opensearch",
+            config={}, enabled=True,
+        )
+        with pytest.raises(ResourceAddressAlreadyExists):
+            await svc.update_resource(other.resource_id, name="main")
+    finally:
+        await engine.dispose()
+
+
+def test_a_resource_knows_its_own_address() -> None:
+    """Formatted once, on the type, because four places have to agree on it."""
+    import uuid as _uuid
+
+    resource = ResourceDef(
+        resource_id=_uuid.uuid4(), name="data-main", kind="data_store",
+        provider="qdrant+opensearch", config={},
+    )
+    assert resource.address == "data_store/data-main"

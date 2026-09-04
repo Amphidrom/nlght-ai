@@ -18,6 +18,9 @@ def test_load_returns_empty_snapshot_when_file_missing(tmp_path: Path) -> None:
     assert snapshot.gateways == []
     assert snapshot.os_runtime is None
     assert snapshot.integrations.model_providers == []
+    assert snapshot.embedding.device == "auto"
+    assert snapshot.embedding.cache_dir == ""
+    assert snapshot.embedding.offline == "auto"
 
 
 def test_load_maps_full_yaml_structure(tmp_path: Path) -> None:
@@ -65,6 +68,29 @@ integrations:
         enabled: true
         config:
           url: postgresql://hive
+execution:
+  role: worker
+  stream:
+    transport: postgres
+    url: postgresql+asyncpg://stream
+    channel: nlght_stream_a
+  worker:
+    instance_name: ingestion-a
+    capabilities: [parser:pdf, projection:qdrant]
+    concurrency: 4
+    poll_interval_seconds: 0.25
+    lease_seconds: 40
+    heartbeat_seconds: 8
+    retry_base_seconds: 2
+    retry_max_seconds: 30
+embedding:
+  provider: sentence-transformers
+  model: all-MiniLM-L6-v2
+  batch_size: 32
+  normalize: false
+  device: cuda:1
+  cache_dir: /var/cache/models
+  offline: always
         """.strip()
     )
 
@@ -80,6 +106,23 @@ integrations:
     assert snapshot.integrations.persistence.workflows.url == "postgresql://runtime"
     assert snapshot.integrations.persistence.hive_mind.provider is not None
     assert snapshot.integrations.persistence.hive_mind.provider.name == "hive"
+    assert snapshot.execution.role == "worker"
+    assert snapshot.execution.stream.transport == "postgres"
+    assert snapshot.execution.stream.url == "postgresql+asyncpg://stream"
+    assert snapshot.execution.stream.channel == "nlght_stream_a"
+    assert snapshot.execution.worker.instance_name == "ingestion-a"
+    assert snapshot.execution.worker.capabilities == ["parser:pdf", "projection:qdrant"]
+    assert snapshot.execution.worker.concurrency == 4
+    assert snapshot.execution.worker.poll_interval_seconds == 0.25
+    assert snapshot.execution.worker.lease_seconds == 40
+    assert snapshot.execution.worker.heartbeat_seconds == 8
+    assert snapshot.embedding.provider == "sentence-transformers"
+    assert snapshot.embedding.model == "all-MiniLM-L6-v2"
+    assert snapshot.embedding.batch_size == 32
+    assert snapshot.embedding.normalize is False
+    assert snapshot.embedding.device == "cuda:1"
+    assert snapshot.embedding.cache_dir == "/var/cache/models"
+    assert snapshot.embedding.offline == "always"
 
 
 def test_load_rejects_multiple_hive_mind_providers(tmp_path: Path) -> None:

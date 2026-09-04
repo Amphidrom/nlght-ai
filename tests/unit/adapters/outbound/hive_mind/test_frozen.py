@@ -4,23 +4,15 @@
 from __future__ import annotations
 
 from nlght.adapters.outbound.hive_mind.frozen import FrozenStoreCoordinator
-from nlght.core.hive_mind.models import AtomType, Directive, SessionResult, TurnSummary, WorkingAtom, WriteIntent
+from nlght.core.hive_mind.models import AtomType, SessionResult, TurnSummary, WorkingAtom, WriteIntent
 
 
 class _Inner:
     def __init__(self) -> None:
-        self.directives = {"lang": "de"}
-        self.directive_objects = [Directive(key="lang", value="de")]
         self.turns = [TurnSummary(turn_nr=1, user_input="hi", intent="greet", topic="t", entities=["python"])]
         self.context = {"active_atoms": [], "known_results": []}
         self.slots = {"inner": "value"}
         self.payload = SessionResult(content="inner payload", entities=["python"], tags=["payload"])
-
-    def get_directives(self):
-        return self.directives
-
-    def get_directives_list(self):
-        return self.directive_objects
 
     def get_recent_turns(self, n):
         return self.turns[-n:]
@@ -45,11 +37,8 @@ def test_frozen_reads_delegate_to_inner_and_writes_do_not_mutate_inner() -> None
     inner = _Inner()
     frozen = FrozenStoreCoordinator(inner)
 
-    assert frozen.set_directive("lang", "en") is None
     frozen.record_turn(TurnSummary(turn_nr=2, user_input="x", intent="x", topic="x"))
 
-    assert frozen.get_directives() == {"lang": "de"}
-    assert frozen.get_directives_list() == inner.directive_objects
     assert frozen.get_recent_turns(5) == inner.turns
     assert frozen.get_context(["python"]) is inner.context
     assert frozen.is_known(["python"]) is True

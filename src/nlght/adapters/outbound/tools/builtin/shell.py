@@ -8,6 +8,13 @@ import shlex
 import uuid
 from typing import TYPE_CHECKING, ClassVar
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import (
+    DELETE_RUNTIME,
+    EXECUTE_RUNTIME,
+    OVERWRITING_WRITE_RUNTIME,
+    READ_RUNTIME,
+    WRITE_RUNTIME,
+)
 from nlght.core.errors.errors import ToolExecutionError
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
@@ -64,6 +71,7 @@ class ShellTool(ToolBase):
                     ToolParameter(name="command", type="string", description="Shell command string to execute."),
                     ToolParameter(name="cwd",     type="string", description="Working directory.", required=False),
                 ],
+                action=EXECUTE_RUNTIME,
             ),
             ToolSignature(
                 name="run_script",
@@ -81,6 +89,7 @@ class ShellTool(ToolBase):
                     ToolParameter(name="ext", type="string", description="File extension / language: 'py' (python3, default) or 'sh' (bash).", required=False),
                     ToolParameter(name="cwd", type="string", description="Working directory.", required=False),
                 ],
+                action=EXECUTE_RUNTIME,
             ),
             ToolSignature(
                 name="shell_read_chunk",
@@ -95,6 +104,7 @@ class ShellTool(ToolBase):
                     ToolParameter(name="offset", type="number", description="Character offset to start from (default: 0).",  required=False),
                     ToolParameter(name="length", type="number", description="Characters to read (default: 4096).", required=False),
                 ],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="shell_read_text",
@@ -103,6 +113,7 @@ class ShellTool(ToolBase):
                 parameters=[
                     ToolParameter(name="path", type="string", description="Absolute path to the file."),
                 ],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="shell_write_text",
@@ -116,6 +127,7 @@ class ShellTool(ToolBase):
                     ToolParameter(name="content", type="string", description="Text content to write."),
                     ToolParameter(name="path", type="string", description="Absolute path to the file. Omit to auto-generate a scratch path.", required=False),
                 ],
+                action=OVERWRITING_WRITE_RUNTIME,
             ),
             ToolSignature(
                 name="shell_file_exists",
@@ -124,6 +136,7 @@ class ShellTool(ToolBase):
                 parameters=[
                     ToolParameter(name="path", type="string", description="Path to check."),
                 ],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="shell_list_dir",
@@ -132,6 +145,7 @@ class ShellTool(ToolBase):
                 parameters=[
                     ToolParameter(name="path", type="string", description="Directory path."),
                 ],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="shell_make_dir",
@@ -140,6 +154,7 @@ class ShellTool(ToolBase):
                 parameters=[
                     ToolParameter(name="path", type="string", description="Directory path to create."),
                 ],
+                action=WRITE_RUNTIME,
             ),
             ToolSignature(
                 name="shell_delete",
@@ -148,6 +163,7 @@ class ShellTool(ToolBase):
                 parameters=[
                     ToolParameter(name="path", type="string", description="Path to delete."),
                 ],
+                action=DELETE_RUNTIME,
             ),
         ]
 

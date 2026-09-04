@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from nlght.core.config.snapshot import WatcherConfig
+
 
 @dataclass(slots=True)
 class ProtocolAdapterRegistry:
@@ -87,6 +89,8 @@ class DockerOsRuntimeSubsystemRuntime:
     base_image: str
     workspace_path: str | None = None
     extra_hosts: list[str] = field(default_factory=list)
+    network_mode: str = "bridge"
+    allow_runtime_env: bool = True
 
 
 @dataclass(slots=True)
@@ -156,6 +160,28 @@ class LicensingRuntime:
     license_key: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ExecutionStreamRuntime:
+    """Resolved transport for live execution signals — see ``ExecutionStreamConfig``."""
+    transport: str = "in_process"
+    url: str = ""
+    channel: str = "nlght_execution_stream"
+
+
+@dataclass(slots=True, frozen=True)
+class ExecutionRuntime:
+    role: str = "gateway+worker"
+    instance_name: str = ""
+    capabilities: tuple[str, ...] = ()
+    concurrency: int = 1
+    poll_interval_seconds: float = 1.0
+    lease_seconds: float = 30.0
+    heartbeat_seconds: float = 10.0
+    retry_base_seconds: float = 1.0
+    retry_max_seconds: float = 60.0
+    stream: ExecutionStreamRuntime = field(default_factory=ExecutionStreamRuntime)
+
+
 @dataclass(slots=True)
 class HiveMindProviderRuntime:
     name: str
@@ -178,3 +204,8 @@ class RuntimeContext:
     model_providers: list[Any]
     hive_mind_provider: HiveMindProviderRuntime | None
     licensing: LicensingRuntime = field(default_factory=LicensingRuntime)
+    execution: ExecutionRuntime = field(default_factory=ExecutionRuntime)
+    #: Configured watchers, passed through unchanged. Each names a source to
+    #: observe and a workflow to run; the runtime builds them at startup and a
+    #: broken one stops it.
+    watchers: list[WatcherConfig] = field(default_factory=list)

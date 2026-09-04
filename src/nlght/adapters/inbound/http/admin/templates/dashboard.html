@@ -13,7 +13,28 @@
     <p style="margin:.25rem 0 0">Resources</p>
     <a href="/admin/resources">View all →</a>
   </article>
+  <article>
+    <h3 style="margin:0;font-size:2.5rem;font-weight:700">{{ execution_counts.in_flight }}</h3>
+    <p style="margin:.25rem 0 0">Executions in flight <span class="muted">(24 h)</span></p>
+    <a href="/admin/executions?status=running">View running →</a>
+  </article>
+  <article>
+    {# The one number worth a colour: a failed run is the only state here that
+       asks something of a person. #}
+    <h3 style="margin:0;font-size:2.5rem;font-weight:700{% if execution_counts.of('failed') %};color:#991b1b{% endif %}">{{ execution_counts.of('failed') }}</h3>
+    <p style="margin:.25rem 0 0">Failed <span class="muted">(24 h)</span></p>
+    <a href="/admin/executions?status=failed">View failed →</a>
+  </article>
 </div>
+
+{% set expired = workers | selectattr('expired') | list %}
+{% if expired %}
+<article style="border-left:4px solid #991b1b">
+  <strong>{{ expired | length }} worker{{ 's' if expired | length != 1 }} with an expired lease.</strong>
+  Whatever they were running stays held until another worker takes it over, so a queue that looks
+  stalled usually starts here. <a href="/admin/workers">Workers →</a>
+</article>
+{% endif %}
 
 {% if recent_workflows %}
 <section>

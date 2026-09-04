@@ -18,13 +18,83 @@
     .badge-draft  { background: #e5e7eb; color: #374151; }
     .badge-yes    { background: #dbeafe; color: #1e40af; }
     .badge-no     { background: #fee2e2; color: #991b1b; }
+    /* Execution status. Colour carries the same meaning everywhere: grey is
+       waiting, blue is moving, green is done, red needs someone. */
+    .badge-queued    { background: #e5e7eb; color: #374151; }
+    .badge-leased    { background: #ede9fe; color: #5b21b6; }
+    .badge-running   { background: #dbeafe; color: #1e40af; }
+    .badge-succeeded { background: #d1fae5; color: #065f46; }
+    .badge-failed    { background: #fee2e2; color: #991b1b; }
+    .badge-cancelled { background: #fef3c7; color: #92400e; }
+    .badge-expired   { background: #fee2e2; color: #991b1b; }
+    .muted { color: var(--pico-muted-color); }
+    /* Pico gives every form element a bottom margin, which is right for a
+       stacked form and wrong for a row — and every button in this UI is in a
+       row, beside a link, a heading, a select or another button. The margin is
+       invisible but it is part of the box, so a centred row centres it too and
+       the button ends up a few pixels high; an end-aligned row puts it a few
+       pixels low. Nothing anchors a button to a line here, so the margin goes.
+       Rows that want space between their controls say so with `gap`. */
+    button, [role="button"] { margin-bottom: 0; }
+    /* A form's action row. Pico gives an <a role="button"> twice the horizontal
+       padding of a real <button> (2rem against 1rem), so Save and Cancel came
+       out visibly different sizes while sitting side by side. Same row, same
+       button — whatever element it happens to be.
+       Descendant, not child: a button wrapped in a <form> to carry its CSRF
+       token is not a child of the row, and used to escape this reset entirely
+       while its neighbours got it. The wrapper becomes a flex item that centres
+       what it holds, so wrapping changes nothing about where a button sits. */
+    .form-actions { display: flex; gap: 1rem; margin-top: 1rem; align-items: center; flex-wrap: wrap; }
+    .form-actions button,
+    .form-actions [role="button"] { --pico-form-element-spacing-horizontal: 1rem; width: auto; margin: 0; }
+    .form-actions form { display: flex; align-items: center; margin: 0; }
+    .form-actions label,
+    .form-actions select,
+    .form-actions input { margin-bottom: 0; }
+    /* A checkbox is the same control wherever it appears, so it is the same
+       size wherever it appears. Pico sizes it `1.25em` square, which makes it
+       two different things at once: `em` ties it to whatever font-size it lands
+       in, so one inside a `.mono` cell or a `<small>` comes out smaller than the
+       one in the form beside it; and a checkbox in a flex label is a flex item,
+       so `flex-shrink` squeezes it narrower than it is tall as soon as the
+       label's text runs long — which is exactly what the four flex labels on the
+       step form do.
+       `rem` fixes the size to the page rather than to the neighbourhood, and
+       `flex: none` stops a long label taking width out of it. Switches are
+       excluded because a switch is deliberately wider than it is tall, and the
+       admin has none today: this is so that adding one does not quietly get
+       flattened into a square. */
+    input[type="checkbox"]:not([role="switch"]),
+    input[type="radio"] { width: 1.25rem; height: 1.25rem; flex: none; }
+    .nowrap { white-space: nowrap; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; }
+    pre.diagnostics { background: var(--pico-card-sectioning-background-color); padding: .75rem; border-radius: .35rem; overflow-x: auto; max-height: 20rem; }
     table { width: 100%; }
+    /* A table cell's actions: a plain text link beside a small button. Left to
+       themselves they align on the *baseline*, so the two pieces of text line
+       up while the button's box — taller, with its own padding — hangs below
+       it. Aligning middles instead puts the boxes on one line, which is what
+       the eye reads. The cell stays a table cell; making it a flex container
+       would take the column's width with it. */
     .actions { white-space: nowrap; }
-    .actions a, .actions button { margin-right: .4rem; }
+    .actions a,
+    .actions button,
+    .actions [role="button"],
+    .actions form { vertical-align: middle; margin: 0 .4rem 0 0; }
+    .actions form { display: inline-flex; align-items: center; }
+    .actions form button { margin: 0; }
     .graph-wrap { border: 1px solid var(--pico-muted-border-color); border-radius: .5rem; overflow: hidden; margin-bottom: 1.5rem; }
-    #cy { width: 100%; height: 480px; }
+    /* touch-action: none is what lets a finger reach cytoscape at all. The
+       library sets it only for Trident/Edge-legacy user agents, so on every
+       current browser the page claims the gesture first and pinch-zoom and
+       drag-pan never arrive. The trade is the usual one for an interactive
+       canvas: a touch user scrolls the page beside the graph, not across it. */
+    #cy { width: 100%; height: 480px; touch-action: none; }
     .graph-toolbar { display: flex; gap: .75rem; align-items: center; padding: .75rem 1rem; background: var(--pico-card-background-color); border-bottom: 1px solid var(--pico-muted-border-color); flex-wrap: wrap; }
     .graph-toolbar select, .graph-toolbar input { margin: 0; padding: .35rem .6rem; min-width: 140px; }
+    /* The selects above were reset and the buttons beside them were not, so
+       every button in this bar sat high by half Pico's spacing. */
+    .graph-toolbar button, .graph-toolbar [role="button"] { margin: 0; }
     .step-node-start    { background-color: #93c5fd !important; }
     .step-node-terminal { background-color: #fca5a5 !important; }
     .step-node-resume   { background-color: #86efac !important; }
@@ -43,6 +113,8 @@
   <a href="/admin/workflows">Workflows</a>
   <a href="/admin/resources">Resources</a>
   <a href="/admin/policies">Access Policies</a>
+  <a href="/admin/executions">Executions</a>
+  <a href="/admin/workers">Workers</a>
 </nav>
 <main>
   {% block content %}{% endblock %}

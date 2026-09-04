@@ -94,16 +94,17 @@ class TokenBudget:
     Partitioning (per ADR-0012) — all values in tokens:
 
       store_budget   (40% of M)  -- Store / Hive-Mind injection
-      prompt_budget  (20% of M)  -- system prompt + directives
+      prompt_budget  (20% of M)  -- trusted instructions + context
       output_budget  (20% of M)  -- LLM response reserve
       _safety_margin (20% of M)  -- overhead / buffer
 
-    The ``OllamaModelClient`` uses ``get_available_for_input()`` as the
-    hard-cap limit. All other layers (Store, SystemPromptBuilder) get
-    their slice as a constraint — they trim it themselves.
+    Bound model clients use ``get_available_for_input()`` as the hard-cap
+    limit. Context assembly reads ``prompt_budget`` from the same object and
+    trims budgetable context before the call.
 
-    Always instantiate via ``TokenBudget.for_model()`` (async) in
-    production. The sync constructor is reserved for unit tests.
+    Provider backends own context-window resolution. Ollama Local may use the
+    async ``for_model()`` factory to query ``/api/show``; cloud providers build
+    the same type from provider-specific model metadata or fallback tables.
     """
 
     def __init__(

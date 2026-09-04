@@ -11,6 +11,15 @@ import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import (
+    ARBITRARY_EXTERNAL_READ_WRITE,
+    ARBITRARY_EXTERNAL_WRITE,
+    ARBITRARY_NETWORK_CLONE,
+    CHECK_ONLY_WRITE,
+    READ_RUNTIME,
+    WRITE_RUNTIME,
+    RelativePathBinder,
+)
 from nlght.core.errors.errors import ToolExecutionError
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
@@ -176,6 +185,8 @@ class GitTool(ToolBase):
                     ToolParameter(name="branch", type="string", description="Branch to checkout after clone.", required=False),
                     ToolParameter(name="depth", type="number", description="Shallow clone depth. 1 = fastest.", required=False),
                 ],
+                action=ARBITRARY_NETWORK_CLONE,
+                argument_binder=RelativePathBinder(fields=("target_dir",)),
             ),
             ToolSignature(
                 name="git_checkout",
@@ -185,12 +196,14 @@ class GitTool(ToolBase):
                     ToolParameter(name="ref", type="string", description="Branch name, tag, or commit SHA."),
                     ToolParameter(name="create", type="boolean", description="Create new branch (-b).", required=False, default=False),
                 ],
+                action=WRITE_RUNTIME,
             ),
             ToolSignature(
                 name="git_status",
                 description="Structured working-tree status: current branch, changed files, counts.",
                 method_name="status",
                 parameters=[],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="git_diff",
@@ -202,6 +215,8 @@ class GitTool(ToolBase):
                     ToolParameter(name="paths", type="array", description="Limit to specific file paths.", required=False),
                     ToolParameter(name="stat_only", type="boolean", description="File-level stats only.", required=False, default=False),
                 ],
+                action=READ_RUNTIME,
+                argument_binder=RelativePathBinder(list_fields=("paths",)),
             ),
             ToolSignature(
                 name="git_commit",
@@ -213,6 +228,8 @@ class GitTool(ToolBase):
                           required=False, default=True),
                     ToolParameter(name="paths", type="array", description="Stage only these paths. Overrides add_all.", required=False),
                 ],
+                action=WRITE_RUNTIME,
+                argument_binder=RelativePathBinder(list_fields=("paths",)),
             ),
             ToolSignature(
                 name="git_push",
@@ -224,6 +241,7 @@ class GitTool(ToolBase):
                     ToolParameter(name="force", type="boolean", description="Force push (--force-with-lease).", required=False, default=False),
                     ToolParameter(name="set_upstream", type="boolean", description="Set upstream tracking (-u).", required=False, default=False),
                 ],
+                action=ARBITRARY_EXTERNAL_WRITE,
             ),
             ToolSignature(
                 name="git_pull",
@@ -234,6 +252,7 @@ class GitTool(ToolBase):
                     ToolParameter(name="branch", type="string", description="Branch to pull.", required=False),
                     ToolParameter(name="rebase", type="boolean", description="Use rebase instead of merge.", required=False, default=False),
                 ],
+                action=ARBITRARY_EXTERNAL_READ_WRITE,
             ),
             ToolSignature(
                 name="git_branch_list",
@@ -242,6 +261,7 @@ class GitTool(ToolBase):
                 parameters=[
                     ToolParameter(name="include_remote", type="boolean", description="Include remote-tracking branches.", required=False, default=True),
                 ],
+                action=READ_RUNTIME,
             ),
             ToolSignature(
                 name="git_log",
@@ -252,6 +272,8 @@ class GitTool(ToolBase):
                     ToolParameter(name="ref", type="string", description="Starting ref (branch, tag, SHA).", required=False),
                     ToolParameter(name="paths", type="array", description="Only commits touching these paths.", required=False),
                 ],
+                action=READ_RUNTIME,
+                argument_binder=RelativePathBinder(list_fields=("paths",)),
             ),
             ToolSignature(
                 name="git_apply_patch",
@@ -261,6 +283,7 @@ class GitTool(ToolBase):
                     ToolParameter(name="patch_content", type="string", description="Unified diff content."),
                     ToolParameter(name="check_only", type="boolean", description="Dry-run: check without modifying files.", required=False, default=False),
                 ],
+                action=CHECK_ONLY_WRITE,
             ),
             ToolSignature(
                 name="git_apply_file_content",
@@ -280,6 +303,8 @@ class GitTool(ToolBase):
                         default=False,
                     ),
                 ],
+                action=CHECK_ONLY_WRITE,
+                argument_binder=RelativePathBinder(fields=("path",)),
             ),
             ToolSignature(
                 name="git_read_file",
@@ -302,6 +327,8 @@ class GitTool(ToolBase):
                                   description="Last line to read (1-indexed, inclusive). Omit to read to end of file.",
                                   required=False),
                 ],
+                action=READ_RUNTIME,
+                argument_binder=RelativePathBinder(fields=("path",)),
             ),
             ToolSignature(
                 name="git_list_dir",
@@ -316,6 +343,8 @@ class GitTool(ToolBase):
                                   required=False, default="."),
                     ToolParameter(name="ref", type="string", description="Git ref. Defaults to HEAD.", required=False, default="HEAD"),
                 ],
+                action=READ_RUNTIME,
+                argument_binder=RelativePathBinder(fields=("path",)),
             ),
         ]
 

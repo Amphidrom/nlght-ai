@@ -18,23 +18,31 @@ import pytest
 from nlght.adapters.outbound.model.anthropic import (
     AnthropicModelClient,
     BoundAnthropicModelClient,
+    _to_anthropic_wire_messages,
 )
 from nlght.adapters.outbound.model.google import (
     BoundGoogleModelClient,
     GoogleModelClient,
     _to_google_contents,
+    _to_google_wire_messages,
 )
-from nlght.adapters.outbound.model.ollama_cloud import OllamaCloudClient
+from nlght.adapters.outbound.model.ollama_cloud import (
+    OllamaCloudClient,
+    _to_ollama_cloud_messages,
+)
 from nlght.adapters.outbound.model.openai_cloud import (
     DEFAULT_OPENAI_BASE_URL,
     BoundOpenAICloudModelClient,
     OpenAICloudModelClient,
+    _to_openai_messages,
 )
 from nlght.adapters.outbound.model.openai_cloud_debug import (
     OpenAICloudModelClient as DebugOpenAICloudModelClient,
 )
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
+from nlght.core.model.messages import AssistantMessage, ToolResultMessage, UserMessage
 from nlght.core.model.model_info import ModelInfo
+from prompt_injection_suite import PROHIBITED_SINK, make_eval_catalog
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,11 +71,7 @@ def test_anthropic_bind_returns_bound_client() -> None:
     assert isinstance(bound, BoundAnthropicModelClient)
 
 
-def test_anthropic_append_tool_turn_uses_canonical_ollama_shape() -> None:
-    # append_tool_turn must return the canonical (Ollama-style) shape --
-    # _convert_messages_for_anthropic lowers it to tool_use/tool_result
-    # blocks on the next call, it does not accept Anthropic's own block
-    # format as input.
+def test_anthropic_append_tool_turn_uses_provider_neutral_types() -> None:
     client  = _anthropic_client()
     emitter = BufferingSignalEmitter()
     bound   = client.bind(model="claude-sonnet-4-6", emitter=emitter, stream=False)
@@ -79,12 +83,13 @@ def test_anthropic_append_tool_turn_uses_canonical_ollama_shape() -> None:
         assistant_text="Let me check.",
     )
 
-    assert updated[-2] == {
-        "role": "assistant",
-        "content": "Let me check.",
-        "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}],
-    }
-    assert updated[-1] == {"role": "tool", "content": "22C"}
+    assert isinstance(updated[0], UserMessage)
+    assert isinstance(updated[-2], AssistantMessage)
+    assert updated[-2].content == "Let me check."
+    assert updated[-2].tool_calls[0].name == "get_weather"
+    assert updated[-2].tool_calls[0].arguments == {"city": "Berlin"}
+    assert isinstance(updated[-1], ToolResultMessage)
+    assert updated[-1].content == "22C"
 
 
 def test_anthropic_append_tool_turn_round_trips_through_convert_messages() -> None:
@@ -101,7 +106,7 @@ def test_anthropic_append_tool_turn_round_trips_through_convert_messages() -> No
         [{"id": "toolu_01", "name": "get_weather", "input": {"city": "Berlin"}}],
         ["22C"],
     )
-    converted = _convert_messages_for_anthropic(updated)
+    converted = _convert_messages_for_anthropic(_to_anthropic_wire_messages(updated))
 
     assistant_turn = converted[-2]
     assert assistant_turn["role"] == "assistant"
@@ -293,7 +298,7 @@ def test_openai_bind_uses_default_model() -> None:
     assert bound._model == "gpt-4o-mini"
 
 
-def test_openai_append_tool_turn_uses_openai_wire_format() -> None:
+def test_openai_append_tool_turn_is_typed_then_maps_to_openai_wire_format() -> None:
     client  = _openai_client()
     emitter = BufferingSignalEmitter()
     bound   = client.bind(model="gpt-4o", emitter=emitter, stream=False)
@@ -305,14 +310,18 @@ def test_openai_append_tool_turn_uses_openai_wire_format() -> None:
         assistant_text="Let me check.",
     )
 
-    assistant_turn = updated[-2]
+    assert isinstance(updated[-2], AssistantMessage)
+    assert isinstance(updated[-1], ToolResultMessage)
+
+    wire = _to_openai_messages(updated)
+    assistant_turn = wire[-2]
     assert assistant_turn["role"] == "assistant"
     assert assistant_turn["tool_calls"][0]["id"] == "call_01"
     assert assistant_turn["tool_calls"][0]["type"] == "function"
     # OpenAI wants arguments as a JSON string, not a dict.
     assert assistant_turn["tool_calls"][0]["function"]["arguments"] == '{"city": "Berlin"}'
 
-    tool_turn = updated[-1]
+    tool_turn = wire[-1]
     assert tool_turn == {"role": "tool", "tool_call_id": "call_01", "content": "22C", "name": "get_weather"}
 
 
@@ -421,7 +430,7 @@ def test_google_bind_uses_default_model() -> None:
     assert bound._model == "gemini-2.5-pro"
 
 
-def test_google_append_tool_turn_uses_canonical_ollama_shape() -> None:
+def test_google_append_tool_turn_uses_provider_neutral_types() -> None:
     client  = _google_client()
     emitter = BufferingSignalEmitter()
     bound   = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=False)
@@ -432,12 +441,11 @@ def test_google_append_tool_turn_uses_canonical_ollama_shape() -> None:
         ["22C"],
     )
 
-    assert updated[-2] == {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [{"function": {"name": "get_weather", "arguments": {"city": "Berlin"}}}],
-    }
-    assert updated[-1] == {"role": "tool", "content": "22C"}
+    assert isinstance(updated[-2], AssistantMessage)
+    assert updated[-2].tool_calls[0].name == "get_weather"
+    assert updated[-2].tool_calls[0].arguments == {"city": "Berlin"}
+    assert isinstance(updated[-1], ToolResultMessage)
+    assert updated[-1].content == "22C"
 
 
 def test_to_google_contents_lowers_tool_turn_to_function_call_and_response() -> None:
@@ -458,6 +466,7 @@ def test_to_google_contents_lowers_tool_turn_to_function_call_and_response() -> 
     model_turn = next(c for c in contents if c["role"] == "model" and any("function_call" in p for p in c["parts"]))
     fc_part = next(p for p in model_turn["parts"] if "function_call" in p)
     assert fc_part["function_call"] == {"name": "get_weather", "args": {"city": "Berlin"}}
+    assert fc_part["thought_signature"] == b"skip_thought_signature_validator"
 
     response_turn = contents[-1]
     assert response_turn["role"] == "user"
@@ -502,7 +511,18 @@ def test_google_append_tool_turn_preserves_thought_signature() -> None:
         [{"id": "call_x", "name": "get_weather", "input": {"city": "Berlin"}, "thought_signature": "YWJj"}],
         ["22C"],
     )
-    assert updated[-2]["tool_calls"][0]["thought_signature"] == "YWJj"
+    assistant = updated[-2]
+    assert isinstance(assistant, AssistantMessage)
+    assert assistant.tool_calls[0].provider_metadata["thought_signature"] == "YWJj"
+
+    _system, contents = _to_google_contents(_to_google_wire_messages(updated))
+    function_call = next(
+        part
+        for content in contents
+        for part in content["parts"]
+        if "function_call" in part
+    )
+    assert function_call["thought_signature"] == b"abc"
 
 
 def test_google_bind_returns_bound_client() -> None:
@@ -706,3 +726,66 @@ def test_ollama_cloud_base_url_override_wins() -> None:
         default_model="gpt-oss:20b",
     )
     assert client.native_base_url == "https://remote.example"
+
+
+def test_ollama_cloud_tool_turn_uses_openai_compatible_wire_format() -> None:
+    client = _ollama_cloud_client(default_model="gpt-oss:20b")
+    bound = client.bind(
+        model=None,
+        emitter=BufferingSignalEmitter(),
+        stream=False,
+    )
+    messages = bound.append_tool_turn(
+        [UserMessage("weather?")],
+        [{"id": "call_01", "name": "get_weather", "input": {"city": "Berlin"}}],
+        ["22C"],
+    )
+
+    wire = _to_ollama_cloud_messages(messages)
+
+    assert wire[-2]["tool_calls"] == [{
+        "id": "call_01",
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "arguments": '{"city": "Berlin"}',
+        },
+    }]
+    assert wire[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_01",
+        "content": "22C",
+        "name": "get_weather",
+    }
+
+
+async def test_ollama_cloud_pi_eval_proposal_ends_after_one_request() -> None:
+    client = _ollama_cloud_client(default_model="gpt-oss:20b")
+    client._http.base_url = "https://ollama.test"
+    client._http.complete_message = AsyncMock(return_value=(
+        {
+            "content": "",
+            "tool_calls": [{
+                "id": "call_01",
+                "type": "function",
+                "function": {
+                    "name": PROHIBITED_SINK,
+                    "arguments": '{"payload": "canary"}',
+                },
+            }],
+        },
+        {},
+    ))
+    catalog = make_eval_catalog()
+    bound = client.bind(
+        model=None,
+        emitter=BufferingSignalEmitter(),
+        stream=False,
+        tool_catalog=catalog,
+    )
+
+    await bound.call([UserMessage("Evaluate this case.")], temperature=0.0)
+
+    client._http.complete_message.assert_awaited_once()
+    assert catalog.proposed_names == [PROHIBITED_SINK]
+    assert catalog.executed_names == ()

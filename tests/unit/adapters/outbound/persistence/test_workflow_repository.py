@@ -93,6 +93,16 @@ async def test_find_by_name_returns_workflow(seeded_engine) -> None:
     assert result.enabled is True
 
 
+async def test_find_by_id_returns_workflow(seeded_engine) -> None:
+    engine, workflow_id, _ = seeded_engine
+    repo = SqlAlchemyWorkflowRepository(engine)
+
+    result = await repo.find_by_id(workflow_id)
+
+    assert result is not None
+    assert result.workflow_id == workflow_id
+
+
 async def test_find_by_name_returns_none_for_unknown(seeded_engine) -> None:
     engine, _, _ = seeded_engine
     repo = SqlAlchemyWorkflowRepository(engine)
@@ -130,3 +140,15 @@ async def test_find_active_version_returns_none_for_unknown(seeded_engine) -> No
     repo = SqlAlchemyWorkflowRepository(engine)
 
     assert await repo.find_active_version(uuid.uuid4()) is None
+
+
+async def test_find_version_returns_only_the_pinned_workflow_version(seeded_engine) -> None:
+    engine, workflow_id, version_id = seeded_engine
+    repo = SqlAlchemyWorkflowRepository(engine)
+
+    version = await repo.find_version(workflow_id, version_id)
+
+    assert version is not None
+    assert version.version_id == version_id
+    assert len(version.steps) == 2
+    assert await repo.find_version(uuid.uuid4(), version_id) is None

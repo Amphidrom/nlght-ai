@@ -9,6 +9,10 @@ import shlex
 import uuid
 from typing import TYPE_CHECKING, ClassVar
 
+from nlght.adapters.outbound.tools.builtin.action_semantics import (
+    HTTP_METHOD_BINDER,
+    HTTP_PROBE,
+)
 from nlght.core.errors.errors import ToolExecutionError
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
@@ -157,6 +161,8 @@ class HttpProbeTool(ToolBase):
                         required=False,
                     ),
                 ],
+                action=HTTP_PROBE,
+                argument_binder=HTTP_METHOD_BINDER,
             ),
         ]
 

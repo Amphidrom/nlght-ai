@@ -13,6 +13,13 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from nlght.core.tools.action import (
+    ExecutionCapabilities,
+    FilesystemCapability,
+    NetworkCapability,
+    ProcessCapability,
+    SecretsCapability,
+)
 from nlght.ports.outbound.os_runtime import OsRuntime, OsRuntimeFactory
 
 if TYPE_CHECKING:
@@ -69,11 +76,15 @@ class DockerOsRuntimeFactory(OsRuntimeFactory):
         workdir: str = "/workspace",
         workspace_path: str | None = None,
         extra_hosts: list[str] | None = None,
+        network_mode: str = "bridge",
+        allow_runtime_env: bool = True,
     ) -> None:
         self._base_image = base_image
         self._workdir = workdir
         self._workspace_path = os.path.abspath(workspace_path) if workspace_path else None
         self._extra_hosts: dict[str, str] = {}
+        self._network_mode = network_mode
+        self._allow_runtime_env = allow_runtime_env
         for entry in (extra_hosts or []):
             if ":" in entry:
                 host, ip = entry.split(":", 1)
@@ -102,6 +113,8 @@ class DockerOsRuntimeFactory(OsRuntimeFactory):
             workdir=self._workdir,
             workspace_path=self._workspace_path,
             extra_hosts=self._extra_hosts,
+            network_mode=self._network_mode,
+            allow_runtime_env=self._allow_runtime_env,
             client=self._client,
         )
         self._instances[cid] = rt
@@ -116,6 +129,8 @@ class DockerOsRuntimeFactory(OsRuntimeFactory):
             workdir=self._workdir,
             workspace_path=self._workspace_path,
             extra_hosts=self._extra_hosts,
+            network_mode=self._network_mode,
+            allow_runtime_env=self._allow_runtime_env,
             client=self._client,
         )
         await rt.start()
@@ -150,6 +165,8 @@ class DockerOsRuntime(OsRuntime):
         workdir: str = "/workspace",
         workspace_path: str | None = None,
         extra_hosts: dict[str, str] | None = None,
+        network_mode: str = "bridge",
+        allow_runtime_env: bool = True,
         client: DockerClient | None = None,
     ) -> None:
         self._name = name
@@ -157,6 +174,10 @@ class DockerOsRuntime(OsRuntime):
         self._workdir = workdir
         self._workspace_path = workspace_path
         self._extra_hosts: dict[str, str] = extra_hosts or {}
+        if network_mode not in ("bridge", "none"):
+            raise ValueError("Docker network_mode must be 'bridge' or 'none'")
+        self._network_mode = network_mode
+        self._allow_runtime_env = allow_runtime_env
         self._client: DockerClient | None = client
         self._container: Container | None = None
         self._env: dict[str, str] = {}
@@ -186,6 +207,13 @@ class DockerOsRuntime(OsRuntime):
         _errors_mod = _sys.modules.get("docker.errors", _docker_errors)
         try:
             existing = self._client.containers.get(self._name)
+            actual_network = (
+                existing.attrs.get("HostConfig", {}).get("NetworkMode")
+            )
+            if self._network_mode == "none" and actual_network != "none":
+                raise RuntimeError(
+                    "existing Docker runtime does not enforce network_mode='none'"
+                )
             if existing.status == "exited":
                 existing.start()
             self._container = existing
@@ -207,6 +235,9 @@ class DockerOsRuntime(OsRuntime):
         else:
             logger.info("docker_runtime.creating | name=%s image=%s", self._name, self._base_image)
 
+        run_options: dict[str, object] = {}
+        if self._network_mode == "none":
+            run_options["network_mode"] = "none"
         self._container = self._client.containers.run(
             self._base_image,
             name=self._name,
@@ -215,6 +246,7 @@ class DockerOsRuntime(OsRuntime):
             tty=True,
             volumes=volumes or {},
             extra_hosts=self._extra_hosts or None,
+            **run_options,
         )
         logger.info("docker_runtime.created | name=%s image=%s", self._name, self._base_image)
 
@@ -236,6 +268,8 @@ class DockerOsRuntime(OsRuntime):
     # ------------------------------------------------------------------
 
     def add_env(self, env: dict[str, str]) -> None:
+        if env and not self._allow_runtime_env:
+            raise PermissionError("runtime environment injection is disabled")
         self._env.update(env or {})
 
     async def exec(
@@ -257,6 +291,8 @@ class DockerOsRuntime(OsRuntime):
         assert self._container is not None
 
         base_env = {"BASH_ENV": "/etc/nlght-bash-logger.sh"}
+        if env and not self._allow_runtime_env:
+            raise PermissionError("per-call environment injection is disabled")
         base_env.update(self._env)
         base_env.update(env or {})
 
@@ -353,6 +389,23 @@ class DockerOsRuntime(OsRuntime):
 
     def shell(self) -> tuple[str, str]:
         return ("bash", "-c")
+
+    def security_capabilities(self) -> ExecutionCapabilities:
+        """Capabilities enforced by container creation and env handling."""
+        return ExecutionCapabilities(
+            filesystem=FilesystemCapability.SANDBOX,
+            network=(
+                NetworkCapability.NONE
+                if self._network_mode == "none"
+                else NetworkCapability.ARBITRARY
+            ),
+            process=ProcessCapability.SANDBOXED,
+            secrets=(
+                SecretsCapability.MAY_READ
+                if self._allow_runtime_env
+                else SecretsCapability.NONE
+            ),
+        )
 
     def _ensure_started_sync(self) -> None:
         """Starts the container on first access (lazy init)."""

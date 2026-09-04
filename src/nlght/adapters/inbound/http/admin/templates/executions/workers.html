@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Workers — nlght Admin{% endblock %}
+{% block content %}
+<h2>Workers</h2>
+<p class="muted">Registered workers, their capabilities, and what they are holding right now.</p>
+
+{% if workers %}
+<table>
+  <thead>
+    <tr>
+      <th>Instance</th>
+      <th>Status</th>
+      <th>Load</th>
+      <th>Capabilities</th>
+      <th>Last heartbeat</th>
+      <th>Lease</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for worker in workers %}
+  <tr>
+    <td>
+      {{ worker.instance_name }}
+      <br><span class="muted mono">{{ worker.worker_id }}</span>
+    </td>
+    <td>
+      {% if worker.expired %}
+        {# A worker that died without deregistering stays 'active' in its own
+           row until its lease runs out. Saying so is the point of this page:
+           the executions it held are only reclaimed once it expires. #}
+        <span class="badge badge-expired">lease expired</span>
+        <br><span class="muted">gone, not deregistered</span>
+      {% else %}
+        <span class="badge badge-{{ 'running' if worker.status == 'active' else 'queued' }}">{{ worker.status }}</span>
+      {% endif %}
+    </td>
+    <td>{{ worker.running }} / {{ worker.capacity }}</td>
+    <td>{% if worker.capabilities %}{{ worker.capabilities | join(', ') }}{% else %}<span class="muted">any work</span>{% endif %}</td>
+    <td class="nowrap mono">{{ worker.heartbeat_at.strftime('%H:%M:%S') }}</td>
+    <td class="nowrap mono">{{ worker.expires_at.strftime('%H:%M:%S') }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top:1.5rem">
+  A worker with no capabilities claims any execution. One whose lease has expired still holds
+  whatever it was running until another worker takes it over — which is what makes an expired
+  lease worth looking at when nothing seems to be progressing.
+</p>
+{% else %}
+<p class="muted">No worker has registered. Start one with <code>nlght-ai worker</code>; without it, submitted executions stay queued.</p>
+{% endif %}
+{% endblock %}
