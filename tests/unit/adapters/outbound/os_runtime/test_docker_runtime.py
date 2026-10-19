@@ -96,7 +96,7 @@ def _install_docker(monkeypatch: pytest.MonkeyPatch, containers: _Containers) ->
     monkeypatch.setitem(sys.modules, "docker", docker_module)
     monkeypatch.setitem(sys.modules, "docker.errors", docker_module.errors)
     # The adapter resolves the docker module lazily via sys.modules, but
-    # _require_docker() consults this import-time flag — force it so the
+    # _require_docker() consults this import-time flag. Force it so the
     # tests are hermetic even when the real docker package is not installed.
     monkeypatch.setattr("nlght.adapters.outbound.os_runtime.docker._DOCKER_AVAILABLE", True)
     monkeypatch.setattr("nlght.adapters.outbound.os_runtime.docker._docker_sdk", docker_module)

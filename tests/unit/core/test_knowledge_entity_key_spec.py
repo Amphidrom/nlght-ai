@@ -1,51 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Executable specification for the entity key — what an assertion *is*.
+"""Specify schema-based entity identity for knowledge assertions.
 
-The decision this file encodes: **identity is a schema decision, not a
-similarity decision.** An `assertion_id` does not identify the current truth
-value of a claim; it identifies the business question whose value may change
-over time. So the entity key is built from a small set of schema-defined fields
-and looked up deterministically, and the similarity matcher is left with entity
-*linking* — which existing entity does this newly extracted assertion probably
-correspond to — and never with deciding what the database considers identity.
-
-The dividing rule, per kind:
-
-    into the entity key go exactly those dimensions whose change means we are
-    talking about a different business quantity — not those whose change merely
-    describes a new state of the same quantity.
-
-| kind | entity key | value (revision payload) |
-|---|---|---|
-| `fact` | subject + predicate | object |
-| `rule` | subject + rule_property | condition, consequence, parameters, scope |
-| `decision` | decision_subject + decision_type | outcome, effect, scope |
-| `pattern` | pattern_name | description, attributes |
-
-Two consequences worth stating plainly, because both change today's behaviour:
-
-*`fact` narrows.* Identity is subject and predicate; the object is the value.
-`CEO(OpenAI) = Alice` and `CEO(OpenAI) = Bob` are one entity with two revisions,
-where today they are two unrelated assertions. That is the point — a corpus that
-holds both as equals is the failure the whole design exists to remove.
-
-*An assertion may have no key at all.* One written before the identifying fields
-existed cannot say which business quantity it is, and `EntityKeyUnavailable`
-says so rather than inventing one from the wording.
-
-Scope is deliberately *not* in the key. It answers "for which case", which is a
-third level between the entity and its revisions:
-
-    entity   which business quantity is this?
-    variant  for which simultaneously valid case?
-    revision how has that case changed over time?
-
-Two values that are true at the same time — CHF 500 for employees, CHF 5000 for
-executives — cannot be revisions of one thing, because revisions are a sequence.
-They are two variants of one entity. Specified in the last section of this
-file.
+Entity keys identify business questions independently of value revisions.
+Scope belongs to a variant, while similarity may link an observation to an
+existing entity without defining its database identity.
 """
 
 from __future__ import annotations
@@ -58,38 +18,26 @@ from nlght.core.knowledge.entity import AMBIGUOUS, EXACT, NEW, WIDENED
 
 
 def _variant_id(entity: object, scope: object, known: dict[str, object]) -> str:
-    """The id alone, for the cases that only care which variant it is."""
+    """Resolve a variant and return only its identifier.
+
+    Args:
+        entity (object): Entity owning the variant.
+        scope (object): Applicability scope to resolve.
+        known (dict[str, object]): Existing variant scopes keyed by ID.
+
+    Returns:
+        str: Resolved variant identifier.
+    """
     return resolve_variant(entity, scope, known).variant_id
 
-# ---------------------------------------------------------------------------
-# fact — the whole proposition, with succession recorded rather than inferred
-# ---------------------------------------------------------------------------
 #
-# This section said `subject + predicate` first, which collapsed Spring's Java
-# and Maven requirements into one entity; then a per-predicate role projection,
-# which needed the platform to know which relations are functional. Both tried
-# to turn arbitrary language into a state-variable model, and that needs an
-# ontology nobody has.
-#
-# A fact is its whole proposition. Two claims that say different things are two
-# assertions, and `superseded_by` records that one took the other's place —
-# which is §7.4 as it was originally written: a rewording keeps an identity, a
-# material change makes a new assertion.
+# The platform has no ontology for deciding which roles represent a fact's
+# identity and which represent its state. The entire proposition forms the key.
+# Material succession is recorded explicitly through `superseded_by`.
 
 
 def test_a_fact_is_its_whole_proposition() -> None:
-    """Two claims that say different things are two assertions.
-
-    An earlier version tried to split a fact's roles so that OpenAI's chief
-    executive would be one thing whose value moved from Alice to Bob. Deciding
-    which roles identify a relation and which are its state is domain knowledge
-    no platform has without an ontology, and neither a hardcoded vocabulary nor
-    asking a customer to declare one before ingesting is an answer.
-
-    So the platform does not decide it. Alice and Bob are two assertions, and
-    that the second replaced the first is recorded between them rather than
-    inferred from the words.
-    """
+    """Give facts with different role values different entity keys."""
     alice = _entity_key("fact", subject="openai", predicate="ceo", object="alice")
     bob = _entity_key("fact", subject="openai", predicate="ceo", object="bob")
 
@@ -129,7 +77,7 @@ def test_a_fact_about_a_different_subject_is_a_different_entity() -> None:
 
 
 def test_a_fact_without_a_predicate_cannot_be_identified() -> None:
-    # The predicate names the relation; without it the roles stand in nothing.
+    # The predicate names the relation. Without it the roles stand in nothing.
     with pytest.raises(EntityKeyUnavailable, match="predicate"):
         _entity_key("fact", subject="openai", object="alice")
 
@@ -146,18 +94,8 @@ def test_the_order_roles_arrive_in_does_not_change_a_fact_key() -> None:
     assert first == second
 
 
-# ---------------------------------------------------------------------------
-# rule — subject + rule_property identify; thresholds and scope are the value
-# ---------------------------------------------------------------------------
-
 def test_a_changed_threshold_is_the_same_rule() -> None:
-    """CHF 500 → CHF 550. The worked example the decision was made on.
-
-    The rule is *the approval threshold for expenses*. Five hundred is what it
-    currently says, not what it is. Deriving identity from the value would
-    retire the rule every time finance adjusts a number, taking the approval
-    with it.
-    """
+    """Keep a rule identity when its approval threshold changes."""
     five_hundred = _entity_key(
         "rule", subject="expense", rule_property="approval_threshold",
         operator=">", amount=500, currency="CHF",
@@ -191,16 +129,7 @@ def test_a_different_rule_property_about_one_subject_is_a_different_entity() -> 
 
 
 def test_scope_never_reaches_the_entity_key() -> None:
-    """Scope answers "for which case", which is the variant's question.
-
-        employees need approval above CHF 500
-        employees and contractors need approval above CHF 500
-
-    The quantity did not change, its applicability did. Scope belongs to the
-    variant below the entity — see the variant section further down — and never
-    to the entity key, or one business rule would fragment into one entity per
-    group it mentions.
-    """
+    """Keep applicability scope out of the entity key."""
     narrow = _entity_key(
         "rule", subject="expense", rule_property="approval_threshold",
         applies_to=["employee"],
@@ -227,10 +156,6 @@ def test_the_wording_never_reaches_the_entity_key() -> None:
 
     assert german == rephrased
 
-
-# ---------------------------------------------------------------------------
-# decision and pattern
-# ---------------------------------------------------------------------------
 
 def test_a_decision_is_identified_by_its_subject_and_type() -> None:
     first = _entity_key(
@@ -259,7 +184,7 @@ def test_two_decisions_of_different_type_about_one_subject_stay_apart() -> None:
 
 
 def test_a_pattern_is_identified_by_its_name_alone() -> None:
-    # `pattern` already carries the split; only the key has to use it.
+    # `pattern` already carries the split. Only the key has to use it.
     first = _entity_key(
         "pattern", pattern_name="hexagonal-ports",
         description="Adapters depend on ports; the core depends on nothing.",
@@ -272,19 +197,8 @@ def test_a_pattern_is_identified_by_its_name_alone() -> None:
     assert first == second
 
 
-# ---------------------------------------------------------------------------
-# The key is schema-defined, not model-phrased
-# ---------------------------------------------------------------------------
-
 def test_the_key_is_built_from_fields_and_not_from_a_generated_phrase() -> None:
-    """Why the field is not called `semantic_subject`.
-
-    A name like that invites a model-generated string — "expense approval
-    threshold" — back into the identity, which is the defect wearing a better
-    label. The key is assembled from schema fields, so two extractions agree
-    because the schema made them agree, not because the model happened to phrase
-    the summary the same way.
-    """
+    """Build entity keys from schema fields instead of model wording."""
     assembled = _entity_key(
         "rule", subject="expense", rule_property="approval_threshold"
     )
@@ -306,10 +220,6 @@ def test_a_kind_change_is_never_the_same_entity() -> None:
 
     assert rule != fact
 
-
-# ---------------------------------------------------------------------------
-# An assertion that cannot say what it is
-# ---------------------------------------------------------------------------
 
 def test_a_rule_written_before_the_fields_has_no_entity_key() -> None:
     """The corpus that already exists, and what may not be done to it.
@@ -336,9 +246,6 @@ def test_an_unknown_kind_has_no_key() -> None:
         _entity_key("prophecy", subject="tomorrow")
 
 
-# ---------------------------------------------------------------------------
-# Variants — one entity, several cases holding at the same time
-# ---------------------------------------------------------------------------
 #
 # Three levels, not two:
 #
@@ -356,14 +263,7 @@ def test_an_unknown_kind_has_no_key() -> None:
 
 
 def test_two_scopes_holding_at_once_are_two_variants_of_one_entity() -> None:
-    """The case that was open, and the reason the variant level exists.
-
-        expense approval threshold, employees:  CHF 500
-        expense approval threshold, executives: CHF 5000
-
-    Both hold. One entity, because it is one business quantity; two variants,
-    because neither replaced the other; and each carries its own revisions.
-    """
+    """Keep concurrent scopes as variants of one entity."""
     entity = _entity_key("rule", subject="expense", rule_property="approval_threshold")
     employees = _variant_id(entity, ["employee"], known={})
     executives = _variant_id(entity, ["executive"], known={employees: ["employee"]})
@@ -372,8 +272,8 @@ def test_two_scopes_holding_at_once_are_two_variants_of_one_entity() -> None:
 
 
 def test_a_changed_amount_stays_within_one_variant() -> None:
-    # CHF 500 → 550 for employees. The variant is the same case; only its state
-    # moved, which is what a revision is.
+    # The threshold changes from CHF 500 to CHF 550, but the employee case
+    # remains the same variant. The amount belongs to its revision.
     entity = _entity_key("rule", subject="expense", rule_property="approval_threshold")
     first = _variant_id(entity, ["employee"], known={})
     second = _variant_id(entity, ["employee"], known={first: ["employee"]})
@@ -382,13 +282,7 @@ def test_a_changed_amount_stays_within_one_variant() -> None:
 
 
 def test_a_widened_scope_continues_the_variant_it_replaced() -> None:
-    """employees → employees and contractors, with the narrow one gone.
-
-    The old applicability was replaced rather than joined by a second rule, so
-    this is Variant A at a new revision: the same case, now covering more people.
-    Minting a new variant would retract the employees rule and put a fresh one
-    into review for what is an edit to one word.
-    """
+    """Continue a variant when its scope widens and replaces the old scope."""
     entity = _entity_key("rule", subject="expense", rule_property="approval_threshold")
     original = _variant_id(entity, ["employee"], known={})
     widened = _variant_id(entity, ["employee", "contractor"], known={original: ["employee"]})
@@ -397,7 +291,7 @@ def test_a_widened_scope_continues_the_variant_it_replaced() -> None:
 
 
 def test_a_disjoint_scope_opens_a_variant_and_leaves_the_other_alone() -> None:
-    # No overlap, so nothing was replaced — executives are an additional case,
+    # No overlap means nothing was replaced. Executives are an additional case,
     # and the employees variant keeps its own number.
     entity = _entity_key("rule", subject="expense", rule_property="approval_threshold")
     employees = _variant_id(entity, ["employee"], known={})
@@ -407,42 +301,26 @@ def test_a_disjoint_scope_opens_a_variant_and_leaves_the_other_alone() -> None:
 
 
 def test_a_variant_id_is_a_surrogate_and_not_derived_from_its_scope() -> None:
-    """Why the variant cannot be a hash of the scope, which follows from above.
-
-    A derived key changes when the scope changes, so widening employees to
-    employees and contractors would produce a different key and retire the
-    variant it was meant to continue — contradicting the test above. Scope is
-    therefore a matching signal for the variant, exactly as content is a
-    matching signal for the assertion, and the id itself is minted once.
-
-    Stated as a test rather than a comment because it is the property that a
-    later refactor to "just hash the scope" would quietly break, while every
-    other test here would keep passing.
-    """
+    """Keep variant identity stable when scope wording changes."""
     entity = _entity_key("rule", subject="expense", rule_property="approval_threshold")
     original = _variant_id(entity, ["employee"], known={})
     widened = _variant_id(entity, ["employee", "contractor"], known={original: ["employee"]})
     from_scratch = _variant_id(entity, ["employee", "contractor"], known={})
 
     # Same scope, but one continues an existing variant and one is new. A
-    # derivation cannot tell those apart; only a surrogate plus a match can.
+    # derivation cannot tell those apart. Only a surrogate plus a match can.
     assert widened == original
     assert from_scratch != original
 
 
-
-
-# ---------------------------------------------------------------------------
-# The ladder, and where it refuses to decide
-# ---------------------------------------------------------------------------
 #
 #     exact match
-#     → a single unambiguous widening or narrowing
-#     → otherwise a new variant, marked ambiguous
+#     then a single unambiguous widening or narrowing
+#     otherwise a new variant, marked ambiguous
 #
 # Not "the largest overlap wins". Overlapping scopes that hold at the same time
 # are ordinary, and picking the biggest intersection between them is a heuristic
-# deciding identity — the thing the surrogate id exists to prevent.
+# deciding identity. The surrogate ID prevents that.
 
 
 def test_an_exact_scope_is_resolved_as_exact() -> None:
@@ -469,13 +347,7 @@ def test_a_single_narrowing_is_a_continuation() -> None:
 
 
 def test_two_possible_widenings_claim_nothing() -> None:
-    """The tie the old rule would have decided by counting.
-
-    Employees and contractors both exist as their own cases, and a rule now
-    covering both could be a widening of either. Choosing the bigger overlap
-    would attach it to one and silently retire the other's continuity; choosing
-    neither leaves a case a person can merge.
-    """
+    """Leave ambiguous scope continuations unclaimed."""
     known = {"var-1": ["employee"], "var-2": ["contractor"]}
 
     match = resolve_variant("e", ["employee", "contractor"], known)
@@ -498,7 +370,7 @@ def test_an_overlap_that_is_not_containment_claims_nothing() -> None:
 
 
 def test_a_disjoint_scope_is_plainly_new() -> None:
-    # Nothing shared, nothing ambiguous — this is a second case, and saying so
+    # Nothing shared means this is a second case. Saying so
     # is different from saying "I could not tell".
     match = resolve_variant("e", ["executive"], {"var-1": ["employee"]})
 
@@ -507,7 +379,7 @@ def test_a_disjoint_scope_is_plainly_new() -> None:
 
 def test_two_variants_already_claiming_one_scope_claim_nothing() -> None:
     # Something upstream went wrong. Picking one of them would make it
-    # permanent; opening a third leaves the mess visible.
+    # permanent. Opening a third leaves the mess visible.
     known = {"var-1": ["employee"], "var-2": ["employee"]}
 
     match = resolve_variant("e", ["employee"], known)
@@ -515,10 +387,6 @@ def test_two_variants_already_claiming_one_scope_claim_nothing() -> None:
     assert match.variant_id not in known
     assert match.resolution == AMBIGUOUS
 
-
-# ---------------------------------------------------------------------------
-# The key carries the scheme that produced it
-# ---------------------------------------------------------------------------
 
 def test_a_key_says_which_scheme_produced_it() -> None:
     """Version beside the key, not folded into it.

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for ShellTool — the built-in shell/filesystem tool."""
+"""Check the built-in shell and filesystem tool contract."""
 from __future__ import annotations
 
 import json
@@ -12,9 +12,6 @@ import pytest
 from nlght.adapters.outbound.tools.builtin.shell import ShellTool
 from nlght.core.errors.errors import ToolExecutionError
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 def _make_tool(os_runtime: object = None, config: dict | None = None) -> ShellTool:
     return ShellTool(name="shell", config=config or {}, os_runtime=os_runtime)
@@ -36,11 +33,6 @@ def _mock_runtime(
     rt.make_dir = AsyncMock(return_value=None)
     rt.delete = AsyncMock(return_value=None)
     return rt
-
-
-# ---------------------------------------------------------------------------
-# KIND and signatures
-# ---------------------------------------------------------------------------
 
 
 def test_kind_is_shell() -> None:
@@ -73,11 +65,6 @@ def test_each_signature_has_matching_method() -> None:
         assert hasattr(tool, sig.method_name), f"missing method: {sig.method_name}"
 
 
-# ---------------------------------------------------------------------------
-# no OsRuntime → ToolExecutionError
-# ---------------------------------------------------------------------------
-
-
 async def test_exec_raises_when_no_runtime() -> None:
     tool = _make_tool(os_runtime=None)
     with pytest.raises(ToolExecutionError):
@@ -88,11 +75,6 @@ async def test_read_text_raises_when_no_runtime() -> None:
     tool = _make_tool(os_runtime=None)
     with pytest.raises(ToolExecutionError):
         await tool.read_text(path="/tmp/x")
-
-
-# ---------------------------------------------------------------------------
-# exec
-# ---------------------------------------------------------------------------
 
 
 async def test_exec_returns_json_with_exit_code_stdout_stderr() -> None:
@@ -159,11 +141,6 @@ async def test_exec_nonzero_exit_code_is_returned_not_raised() -> None:
     assert result["stderr"] == "error"
 
 
-# ---------------------------------------------------------------------------
-# read_text
-# ---------------------------------------------------------------------------
-
-
 async def test_read_text_returns_json_with_content() -> None:
     rt = _mock_runtime(read_result="hello world")
     tool = _make_tool(os_runtime=rt)
@@ -189,11 +166,6 @@ async def test_read_text_wraps_other_errors() -> None:
 
     with pytest.raises(ToolExecutionError, match="shell_read_text failed"):
         await tool.read_text(path="/tmp/x")
-
-
-# ---------------------------------------------------------------------------
-# write_text
-# ---------------------------------------------------------------------------
 
 
 async def test_write_text_returns_ok_json() -> None:
@@ -227,11 +199,6 @@ async def test_write_text_generates_scratch_path_when_omitted() -> None:
     rt.write_text.assert_awaited_once_with(result["path"], "data")
 
 
-# ---------------------------------------------------------------------------
-# run_script
-# ---------------------------------------------------------------------------
-
-
 async def test_run_script_writes_runs_and_cleans_up() -> None:
     rt = _mock_runtime(exec_result=(0, "HIT | sqli", ""))
     tool = _make_tool(os_runtime=rt)
@@ -239,14 +206,14 @@ async def test_run_script_writes_runs_and_cleans_up() -> None:
     result = json.loads(await tool.run_script(content="print('x')"))
 
     assert result == {"exit_code": 0, "stdout": "HIT | sqli", "stderr": ""}
-    # script written under the scratch dir with a .py extension by default …
+    # The scratch script must use the default Python extension.
     written_path = rt.write_text.await_args.args[0]
     assert written_path.startswith("/workspace/tmp/nlght/script_")
     assert written_path.endswith(".py")
-    # … executed via python3 through bash …
+    # Execution must invoke Python through the sandbox shell.
     cmd = rt.exec.await_args.args[0]
     assert cmd[0] == "bash" and "python3" in cmd[2] and written_path in cmd[2]
-    # … and the scratch file is deleted afterwards.
+    # Cleanup must remove the scratch script after execution.
     rt.delete.assert_awaited_once_with(written_path)
 
 
@@ -273,11 +240,6 @@ async def test_run_script_cleans_up_even_on_exec_error() -> None:
     rt.delete.assert_awaited_once()
 
 
-# ---------------------------------------------------------------------------
-# file_exists
-# ---------------------------------------------------------------------------
-
-
 async def test_file_exists_true() -> None:
     rt = _mock_runtime(exists_result=True)
     tool = _make_tool(os_runtime=rt)
@@ -294,11 +256,6 @@ async def test_file_exists_false() -> None:
     result = json.loads(await tool.file_exists(path="/tmp/nope.txt"))
 
     assert result["exists"] is False
-
-
-# ---------------------------------------------------------------------------
-# list_dir
-# ---------------------------------------------------------------------------
 
 
 async def test_list_dir_returns_entries() -> None:
@@ -319,11 +276,6 @@ async def test_list_dir_re_raises_file_not_found() -> None:
         await tool.list_dir(path="/tmp/missing")
 
 
-# ---------------------------------------------------------------------------
-# make_dir
-# ---------------------------------------------------------------------------
-
-
 async def test_make_dir_returns_ok_json() -> None:
     rt = _mock_runtime()
     tool = _make_tool(os_runtime=rt)
@@ -341,11 +293,6 @@ async def test_make_dir_wraps_errors() -> None:
 
     with pytest.raises(ToolExecutionError, match="shell_make_dir failed"):
         await tool.make_dir(path="/tmp/x")
-
-
-# ---------------------------------------------------------------------------
-# delete
-# ---------------------------------------------------------------------------
 
 
 async def test_delete_returns_ok_json() -> None:

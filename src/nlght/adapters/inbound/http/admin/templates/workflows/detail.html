@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ workflow.name }} — nlght Admin{% endblock %}
+{% block title %}{{ workflow.name }} | nlght Admin{% endblock %}
 {% block content %}
 <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem">
   <div>
@@ -42,7 +42,7 @@
       {% if v.status == 'active' %}<span class="badge badge-active">active</span>
       {% else %}<span class="badge badge-draft">{{ v.status }}</span>{% endif %}
     </td>
-    <td>{{ v.steps | length if v.steps is defined else "—" }}</td>
+    <td>{{ v.steps | length if v.steps is defined else "N/A" }}</td>
     <td class="actions">
       <a href="/admin/versions/{{ v.workflow_version_id }}">Open</a>
       {% if v.status != 'active' %}

@@ -1,19 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""HiveMindStoreCoordinator — full session memory for the enterprise tier.
+"""Provide configured filesystem-backed session coordination.
 
-Requires the ``[hive-mind]`` extra.  This file must only be imported
-behind a ``try/except ImportError`` guard.  See ADR-0016 and ADR-0017.
-
-Usage in wiring.py::
-
-    try:
-        from nlght.adapters.outbound.hive_mind.coordinator import (
-            HiveMindStoreCoordinatorFactory,
-        )
-    except ImportError:
-        HiveMindStoreCoordinatorFactory = None
+Session snapshots use the configured backend.
 """
 
 from __future__ import annotations
@@ -25,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
+from nlght.adapters.outbound.hive_mind.origin import LedgerStamp
 from nlght.adapters.outbound.hive_mind.persistence import FileSystemBackend
 from nlght.core.hive_mind.models import (
     AtomType,
@@ -58,12 +49,12 @@ _PROMOTABLE = {AtomType.RESULT, AtomType.EVAL}
 _DISCARDED  = {AtomType.SPEC, AtomType.PLAN, AtomType.ERROR}
 
 
-class HiveMindStoreCoordinator(StoreCoordinator):
+class HiveMindStoreCoordinator(LedgerStamp, StoreCoordinator):
     """Full StoreCoordinator with entity indexing, conflict detection,
     task lifecycle, and payload promotion.
 
-    Implements StoreCoordinator. The sole writer into all four stores —
-    steps never write directly.
+    Implements StoreCoordinator as the sole writer into all four stores.
+    Steps never write directly.
     """
 
     def __init__(
@@ -77,8 +68,8 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         self._on_invalidate      = on_invalidate or (lambda entities: None)
         self.mental_model_cache  = MentalModelCache()
 
-    # ------------------------------------------------------------------
     def record_turn(self, turn: TurnSummary) -> None:
+        turn.origin = self._stamp(turn.origin)
         self.conversation.append(turn)
         logger.debug(
             "hive_mind.turn.recorded | turn_nr=%d intent=%s entities=%s",
@@ -91,9 +82,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
     def next_turn_nr(self) -> int:
         return self.conversation.current_turn_nr + 1
 
-    # ------------------------------------------------------------------
-    # Working Memory + Promotion
-    # ------------------------------------------------------------------
 
     def write(self, intent: WriteIntent) -> tuple[str, ConflictReport | None]:
         atom = WorkingAtom(
@@ -105,23 +93,38 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             key               = intent.key,
             kind              = intent.kind,
             promote_to_parent = intent.promote_immediately,
+            origin            = self._stamp(),
         )
         self.working.write(atom)
         return atom.id, None
 
-    # ------------------------------------------------------------------
-    # Branch lifecycle (OODA steps use these directly)
-    # ------------------------------------------------------------------
 
     def open_branch(self, label: str) -> None:
-        """Open a new WorkingMemory branch for a pipeline step."""
+        """Open a working-memory branch for a pipeline step.
+
+        Args:
+            label (str): Name used in branch diagnostics.
+
+        Side Effects:
+            Pushes a branch onto working memory and logs its depth.
+        """
         self.working.branch(label)
         logger.debug(
             "hive_mind.branch.open | label=%s depth=%d", label, self.working.depth,
         )
 
     def close_branch(self, promote: bool = False) -> list[WorkingAtom]:
-        """Close the current branch, optionally promoting marked atoms."""
+        """Merge or discard the current working-memory branch.
+
+        Args:
+            promote (bool): Whether marked atoms enter the parent branch.
+
+        Returns:
+            list[WorkingAtom]: Atoms promoted from the closed branch.
+
+        Side Effects:
+            Removes the current branch and logs its resulting depth.
+        """
         promoted = self.working.merge(promote=promote)
         logger.debug(
             "hive_mind.branch.close | promote=%s promoted=%d depth=%d",
@@ -148,6 +151,7 @@ class HiveMindStoreCoordinator(StoreCoordinator):
                 tags=list(atom.tags),
                 turn_nr=turn_nr,
                 status=PromotionStatus.FINAL,
+                origin=self._stamp(atom.origin),
             )
             self.results.store(result)
             stored.append(result)
@@ -155,9 +159,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             self._on_invalidate(list(entities or []))
         return stored
 
-    # ------------------------------------------------------------------
-    # Compat wrappers (translate / research steps — not OODA)
-    # ------------------------------------------------------------------
 
     def start_task(self, task_id: str) -> None:
         self.working.branch(task_id)
@@ -179,6 +180,7 @@ class HiveMindStoreCoordinator(StoreCoordinator):
                     entities = entities,
                     turn_nr  = turn_nr,
                     status   = PromotionStatus.FINAL,
+                    origin   = self._stamp(atom.origin),
                 )
                 self.results.store(result)
                 promoted.append(result)
@@ -195,12 +197,9 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             self._on_invalidate(entities)
         return promoted
 
-    # ------------------------------------------------------------------
-    # Read interface
-    # ------------------------------------------------------------------
 
     def get_context(self, entities: list[str]) -> dict[str, Any]:
-        # Empty entity list means "no filter" — return all FINAL results.
+        # Treat an empty entity list as no filter to include all FINAL results.
         # Entity-based retrieval only applies when the caller has specific entities.
         known = (
             self.results.all_final()
@@ -221,22 +220,35 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         return self.results.exists(entities, tags)
 
     def discard_task(self, task_id: str) -> None:
-        """Close a branch cleanly — nothing is promoted."""
-        atoms = self.working.merge(promote=False)
+        """Discard the current task branch without promotion.
+
+        Args:
+            task_id (str): Task ID used in the discard log.
+
+        Side Effects:
+            Closes the branch and logs its discarded atom count.
+        """
+        dropped_count = len(self.working.read_active())
+        self.working.merge(promote=False)
         logger.debug(
-            "hive_mind.task.discard | id=%s atoms_dropped=%d", task_id, len(atoms),
+            "hive_mind.task.discard | id=%s atoms_dropped=%d", task_id, dropped_count,
         )
 
     def fail_task(self, task_id: str) -> None:
-        """Close a branch on failure — promote nothing."""
-        atoms = self.working.merge(promote=False)
+        """Close a failed task branch without promotion.
+
+        Args:
+            task_id (str): Task ID used in the failure log.
+
+        Side Effects:
+            Closes the branch and logs its discarded atom count as a warning.
+        """
+        dropped_count = len(self.working.read_active())
+        self.working.merge(promote=False)
         logger.warning(
-            "hive_mind.task.fail | id=%s atoms_dropped=%d", task_id, len(atoms),
+            "hive_mind.task.fail | id=%s atoms_dropped=%d", task_id, dropped_count,
         )
 
-    # ------------------------------------------------------------------
-    # Slot API
-    # ------------------------------------------------------------------
 
     def get_slot(self, key: str, default_factory: Callable[[], T]) -> T:
         if key not in self._slots:
@@ -246,9 +258,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
     def set_slot(self, key: str, value: object) -> None:
         self._slots[key] = value
 
-    # ------------------------------------------------------------------
-    # Payload promotion
-    # ------------------------------------------------------------------
 
     def promote_payload(
         self,
@@ -257,10 +266,20 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         tags:     list[str],
         turn_nr:  int,
     ) -> tuple[str, bool]:
-        """Promote a payload string directly into the SessionResultStore.
+        """Promote a payload into the session result store once per hash.
 
-        Returns ``(result_id, was_stored)`` where ``was_stored`` is False when
-        an identical payload already exists (content hash matches).
+        Args:
+            content (str): Payload text to store.
+            entities (list[str]): Entities used to find an existing payload.
+            tags (list[str]): Additional tags attached to a stored result.
+            turn_nr (int): Conversation turn associated with the payload.
+
+        Returns:
+            tuple[str, bool]: Result ID and whether a new payload was stored.
+
+        Side Effects:
+            Stores and logs a new session result unless the latest payload for
+            these entities has the same content hash.
         """
         content_hash = hashlib.sha256(content.encode()).hexdigest()
         payload_tags = list(set(tags) | {"payload", f"hash:{content_hash}"})
@@ -291,6 +310,7 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             turn_nr      = turn_nr,
             status       = PromotionStatus.FINAL,
             content_hash = content_hash,
+            origin       = self._stamp(),
         )
         self.results.store(result)
         self._on_invalidate(entities)
@@ -301,7 +321,14 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         return result.id, True
 
     def get_payload(self, entities: list[str]) -> SessionResult | None:
-        """Return the most recent FINAL payload for these entities."""
+        """Find the most recent final payload for a set of entities.
+
+        Args:
+            entities (list[str]): Entities used to search session results.
+
+        Returns:
+            SessionResult | None: Latest final payload, or ``None`` if absent.
+        """
         candidates = [
             r for r in self.results.find_by_entities(entities)
             if "payload" in r.tags and r.status == PromotionStatus.FINAL
@@ -331,24 +358,13 @@ class HiveMindStoreCoordinator(StoreCoordinator):
             logger.warning("hive_mind.load_artifact.failed | id=%s error=%s", clean, exc)
             return None
 
-    # ------------------------------------------------------------------
-    # Reference resolution
-    # ------------------------------------------------------------------
 
     def resolve_reference(self, ref: str) -> TurnSummary | None:
         return self.conversation.resolve_reference(ref)
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     def _dump(self, checkpoint_name: str) -> None:
-        logger.debug(
-            "\n████████████████████████████████████████████████\n"
-            "STORE COORDINATOR CHECKPOINT: %s\n"
-            "████████████████████████████████████████████████",
-            checkpoint_name,
-        )
+        logger.debug("STORE COORDINATOR CHECKPOINT: %s", checkpoint_name)
 
         recent_turns = self.conversation.last_n(4)
         if recent_turns:
@@ -389,7 +405,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
         else:
             logger.debug("WORKING MEMORY: (empty stack)")
 
-        logger.debug("████████████████████████████████████████████████\n")
 
     def _check_conflict(
         self,
@@ -414,10 +429,6 @@ class HiveMindStoreCoordinator(StoreCoordinator):
                 return report
         return None
 
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
 
 class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
     """Implements StoreCoordinatorFactory. Creates or restores HiveMindStoreCoordinators via a SessionBackend."""
@@ -446,10 +457,15 @@ class HiveMindStoreCoordinatorFactory(StoreCoordinatorFactory):
         return snapshot.owner_principal_id or None
 
     def claim_ownership(self, session_id: str, owner_principal_id: str) -> None:
-        """Write the owner onto the stored session, once.
+        """Record an owner for a new or previously unowned session.
 
-        A session with an owner keeps it. Ownership is established when a
-        session is created and is not a thing a later request may change.
+        Args:
+            session_id (str): Session key whose owner is recorded.
+            owner_principal_id (str): Established principal's stable ID.
+
+        Side Effects:
+            Caches the owner for a new session or saves it on an unowned
+            snapshot. An existing owner is never overwritten.
         """
         snapshot = self._backend.load(session_id)
         if snapshot is None:

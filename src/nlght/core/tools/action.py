@@ -1,13 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Provider-neutral security semantics for model-proposed actions.
-
-These types describe what the runtime can prove about an action.  They never
-attempt to infer why the model proposed it or which sentence influenced an
-argument.  Authorization consumes validated effective arguments and enforced
-runtime capabilities only.
-"""
+"""Define provider-neutral contracts for model-proposed actions."""
 
 from __future__ import annotations
 
@@ -17,6 +11,8 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
+
+from nlght.core.model.trust import ContentExposure
 
 if TYPE_CHECKING:
     from nlght.core.entry.context import PrincipalRef
@@ -47,6 +43,11 @@ class ActionDecisionReason(StrEnum):
     ACTION_RESOLUTION_ERROR = "action_resolution_error"
     POLICY_ERROR = "policy_error"
     APPROVAL_ERROR = "approval_error"
+    POLICY_TIMEOUT = "policy_timeout"
+    APPROVAL_TIMEOUT = "approval_timeout"
+    #: Authorization is switched off for this deployment: nothing was asked,
+    #: and the audit must not read as if a policy had allowed it (ADR-0073).
+    AUTHORIZATION_DISABLED = "authorization_disabled"
 
 
 class SideEffectClass(StrEnum):
@@ -126,7 +127,11 @@ class ExecutionCapabilities:
 
     @classmethod
     def unconfined(cls) -> ExecutionCapabilities:
-        """Conservative answer for runtimes that expose no capability contract."""
+        """Represent a runtime with no enforceable capability contract.
+
+        Returns:
+            ExecutionCapabilities: Capabilities at host scope with arbitrary network access.
+        """
         return cls(
             filesystem=FilesystemCapability.HOST,
             network=NetworkCapability.ARBITRARY,
@@ -137,11 +142,22 @@ class ExecutionCapabilities:
 
 @dataclass(frozen=True)
 class BoundDestination:
-    """A destination identity safe to correlate without logging its raw value."""
+    """Where one bound action goes, in two forms with two different readers.
+
+    ``identifier`` is a digest of the correlation value (for a network
+    destination, its origin). It is safe for logs and stable across calls that
+    reach the same place.
+
+    ``target`` is the full destination exactly as the tool will use it: a
+    complete URL, including its path, so a policy can rule on a path and not
+    only on a host. It is for the policy and the approval adapter only and is
+    never logged (ADR-0072).
+    """
 
     kind: DestinationKind
     scope: ScopeClass
     identifier: str
+    target: str = field(repr=False)
 
     @classmethod
     def from_value(
@@ -150,9 +166,26 @@ class BoundDestination:
         kind: DestinationKind,
         scope: ScopeClass,
         value: str,
+        target: str | None = None,
     ) -> BoundDestination:
+        """Bind a correlation value to a log-safe destination identifier.
+
+        Args:
+            kind (DestinationKind): Destination kind.
+            scope (ScopeClass): Scope of the destination.
+            value (str): Correlation value to bind.
+            target (str | None): Optional full destination target.
+
+        Returns:
+            BoundDestination: A destination with a SHA-256 identifier and full target.
+        """
         digest = hashlib.sha256(f"{kind.value}\0{value}".encode()).hexdigest()
-        return cls(kind=kind, scope=scope, identifier=f"sha256:{digest}")
+        return cls(
+            kind=kind,
+            scope=scope,
+            identifier=f"sha256:{digest}",
+            target=value if target is None else target,
+        )
 
 
 @dataclass(frozen=True)
@@ -244,11 +277,22 @@ class ActionExecutionContext:
     session_id: str | None
     resource_address: str
     signature_name: str
-    has_external_untrusted_input: bool
+    #: The untrusted sources the proposing model has seen (ADR-0074). A signal
+    #: for the policy. The framework decides nothing on it.
+    exposure: ContentExposure
 
     @property
     def tool_subject(self) -> str:
         return f"{self.resource_address}::{self.signature_name}"
+
+    @property
+    def has_external_untrusted_input(self) -> bool:
+        """Derive the untrusted-input flag from recorded exposure.
+
+        Returns:
+            bool: Whether at least one external untrusted source was seen.
+        """
+        return self.exposure.has_external_untrusted_input
 
 
 @dataclass(frozen=True)
@@ -258,17 +302,33 @@ class ActionDecisionResult:
 
 
 @dataclass(frozen=True)
-class PendingAction:
-    """One immutable effective action presented for approval.
+class ActionReview:
+    """One immutable bound action, as the policy and the approval adapter see it.
 
-    ``effective_arguments_json`` may contain sensitive values and is for the
-    approval adapter only.  It must never be copied into decision logs.
+    Both receive the same review of the same snapshot the tool will execute,
+    and ``action_fingerprint`` binds a decision to exactly that snapshot.
+
+    ``effective_arguments_json`` and ``action.destination.target`` may contain
+    sensitive values. They are for the policy and the approval adapter only:
+    the framework neither copies them into decision logs nor forwards them to
+    any model. The implementation decides which fields to send to a reviewing
+    model (ADR-0072).
     """
 
     context: ActionExecutionContext
     action: ConcreteAction
     action_fingerprint: str
     effective_arguments_json: str
+
+    @property
+    def effective_arguments(self) -> dict[str, JsonValue]:
+        """Isolate the bound argument snapshot from caller mutations.
+
+        Returns:
+            dict[str, JsonValue]: A new argument dictionary on every access.
+        """
+        parsed: dict[str, JsonValue] = json.loads(self.effective_arguments_json)
+        return parsed
 
 
 @dataclass(frozen=True)
@@ -284,7 +344,16 @@ def action_fingerprint(
     action: ConcreteAction,
     effective_arguments_json: str,
 ) -> str:
-    """Bind approval to the tool, trusted context, action and exact arguments."""
+    """Bind approval to the exact tool action and trusted context.
+
+    Args:
+        context (ActionExecutionContext): Bound execution context and exposure.
+        action (ConcreteAction): Concrete action being approved.
+        effective_arguments_json (str): Canonical JSON of effective arguments.
+
+    Returns:
+        str: A hexadecimal SHA-256 fingerprint of the review snapshot.
+    """
     material = {
         "request_id": context.request_id,
         "correlation_id": context.correlation_id,
@@ -293,7 +362,7 @@ def action_fingerprint(
         "session_id": context.session_id,
         "resource_address": context.resource_address,
         "signature_name": context.signature_name,
-        "has_external_untrusted_input": context.has_external_untrusted_input,
+        "exposure": [asdict(ref) for ref in context.exposure.untrusted_sources],
         "action": asdict(action),
         "effective_arguments": json.loads(effective_arguments_json),
     }

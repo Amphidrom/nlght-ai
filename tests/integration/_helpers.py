@@ -1,15 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Shared integration-test helpers.
+"""Build integration test applications, containers, and workflows.
 
-This module contains builder functions and stub classes used across the
-integration test suite.  It is NOT a pytest conftest — fixtures live in
-conftest.py.  Tests import helpers from here directly:
-
-    from integration._helpers import build_test_app, build_test_container, seed_workflow
-
-(``tests/`` is on sys.path via pyproject.toml ``pythonpath``.)
+Tests import these helpers directly. Pytest fixtures live in ``conftest.py``.
 """
 from __future__ import annotations
 
@@ -47,7 +41,7 @@ from nlght.core.signals.signal import Signal
 
 
 class StubLicenseAdapter(LicenseService):
-    """Full-access license for integration tests — all entitlements granted."""
+    """A test license adapter that grants every entitlement."""
 
     def __init__(self) -> None:
         super().__init__(License(
@@ -60,12 +54,8 @@ class StubLicenseAdapter(LicenseService):
         return {"customer_id": "test", "tier": "enterprise"}
 
 
-# ---------------------------------------------------------------------------
-# Stub model client
-# ---------------------------------------------------------------------------
-
 class StubBoundModelClient:
-    """Returns a canned response for LLM calls — no real model needed."""
+    """A model client that returns canned responses without an external model."""
 
     def __init__(self, response: str, emitter: object) -> None:
         self._response = response
@@ -89,29 +79,22 @@ class StubModelClient:
         return StubBoundModelClient(response=self.response, emitter=emitter)
 
 
-# ---------------------------------------------------------------------------
-# DB seeding helpers
-# ---------------------------------------------------------------------------
-
 async def seed_workflow(
     session_factory,
     name: str,
     steps: list[dict],
 ) -> dict[str, Any]:
-    """Insert a workflow + version + steps into SQLite.
+    """Insert a workflow version and its steps into the test database.
 
-    Each step dict keys:
-        id (uuid.UUID, optional — generated if missing)
-        name (str, optional)
-        type (str, required)
-        is_start (bool)
-        is_terminal (bool)
-        transitions (dict — values must be str(step_id) of the target step)
-        config (dict, optional)
-        enabled (bool, optional)
+    This helper assigns missing step IDs to the supplied dictionaries.
 
-    Returns {workflow_id, version_id, step_ids}.
-    """
+    Args:
+        session_factory (Callable): Factory for database sessions.
+        name (str): Workflow name and capability.
+        steps (list[dict]): Step definitions with type, routing, and status fields.
+
+    Returns:
+        dict[str, Any]: Workflow ID, version ID, and step IDs."""
     wf_id = uuid.uuid4()
     ver_id = uuid.uuid4()
 
@@ -163,7 +146,18 @@ async def seed_resource(
     config: dict | None = None,
     enabled: bool = True,
 ) -> uuid.UUID:
-    """Insert a resource row (tool activation) into SQLite."""
+    """Insert a resource row (tool activation) into SQLite.
+
+    Args:
+        session_factory (Any): Factory for test database sessions.
+        kind (str): Resource kind to insert.
+        name (str): Name assigned to the resource or source.
+        config (dict | None): Optional resource configuration.
+        enabled (bool): Whether the inserted record is enabled.
+
+    Returns:
+        uuid.UUID: Identifier of the inserted resource row.
+    """
     resource_id = uuid.uuid4()
     async with session_factory() as session:
         async with session.begin():
@@ -187,7 +181,20 @@ async def seed_policy(
     priority: int = 0,
     enabled: bool = True,
 ) -> uuid.UUID:
-    """Insert an access-policy rule into SQLite."""
+    """Insert an access-policy rule into SQLite.
+
+    Args:
+        session_factory (Any): Factory for test database sessions.
+        subject_type (str): Type of policy subject.
+        subject (str): Policy subject identifier.
+        effect (str): Policy effect to store.
+        conditions (dict | None): Optional policy conditions.
+        priority (int): Policy evaluation priority.
+        enabled (bool): Whether the inserted record is enabled.
+
+    Returns:
+        uuid.UUID: Identifier of the inserted policy rule.
+    """
     rule_id = uuid.uuid4()
     async with session_factory() as session:
         async with session.begin():
@@ -203,14 +210,16 @@ async def seed_policy(
     return rule_id
 
 
-# ---------------------------------------------------------------------------
-# Step loader factory
-# ---------------------------------------------------------------------------
-
 def make_step_loader(*extra_step_classes) -> StepLoader:
     """Build a fresh StepLoader with built-ins + any test-specific step classes.
 
     Using a local loader (not the global step_registry) keeps tests isolated.
+
+    Args:
+        *extra_step_classes (type): Additional step classes registered for the test.
+
+    Returns:
+        StepLoader: Step loader containing built-ins and test steps.
     """
     loader = StepLoader()
     loader.register(DoneStep)
@@ -220,10 +229,6 @@ def make_step_loader(*extra_step_classes) -> StepLoader:
         loader.register(cls)
     return loader
 
-
-# ---------------------------------------------------------------------------
-# Container + app builders
-# ---------------------------------------------------------------------------
 
 def _make_gateway_service(workflow_repo, resource_repo, *, with_generic_json_detector: bool = False):
     detectors = [OpenAIProtocolDetector(base_path="/v1")]
@@ -252,6 +257,18 @@ def build_test_container(
     - Uses SQLite-backed repositories (passed in as fixtures).
     - Uses StubModelClient for all LLM calls.
     - Never reads a YAML config file.
+
+    Args:
+        workflow_repo (Any): Workflow repository stub.
+        resource_repo (Any): Resource repository stub.
+        openai_workflow_mapping (dict[str, str] | None): Optional protocol workflow mapping.
+        include_generic_json (bool): Whether to register the generic JSON detector.
+        model_response (str): Response returned by the stub model.
+        step_loader (StepLoader | None): Optional custom step loader.
+        with_session_store (bool): Whether to attach session persistence.
+
+    Returns:
+        Container: Wired integration test container.
     """
     gateway = _make_gateway_service(
         workflow_repo, resource_repo,
@@ -296,7 +313,14 @@ def build_test_container(
 
 
 def build_test_app(container: Container) -> FastAPI:
-    """Create a plain FastAPI app with the container pre-set on app.state."""
+    """Create a plain FastAPI app with the container pre-set on app.state.
+
+    Args:
+        container (Container): Container attached to the test application.
+
+    Returns:
+        FastAPI: FastAPI application with the test container attached.
+    """
     app = FastAPI(title="nlght-integration-test")
     app.state.container = container
 

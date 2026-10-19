@@ -16,7 +16,7 @@ class PrincipalRef:
     would tempt every consumer to make its own authorization decision from
     whatever looked relevant.
 
-    It says nothing about *how* the identity was established — a gateway
+    It says nothing about *how* the identity was established. A gateway
     assertion, an API key, an OIDC token and a client certificate all produce
     the same reference. That is what lets the authentication source change
     later without ownership being rebuilt (ADR-0060).
@@ -54,7 +54,7 @@ class RequestContext:
     workflow: str | None = None
     #: Who was established to be calling, where a `PrincipalResolver` could say.
     #:
-    #: `None` means no identity was established — either none is configured, or
+    #: `None` means no identity was established because no resolver is configured or
     #: the configured trust conditions were not met. It is authorization-relevant
     #: in exactly one direction: a `None` principal can own nothing. Nothing may
     #: read a header and treat it as this.

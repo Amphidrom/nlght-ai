@@ -1,23 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The kind contract, held in place.
+"""Guard the exact kind classification contract sent to the model.
 
-What this file can and cannot prove is worth stating, because the difference is
-the whole reason the live corpus exists:
-
-    CI          the contract is present, complete, and reaches the model
-    live corpus the model actually classifies the gate matrix correctly
-
-A string test cannot show that a model reads a boundary the way it was meant. It
-shows that the boundary did not quietly disappear — which is a real failure mode,
-since the contract is assembled from data and a deleted entry leaves every
-remaining string looking correct.
-
-So the expectations below are spelled out **independently** of the module they
-check. A test that iterated `DEFINITIONS` and asserted each entry appears in the
-prompt would pass after a definition was deleted: the loop would simply be
-shorter. Naming the four here is what makes a deletion red.
+The expectations name every supported kind independently of the definitions
+under test, so removing a definition fails the suite.
 """
 
 from __future__ import annotations
@@ -98,7 +85,7 @@ def test_every_contrast_names_a_real_kind() -> None:
 
 
 def test_the_rendered_contract_carries_every_part() -> None:
-    """Assembled, not written out — so the prompt cannot drift from the data."""
+    """Include every classification definition in the rendered model contract."""
     rendered = contract()
 
     for item in DEFINITIONS:
@@ -112,12 +99,7 @@ def test_the_rendered_contract_carries_every_part() -> None:
 
 
 def test_the_contract_states_that_one_sentence_may_say_several_things() -> None:
-    """Atomicity belongs to the contract, not beside it.
-
-    A kind is a property of an assertion and never of a sentence, so a sentence
-    asserting two things yields two claims with two kinds — and they share their
-    wording, which is correct rather than a duplicate.
-    """
+    """Allow one sentence to yield multiple atomic assertions."""
     rendered = contract().lower()
 
     assert "several atomic assertions" in rendered

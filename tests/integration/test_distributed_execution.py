@@ -149,7 +149,7 @@ async def test_workers_claim_disjoint_compatible_jobs(sqlite_engine) -> None:
 
 async def test_worker_without_capabilities_is_a_wildcard(sqlite_engine) -> None:
     # An empty-capability worker (the single-node gateway+worker default) must
-    # claim a job even when the workflow declares a requirement — capabilities
+    # claim a job even when the workflow declares a requirement. Capabilities
     # are opt-in for heterogeneous pools, not a gate every job must pass.
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
@@ -171,7 +171,7 @@ async def test_worker_without_capabilities_is_a_wildcard(sqlite_engine) -> None:
 
 async def test_worker_with_capabilities_still_skips_a_requirement_it_lacks(sqlite_engine) -> None:
     # A worker that *does* declare capabilities stays restricted to jobs whose
-    # requirements it fully satisfies — only the empty set is a wildcard.
+    # requirements it fully satisfies, only the empty set is a wildcard.
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
     pdf = _worker("parser:pdf")
@@ -191,7 +191,7 @@ async def test_worker_with_capabilities_still_skips_a_requirement_it_lacks(sqlit
 
 async def test_blocking_workflow_runs_one_execution_at_a_time(sqlite_engine) -> None:
     # A blocking (exclusive) workflow serialises: while one execution is
-    # leased/running, a second is not claimable; it becomes claimable only once
+    # leased/running, a second is not claimable. It becomes claimable only once
     # the first reaches a terminal state.
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
@@ -386,11 +386,6 @@ async def test_execution_artifacts_are_durable_and_content_idempotent(sqlite_eng
         )
 
 
-# ---------------------------------------------------------------------------
-# Observation — the read-only surface the admin UI is built on
-# ---------------------------------------------------------------------------
-
-
 async def test_listing_runs_hides_children_behind_their_parent(sqlite_engine) -> None:
     # A fanned-out corpus is one run with many children. Listing every execution
     # would bury the runs that matter under the shares of one of them.
@@ -454,7 +449,7 @@ async def test_fan_out_summaries_answer_for_a_whole_page_at_once(sqlite_engine) 
 
 
 async def test_attempts_name_the_worker_that_held_each_try(sqlite_engine) -> None:
-    # The record says where a run ended up. This says how it got there — without
+    # The record says where a run ended up. Attempts say how it got there. Without
     # it a run that succeeded on its second try is indistinguishable from one
     # that succeeded outright.
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
@@ -529,18 +524,7 @@ async def test_status_counts_separate_in_flight_from_settled(sqlite_engine) -> N
 async def test_the_claim_asks_postgres_to_skip_rows_another_worker_holds(
     sqlite_engine,
 ) -> None:
-    """`FOR UPDATE ... SKIP LOCKED` is the whole of how two workers share a queue.
-
-    Without `SKIP LOCKED` a second worker blocks on the row the first is
-    claiming instead of taking the next one, and a pool of workers degenerates
-    into one worker with an audience. Nothing observable here would say so:
-    SQLite serialises anyway, and it ignores `FOR UPDATE` entirely, so a claim
-    that had lost the clause would still pass every other test in this file.
-
-    So this asserts what PostgreSQL would receive rather than what SQLite does —
-    the statements the repository really emits, compiled for the dialect they
-    were written for. It fails the moment `skip_locked=True` goes missing.
-    """
+    """Use SKIP LOCKED so a worker can claim the next available job."""
     from sqlalchemy import event
     from sqlalchemy.dialects import postgresql
     from sqlalchemy.sql import Select
@@ -554,7 +538,7 @@ async def test_the_claim_asks_postgres_to_skip_rows_another_worker_holds(
 
     emitted: list[str] = []
 
-    def _record(conn, clauseelement, multiparams, params, execution_options):  # noqa: ANN001, ANN202
+    def _record(conn, clauseelement, multiparams, params, execution_options):
         if isinstance(clauseelement, Select):
             emitted.append(
                 str(clauseelement.compile(dialect=postgresql.dialect()))
@@ -572,31 +556,18 @@ async def test_the_claim_asks_postgres_to_skip_rows_another_worker_holds(
     locking = [sql for sql in emitted if "FOR UPDATE" in sql]
     assert locking, "the claim took no row lock at all"
     assert all("SKIP LOCKED" in sql for sql in locking), (
-        "a claim locked a row without SKIP LOCKED — a second worker would wait "
+        "a claim locked a row without SKIP LOCKED. A second worker would wait "
         "for it instead of claiming the next execution"
     )
 
 
-# ---------------------------------------------------------------------------
-# What a durable execution carries across the gateway → queue → worker boundary
-# ---------------------------------------------------------------------------
-
 async def test_the_principal_survives_the_queue_so_a_worker_can_open_the_session(
     sqlite_engine,
 ) -> None:
-    """Ownership has to hold across the boundary, not only inside one process.
+    """Carry the authenticated principal with a queued execution.
 
-    The gateway establishes who is calling; the worker claims the job later, on
-    another node, with none of the request left — no headers, no connection, no
-    caller. If the principal does not travel with the execution, the session key
-    still does, and the locator arrives without the identity. That is the exact
-    inversion ownership exists to end, and it fails silently: the work runs,
-    just as nobody.
-
-    So the established principal is delegated through the queue, and the worker
-    adopts it rather than re-authenticating a request that has long since
-    returned.
-    """
+    The worker needs the principal to pass session ownership checks when it
+    resumes the job."""
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
     worker = _worker()
@@ -640,13 +611,7 @@ async def test_the_principal_survives_the_queue_so_a_worker_can_open_the_session
 async def test_a_job_queued_before_principals_existed_arrives_as_nobody(
     sqlite_engine,
 ) -> None:
-    """The fail direction, pinned.
-
-    Rows written before this field existed have no principal, and inventing one
-    for them is the only genuinely dangerous option. `None` means no identity
-    was established — which under enforcement is a refusal, not a session opened
-    for whoever claimed the job.
-    """
+    """Leave legacy queue rows without a principal unauthenticated."""
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
     worker = _worker()
@@ -677,19 +642,9 @@ async def test_a_job_queued_before_principals_existed_arrives_as_nobody(
 async def test_the_queue_does_not_carry_a_workflow_name_for_a_policy_to_believe(
     sqlite_engine,
 ) -> None:
-    """The other half, and it goes the opposite way on purpose.
+    """Use the executor workflow identity for policy checks.
 
-    The principal comes from the caller and can only be delegated. The workflow
-    is something the executor *knows* — it is running it — so a copy stored at
-    submission time would be a second answer to a question with an
-    authoritative one. For a fan-out child that copy would be the parent's name,
-    and a `workflow` condition would then authorize the child against the wrong
-    flow.
-
-    The executor stamps `invocation.workflow.name` before any policy reads the
-    context, so nothing is lost by not storing it — and something is gained:
-    there is no stored value for a policy to believe.
-    """
+    A queued child must not inherit an authoritative workflow name from its parent."""
     workflow_id, version_id = await _seed_workflow(sqlite_engine)
     repository = SqlAlchemyExecutionRepository(sqlite_engine)
     worker = _worker()

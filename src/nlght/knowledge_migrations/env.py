@@ -1,4 +1,4 @@
-"""Alembic migration environment for the knowledge database — async setup.
+"""Set up async Alembic migrations for the knowledge database.
 
 The target database is always given on the command line. Nothing is read from
 configuration and no URL is stored in the ini file or here, because there is no
@@ -20,25 +20,16 @@ from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
-# ---------------------------------------------------------------------------
-# Import the metadata Alembic uses for autogenerate
-# ---------------------------------------------------------------------------
 from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeBase
 
 target_metadata = KnowledgeBase.metadata
 
-# ---------------------------------------------------------------------------
-# Alembic config object (gives access to alembic.ini values)
-# ---------------------------------------------------------------------------
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
-# ---------------------------------------------------------------------------
-# The target database is always passed in
-# ---------------------------------------------------------------------------
 #
 # There is no configured knowledge URL to fall back on, by design. The knowledge
 # database is reached at runtime only through the resource activations that use
@@ -66,10 +57,6 @@ elif not context.is_offline_mode():
     )
 
 
-# ---------------------------------------------------------------------------
-# Offline mode: generate SQL without a live connection
-# ---------------------------------------------------------------------------
-
 def run_migrations_offline() -> None:
     """Emit migration SQL to stdout without connecting to the database.
 
@@ -88,10 +75,6 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-# ---------------------------------------------------------------------------
-# Online mode: connect and apply migrations
-# ---------------------------------------------------------------------------
-
 def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -108,18 +91,13 @@ async def run_migrations_online() -> None:
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
-        # NullPool: each migration run gets a fresh connection —
-        # avoids connection pool issues in short-lived CLI processes.
+        # Avoid pooling connections across short-lived migration runs.
         poolclass=NullPool,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if context.is_offline_mode():
     run_migrations_offline()

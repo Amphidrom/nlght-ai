@@ -4,7 +4,7 @@
 """A sighting is distinct per slot, not only per document and run.
 
 Two sections of one document saying the same thing are two sightings. The old key
-— revision, document, run — recorded only the first, so nothing could say which
+(revision, document, run) recorded only the first, so nothing could say which
 section had stopped carrying a claim when one of them dropped it: the corpus had
 never known both were carrying it.
 
@@ -13,8 +13,8 @@ the same on a retry, which is the case the key was written for and still covers.
 
 `slot_id` becomes empty rather than null where a section has nothing to be found
 by. PostgreSQL treats nulls as distinct in a unique constraint, so a null here
-would quietly let a retry record the same sighting twice — the one thing this key
-exists to prevent.
+would quietly let a retry record the same sighting twice. The key prevents
+that duplication.
 
 Revision ID: 0011
 Revises: 0010

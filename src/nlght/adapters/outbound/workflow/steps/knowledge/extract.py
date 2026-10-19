@@ -56,7 +56,7 @@ Return ONLY a JSON array. Each element must be an object with:
   "type":       a short category, e.g. "dependency", "security_policy"
   "confidence": a number between 0 and 1
   "observed_text": the sentence from TEXT that states this claim, copied
-                exactly — the same characters, nothing added, shortened,
+                exactly, with the same characters and nothing added, shortened,
                 corrected or rephrased. It must appear verbatim in TEXT; an
                 element whose "observed_text" does not is discarded.
   "content":    the assertion, shaped by kind:
@@ -66,12 +66,12 @@ Return ONLY a JSON array. Each element must be an object with:
                   decision -> {{"subject": ..., "decision_type": ..., "decision": ..., "effect": ...}}
 
 "observed_text" is what the source says; "content" is what you made of it. The
-first is quoted back to a reader and must never be reassembled from the second —
-so it is required for every kind, including "fact", where the structured fields
+first is quoted back to a reader and must never be reassembled from the second.
+It is required for every kind, including "fact", where the structured fields
 alone cannot reproduce a sentence.
 
 For "rule" and "decision", "subject" and "rule_property"/"decision_type" name
-what the claim is about and which question about it — short, lower_snake_case,
+what the claim is about and which question about it: short, lower_snake_case,
 one or two words, and the same words for the same question every time:
 
   "Expenses above CHF 500 require approval."
@@ -90,7 +90,7 @@ A "fact" names a relation and the things standing in it: "predicate" for the
 relation, then "subject" and "object". Where a relation carries more than two
 things, add short lower_snake_case roles rather than crowding them into
 "object". Use the same predicate and the same role names for the same kind of
-statement every time — two runs over one unchanged sentence must produce the
+statement every time. Two runs over one unchanged sentence must produce the
 same proposition.
 
 
@@ -121,8 +121,8 @@ _PROMPT = _PROMPT_TEMPLATE.replace(
 class KnowledgeExtractStep(StepBase):
     """Extracts candidate assertions from knowledge units with the platform model.
 
-    Uses ``ctx.llm`` — the workflow's configured provider with its access policy,
-    metering, and token budget — rather than the prototype's raw Ollama endpoint.
+    Uses ``ctx.llm``, the workflow's configured provider with its access policy,
+    metering, and token budget, instead of the prototype's raw Ollama endpoint.
 
     Step config:
         max_units:      cap on units processed per extraction pass (default: all)
@@ -133,6 +133,13 @@ class KnowledgeExtractStep(StepBase):
     """
 
     TYPE = "knowledge.extract"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_EXTRACTED = NOTHING_EXTRACTED
+        UNCHANGED = UNCHANGED
+        MORE_UNITS = MORE_UNITS
 
     def __init__(
         self,
@@ -147,7 +154,7 @@ class KnowledgeExtractStep(StepBase):
         super().__init__(config=config, **kwargs)
         # The same three the persist step takes, and for the same reason: the
         # knowledge database is reached through a writer activation and nowhere
-        # else. Here they are optional — without them nothing is skipped.
+        # else. Here they are optional because no step is skipped without them.
         self._resources = resource_repository
         self._activator = resource_activator
         self._tools = tool_loader
@@ -165,10 +172,6 @@ class KnowledgeExtractStep(StepBase):
                        "Units processed by one step invocation", default=1),
             StepOption("min_confidence", "number",
                        "Drop candidates below this confidence", default=0.0),
-            StepOption("temperature", "number",
-                       "Sampling temperature. 0 pins the model, which is what keeps two runs "
-                       "over one unchanged document agreeing on what they found.",
-                       default=0.0),
             StepOption("writer", "string",
                        "Resource name of the knowledge_index_writer activation. Without it "
                        "every run re-extracts every document, because there is nowhere to "
@@ -177,11 +180,22 @@ class KnowledgeExtractStep(StepBase):
         ]
 
     async def _repository(self, caller: RequestContext | None) -> KnowledgeRepository | None:
-        """The knowledge database, reached the only way there is.
+        """Resolve the optional knowledge repository through its writer resource.
 
-        Through the writer activation, exactly as `knowledge.persist` reaches
-        it. Optional here: without one there is nowhere to record what was
-        extracted, so nothing is skipped and the step behaves as it always did.
+        Args:
+            caller (RequestContext | None): Caller used for resource access checks.
+
+        Returns:
+            KnowledgeRepository | None: Repository attached to the configured
+            writer, or ``None`` when no writer or resource plumbing is available.
+
+        Raises:
+            WorkflowConfigurationError: A named writer cannot be activated or
+            resolves to the wrong tool type.
+            ResourceAccessDeniedError: Access policy denies the caller.
+
+        Side Effects:
+            Activates the configured writer resource when available.
         """
         name = str(self.config.get("writer", "")).strip()
         if not name or self._resources is None or self._tools is None:
@@ -203,20 +217,15 @@ class KnowledgeExtractStep(StepBase):
             )
         return instance.repository
 
-    def _temperature(self) -> float:
-        try:
-            return float(self.config.get("temperature", 0.0))
-        except (TypeError, ValueError) as exc:
-            raise WorkflowConfigurationError(
-                f"Step '{self.TYPE}' has an invalid temperature: {exc}"
-            ) from exc
-
     def _version(self, ctx: WorkflowStepContext) -> str:
-        """What only this step knows; the rest is folded in by the core.
+        """Fingerprint the model, prompt, and extraction settings.
 
-        The assertion schema, the segmentation and the kind list belong to the
-        extraction itself and are added there, so a new one of those cannot be
-        forgotten here.
+        Args:
+            ctx (WorkflowStepContext): Context providing the effective model name.
+
+        Returns:
+            str: Extraction version including the core assertion schema,
+            segmentation, and supported kinds.
         """
         model = str(self.config.get("model", "")).strip() or ctx.model or "unknown"
         provider = str(self.config.get("model_provider", "")).strip() or "unknown"
@@ -226,34 +235,25 @@ class KnowledgeExtractStep(StepBase):
             prompt=_PROMPT,
             # Only the settings that shape what comes out. `unit_batch_size` and
             # `max_units` decide how the work is paced, not what it yields.
+            # Sampling is not among them: it is the model provider's
+            # configuration, and the model is already identified by name above.
             settings={
                 "min_confidence": self.config.get("min_confidence", 0.0),
-                "temperature": self._temperature(),
             },
         )
 
     @staticmethod
     def _content_hashes(ctx: WorkflowStepContext) -> dict[str, str]:
-        """What each document's *parser* was given, keyed by document.
+        """Hash the parser input for each processed document.
 
-        Not the source bytes: a classifier that starts extracting a PDF
-        differently changes what extraction sees while the file on disk is
-        untouched. And, since ADR-0046, not the searchable text either — for a
-        source that transforms its documents, the parser reads the form the
-        source holds and the searchable text is a derivation of it.
+        Args:
+            ctx (WorkflowStepContext): Context containing processed documents
+                and the acquired source snapshot.
 
-        The two can move independently, and that is the case worth catching. A
-        heading given an `id` changes the markup and not one word of the text, so
-        hashing the text would skip the document and the new anchor would arrive
-        only with the next real edit. Slot identity resolves against exactly
-        those anchors.
-
-            markup present      hash the markup      — the parser's input
-            markup absent       hash the text        — the same thing
-
-        The second line is most documents, and it is why this does not re-extract
-        an existing corpus: only a source that keeps a separate form gets a
-        different answer than before.
+        Returns:
+            dict[str, str]: Digest by document ID. Uses source form when
+            available, or processed text otherwise, so markup-only changes
+            invalidate extraction when the parser reads that markup.
         """
         documents = ctx.metadata.get("ingestion.processed")
         if not isinstance(documents, tuple):
@@ -285,6 +285,14 @@ class KnowledgeExtractStep(StepBase):
         if ctx.llm is None:
             raise WorkflowConfigurationError(
                 f"Step '{self.TYPE}' requires a model; set 'model_provider' in its step config."
+            )
+        # Refused rather than ignored: an unknown step key passes silently, and a
+        # determinism pin that silently stops applying is the drift this step
+        # exists to prevent.
+        if "temperature" in self.config:
+            raise WorkflowConfigurationError(
+                f"Step '{self.TYPE}' does not take 'temperature': sampling is configured "
+                f"on the model provider it uses (integrations.model_providers[].config.temperature)."
             )
 
         try:
@@ -331,11 +339,11 @@ class KnowledgeExtractStep(StepBase):
             )
             if not units:
                 # Every step after this one reads `knowledge.extracted` and
-                # refuses to run without it — a guard that catches a workflow
+                # refuses to run without it. This guard catches a workflow
                 # wired without an extract step. Returning before establishing
                 # the key made a second run over an unchanged corpus fail on a
                 # configuration error that was not one. `empty` never had the
-                # problem because it wrote its tuple on the way out; the skip
+                # problem because it wrote its tuple on the way out. The skip
                 # has to leave the same trace. The contract is that this step
                 # establishes the key, whether or not it did any work.
                 ctx.metadata.setdefault("knowledge.extracted", ())
@@ -346,20 +354,20 @@ class KnowledgeExtractStep(StepBase):
                     "[%s] knowledge.extract.unchanged | documents=%d",
                     ctx.correlation_id, len(skipped_documents),
                 )
-                return StepResult(ctx=ctx, verdict=UNCHANGED)
+                return StepResult(ctx=ctx, verdict=self.Verdict.UNCHANGED)
 
         max_units = configured_max_units or len(units)
         unit_limit = min(len(units), max_units)
         min_confidence = float(self.config.get("min_confidence", 0.0))
         next_unit = int(ctx.metadata.get("knowledge.extract.next_unit", 0))
         if next_unit >= unit_limit:
-            # The same reason as above: a document with no units — an empty
-            # page, or one whose text the classifier could not read — leaves
+            # A document with no units, such as an empty
+            # page or one whose text the classifier could not read, leaves
             # here, and the chain behind it still expects the key to exist.
             existing = ctx.metadata.setdefault("knowledge.extracted", ())
             ctx.metadata.setdefault("knowledge.observed", ())
             extracted_count = len(existing) if isinstance(existing, tuple) else 0
-            return StepResult(ctx=ctx, verdict="DEFAULT" if extracted_count else NOTHING_EXTRACTED)
+            return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if extracted_count else self.Verdict.NOTHING_EXTRACTED)
 
         existing = ctx.metadata.get("knowledge.extracted")
         extracted: list[ExtractedItem] = list(existing) if isinstance(existing, tuple) else []
@@ -372,7 +380,7 @@ class KnowledgeExtractStep(StepBase):
         funnel = {"returned": 0, "malformed": 0, "unknown_kind": 0, "below_confidence": 0}
         # Which slots this run actually looked at. Retraction is decided per
         # slot by what the slot no longer contains, so it may only run where the
-        # model was asked — and the commonest case is that it was not: an
+        # model was asked, and the commonest case is that it was not: an
         # unchanged document is skipped whole and yields nothing, which without
         # this would read as a slot that lost every claim it had.
         observed: list[tuple[str, str]] = list(ctx.metadata.get("knowledge.observed", ()))
@@ -396,7 +404,7 @@ class KnowledgeExtractStep(StepBase):
                         # Carried, not rebuilt. This copied field by field and
                         # dropped the one it did not know about, so every
                         # candidate reached persistence with no wording and was
-                        # counted as having none — the parser verified it and
+                        # counted as having none. The parser verified it and
                         # this threw it away three lines later.
                         observed_text=item.observed_text,
                         evidence={
@@ -427,14 +435,14 @@ class KnowledgeExtractStep(StepBase):
             funnel["below_confidence"], batch_candidates, len(extracted),
         )
         if batch_end < unit_limit:
-            return StepResult(ctx=ctx, verdict=MORE_UNITS)
+            return StepResult(ctx=ctx, verdict=self.Verdict.MORE_UNITS)
 
         # Recorded only now, once every unit of every document has been read.
         # Recording per batch would mark a document extracted while half of it
         # still was not, and a crash in between would then skip the remainder
-        # for good — the same ordering `ingestion.write` keeps for the index.
+        # for good. `ingestion.write` uses the same ordering for the index.
         await self._record(repository, hashes, version, ctx, skipped_documents, len(extracted))
-        return StepResult(ctx=ctx, verdict="DEFAULT" if extracted else NOTHING_EXTRACTED)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if extracted else self.Verdict.NOTHING_EXTRACTED)
 
     @staticmethod
     async def _already_extracted(
@@ -442,11 +450,16 @@ class KnowledgeExtractStep(StepBase):
         hashes: dict[str, str],
         version: str,
     ) -> list[str]:
-        """Which documents this extraction has already read, unchanged.
+        """Find documents already extracted at the current content and version.
 
-        Nothing is skipped without both a repository to have recorded it and a
-        content hash to compare against — a missing record is not "current",
-        and neither is a document whose text this step cannot see.
+        Args:
+            repository (KnowledgeRepository | None): Source of extraction state.
+            hashes (dict[str, str]): Current content hash by document ID.
+            version (str): Current extraction version.
+
+        Returns:
+            list[str]: IDs whose recorded state matches the supplied hash and
+            version. Missing repository or hashes yield an empty list.
         """
         if repository is None or not hashes:
             return []
@@ -493,15 +506,12 @@ class KnowledgeExtractStep(StepBase):
         prompt = _PROMPT.format(kinds=", ".join(BUILTIN_KINDS), text=text)
 
         collected: list[str] = []
-        # Pinned by default. A sampling model answers the same question in
-        # slightly different words each time, and identity is derived from those
-        # words — so every run produced entity keys the run before it had never
-        # seen, and a corpus nobody edited grew assertions. Temperature is part
-        # of the extraction version, so changing it re-extracts rather than
-        # leaving a corpus half written by each setting.
-        async for event in ctx.llm.stream(
-            [{"role": "user", "content": prompt}], temperature=self._temperature()
-        ):
+        # Sampling is the model provider's configuration: a provider configured
+        # with `temperature: 0` pins the model. A sampling model answers the same
+        # question in slightly different words each time, and identity is derived
+        # from those words, so an unpinned provider lets a corpus nobody edited
+        # grow assertions.
+        async for event in ctx.llm.stream([{"role": "user", "content": prompt}]):
             if event.kind == "token" and event.content:
                 collected.append(event.content)
             elif event.kind == "done":
@@ -511,11 +521,18 @@ class KnowledgeExtractStep(StepBase):
 
     @staticmethod
     def _parse(raw: str, source: str = "") -> tuple[list[ExtractedItem], dict[str, int]]:
-        """Tolerate prose around the JSON, but never invent an assertion.
+        """Extract well-formed assertions from a model response.
 
-        A model that answers with an explanation plus a JSON array is common;
-        a malformed element is dropped with a warning rather than failing the
-        whole unit, because one bad candidate must not lose the good ones.
+        Args:
+            raw (str): Model text containing a JSON array, possibly with prose.
+            source (str): Source text used to verify observed wording.
+
+        Returns:
+            tuple[list[ExtractedItem], dict[str, int]]: Valid assertions and
+            counts for returned, malformed, unknown-kind, and unverified items.
+
+        Side Effects:
+            Logs malformed response items and unverified observed wording.
         """
         tally = {"returned": 0, "malformed": 0}
         match = _JSON_BLOCK.search(raw)
@@ -536,7 +553,7 @@ class KnowledgeExtractStep(StepBase):
                 tally["malformed"] += 1
                 continue
             # Asked before the item is built, because building it raises for an
-            # unknown kind too — and then a model inventing kinds would be
+            # unknown kind too, and then a model inventing kinds would be
             # indistinguishable from one writing malformed content, which want
             # different fixes.
             if str(element.get("kind", "")).strip().lower() not in BUILTIN_KINDS:
@@ -550,7 +567,7 @@ class KnowledgeExtractStep(StepBase):
                     confidence=float(element.get("confidence", 0.5)),
                     observed_text=str(element.get("observed_text", "")),
                 )
-                # Rejected for saying nothing its kind can hold — not for
+                # Rejected for saying nothing its kind can hold, not for
                 # failing to fit the legacy three-column row. A fact with four
                 # roles was counted here as malformed and dropped, so the corpus
                 # kept only the claims an old table happened to have space for.
@@ -573,7 +590,7 @@ class KnowledgeExtractStep(StepBase):
                 continue
             # The wording has to be the source's, not the model's account of it.
             # Asked for in the prompt and checked here, because a field a model
-            # fills in is another model-generated string — and one stored under
+            # fills in is another model-generated string, and one stored under
             # the name "observed" while holding a paraphrase is worse than no
             # wording at all: everything downstream quotes it as if a person
             # could find it in the document.

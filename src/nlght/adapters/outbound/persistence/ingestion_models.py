@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Data ingestion authority — the record of a corpus.
+"""Data ingestion records for a corpus in the knowledge database.
 
 On the knowledge database's declarative base, not the platform's. What a
 source contained, which revision of each document was seen, and what has been
@@ -88,13 +88,13 @@ Index("ingestion_documents_visible", IngestionDocument.source_id, IngestionDocum
 class IngestionDocumentRevision(KnowledgeBase):
     """One immutable revision of a document, holding the text it is made of.
 
-    ``content`` is the authoritative processed text — exactly what chunking ran
-    over, so a chunk's offsets address this string and no other. The indexes
-    hold projections of it and are not addressable by offset; ``artifact_ref``
+    ``content`` is the authoritative processed text that chunking reads, so a
+    chunk's offsets address this string and no other. The indexes
+    hold projections of it and are not addressable by offset. ``artifact_ref``
     names where the revision came from and is provenance, not a read path.
 
-    ``NULL`` means observed and unusable — binary, or undecodable. It carries
-    that one meaning and no other, which is why nothing is backfilled into it.
+    ``NULL`` means observed and unusable, such as binary or undecodable content.
+    It carries that one meaning, which is why nothing is backfilled into it.
     """
 
     __tablename__ = "ingestion_document_revisions"
@@ -128,10 +128,10 @@ class IngestionSnapshotObservation(KnowledgeBase):
 class IngestionIndexGeneration(KnowledgeBase):
     """Which incarnation of a target's indexes the recorded state describes.
 
-    An index lives in Qdrant and OpenSearch; the record that it holds a document
-    lives here. Those can diverge — a dropped collection, a container without a
-    persistent volume, a restored database, a writer pointed at a fresh
-    environment — and nothing in the record itself would notice. The generation
+    An index lives in Qdrant and OpenSearch. The record that it holds a document
+    lives here. They can diverge after a dropped collection, a container without
+    a persistent volume, a restored database, or a writer pointed at a fresh
+    environment. The record alone cannot detect that divergence. The generation
     is what ties the two together: it rotates whenever the bootstrap has to
     *create* a collection or index, and every index-state row carries the
     generation it was written under.
@@ -151,11 +151,11 @@ class IngestionIndexGeneration(KnowledgeBase):
 
 
 class IngestionIndexState(KnowledgeBase):
-    """Per-document, per-target index state — the reindex decision.
+    """Per-document, per-target index state used for reindex decisions.
 
     Replaces copy-on-write generations: writes are idempotent per document, so
     retrieval stays available throughout indexing without an atomic cutover.
-    A document is reindexed when its content or its enricher version changed —
+    A document is reindexed when its content or its enricher version changed,
     or when it does not carry the target's current index generation, which is
     how a recreated index and an interrupted reindex both come out as "still to
     do" without anyone having to remember.

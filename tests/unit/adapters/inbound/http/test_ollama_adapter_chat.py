@@ -1,16 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for OllamaHttpProtocolAdapter chat handling.
-
-Verifies:
-  - POST /api/chat without backend returns 503
-  - POST /api/chat with backend → direct non-streaming inference returns NDJSON
-  - POST /api/chat with backend + stream:true → streaming NDJSON response
-  - POST /api/chat with workflow_mapping → calls gateway_service.process()
-  - session_key_resolver result is forwarded to gateway_service.process()
-  - session_key is None when no resolver configured
-"""
+"""Check Ollama chat routing, response formats, and session-key forwarding."""
 from __future__ import annotations
 
 import json
@@ -34,10 +25,6 @@ from nlght.core.trigger.trigger import Trigger, TriggerKind
 from nlght.core.workflow.workflow import WorkflowDef, WorkflowInvocation, WorkflowVersionDef
 
 _MESSAGES = [{"role": "user", "content": "hello"}]
-
-# ---------------------------------------------------------------------------
-# Stubs
-# ---------------------------------------------------------------------------
 
 
 class _CapturingGatewayService:
@@ -150,11 +137,6 @@ def _make_app(
     return app
 
 
-# ---------------------------------------------------------------------------
-# Direct inference
-# ---------------------------------------------------------------------------
-
-
 def test_chat_returns_503_without_backend() -> None:
     adapter = OllamaHttpProtocolAdapter()
     app = _make_app(adapter)
@@ -193,11 +175,6 @@ def test_chat_direct_inference_streaming_returns_ndjson() -> None:
     assert len(lines) >= 1
     parsed = json.loads(lines[0])
     assert "message" in parsed or "done" in parsed
-
-
-# ---------------------------------------------------------------------------
-# Workflow routing + session key
-# ---------------------------------------------------------------------------
 
 
 def test_chat_with_workflow_calls_gateway() -> None:

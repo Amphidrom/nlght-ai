@@ -77,12 +77,12 @@ def test_the_knowledge_chain_reads_no_configured_url_at_all() -> None:
     platform = (_PACKAGE / "migrations" / "env.py").read_text(encoding="utf-8")
     knowledge = (_PACKAGE / "knowledge_migrations" / "env.py").read_text(encoding="utf-8")
 
-    # The runtime's own database is named in platform.yaml; it is the runtime's.
+    # The runtime's own database is named in platform.yaml. It is the runtime's.
     assert '.get("workflows", {})' in platform
 
     # The knowledge database is not. It is reached only through the resource
     # activations that use it, so there is no platform-wide URL for a migration
-    # to inherit — and none for an activation to be silently overridden by.
+    # to inherit, and none for an activation to be silently overridden by.
     assert "yaml.safe_load" not in knowledge
     assert "NLGHT_CONFIG" not in knowledge
     assert '.get("knowledge", {})' not in knowledge
@@ -129,7 +129,7 @@ def test_the_knowledge_chain_starts_from_its_own_root() -> None:
 
 
 def test_no_platform_migration_creates_an_ingestion_table() -> None:
-    # The ingestion tables moved to the knowledge chain; `nlght-ai migrate` must
+    # The ingestion tables moved to the knowledge chain. `nlght-ai migrate` must
     # not recreate them in the runtime database.
     for path in (_PACKAGE / "migrations" / "versions").glob("*.py"):
         assert "ingestion_" not in path.read_text(encoding="utf-8")

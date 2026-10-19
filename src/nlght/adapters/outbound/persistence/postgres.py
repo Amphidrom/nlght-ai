@@ -63,7 +63,7 @@ class PostgresPersistenceSubsystem:
 
             if current != heads:
                 raise RuntimeError(
-                    f"DB migration required — run 'nlght-ai migrate' or "
+                    f"DB migration required. Run 'nlght-ai migrate' or "
                     f"'PYTHONPATH=src python -m alembic upgrade head'. "
                     f"Current: {current or '(none)'}, Expected: {heads}"
                 )

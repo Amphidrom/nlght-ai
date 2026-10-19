@@ -10,8 +10,8 @@ unspoken one.
 
 The difference from reading a header is the whole point:
 
-    any request + X-Principal-Id            →  a claim
-    a request from the configured upstream  →  an assertion
+    any request with X-Principal-Id: a claim
+    a request from the configured upstream: an assertion
       + X-Principal-Id
 
 So a trust condition is **required**. A resolver constructed without one would
@@ -68,12 +68,12 @@ class TrustedGatewayPrincipalResolver:
     async def resolve(
         self,
         *,
-        path: str,  # noqa: ARG002
-        method: str,  # noqa: ARG002
+        path: str,
+        method: str,
         headers: dict[str, str],
-        query_params: dict[str, str],  # noqa: ARG002
+        query_params: dict[str, str],
         client_host: str | None,
-        raw_body: bytes,  # noqa: ARG002
+        raw_body: bytes,
     ) -> PrincipalRef | None:
         if not self._trusted(headers, client_host):
             return None
@@ -81,19 +81,25 @@ class TrustedGatewayPrincipalResolver:
         return PrincipalRef(id=asserted) if asserted else None
 
     def _trusted(self, headers: dict[str, str], client_host: str | None) -> bool:
-        """Whether this call really came from the upstream that was configured.
+        """Verify every configured upstream identity condition.
 
-        Every configured condition must hold. A deployment that names both a
-        host range and a secret is saying the assertion counts only from that
-        position *and* with that proof, and honouring only one of them would
-        quietly weaken what it asked for.
+        Args:
+            headers (dict[str, str]): Request headers carrying the shared secret.
+            client_host (str | None): Host address checked against configured patterns.
+
+        Returns:
+            bool: ``True`` only if both configured host and secret checks pass.
+
+        Notes:
+            The secret comparison uses constant time to avoid exposing a
+            matching prefix through response timing.
         """
         if self._hosts:
             if client_host is None:
                 return False
             if not any(fnmatch.fnmatch(client_host, pattern) for pattern in self._hosts):
                 logger.warning(
-                    "principal.untrusted_origin | host=%s — assertion ignored", client_host,
+                    "principal.untrusted_origin | host=%s: assertion ignored", client_host,
                 )
                 return False
         if self._secret_header:

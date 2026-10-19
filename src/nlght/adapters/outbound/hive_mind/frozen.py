@@ -1,18 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""FrozenStoreCoordinator — read-only replay wrapper with ephemeral shadow writes.
+"""Replay against a coordinator without changing its stored state.
 
-Wraps any StoreCoordinator for debug replay:
-
-* All reads delegate to the wrapped inner coordinator (snapshot state).
-* All writes go to an in-memory shadow that is discarded when the
-  replay ends — the real session state is never modified.
-* Slots use shadow-first access: set_slot() writes to shadow, get_slot()
-  returns the shadow value if present, then falls back to inner.
-
-This allows the full OODA pipeline to run against a snapshot state and
-produce output without polluting the original session.
+Replay writes stay in a disposable shadow. Reads fall back to the captured coordinator.
 """
 
 from __future__ import annotations
@@ -22,6 +13,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
+from nlght.adapters.outbound.hive_mind.origin import LedgerStamp
 from nlght.core.hive_mind.models import (
     AtomType,
     ConflictReport,
@@ -37,7 +29,7 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
-class FrozenStoreCoordinator(StoreCoordinator):
+class FrozenStoreCoordinator(LedgerStamp, StoreCoordinator):
     """Implements StoreCoordinator as a read-only replay wrapper.
 
     Reads from snapshot state (inner), writes only to ephemeral shadow.
@@ -51,16 +43,12 @@ class FrozenStoreCoordinator(StoreCoordinator):
         self._shadow_branches: list[str]           = []
         self._shadow_task:     str | None          = None
 
-    # ------------------------------------------------------------------
     def record_turn(self, turn: TurnSummary) -> None:
         pass
 
     def get_recent_turns(self, n: int) -> list[TurnSummary]:
         return self._inner.get_recent_turns(n)
 
-    # ------------------------------------------------------------------
-    # Working Memory — shadow only
-    # ------------------------------------------------------------------
 
     def write(self, intent: WriteIntent) -> tuple[str, ConflictReport | None]:
         atom = WorkingAtom(
@@ -72,6 +60,7 @@ class FrozenStoreCoordinator(StoreCoordinator):
             key       = intent.key,
             kind      = intent.kind,
             promote_to_parent=intent.promote_immediately,
+            origin=self._stamp(),
         )
         self._shadow_atoms.append(atom)
         return atom.id, None
@@ -111,6 +100,7 @@ class FrozenStoreCoordinator(StoreCoordinator):
                 entities=list(entities or []),
                 turn_nr=turn_nr,
                 status=PromotionStatus.FINAL,
+                origin=self._stamp(atom.origin),
             )
             self._shadow_results.append(result)
             stored.append(result)
@@ -143,9 +133,6 @@ class FrozenStoreCoordinator(StoreCoordinator):
         else:
             self._shadow_atoms = [a for a in self._shadow_atoms if a.task_id != task_id]
 
-    # ------------------------------------------------------------------
-    # Read interface — delegates to inner
-    # ------------------------------------------------------------------
 
     def get_context(self, entities: list[str]) -> dict[str, Any]:
         return self._inner.get_context(entities)
@@ -160,9 +147,6 @@ class FrozenStoreCoordinator(StoreCoordinator):
     def resolve_reference(self, ref: str) -> TurnSummary | None:
         return self._inner.resolve_reference(ref)
 
-    # ------------------------------------------------------------------
-    # Payload — shadow first, then inner
-    # ------------------------------------------------------------------
 
     def promote_payload(
         self,
@@ -180,6 +164,7 @@ class FrozenStoreCoordinator(StoreCoordinator):
             turn_nr      = turn_nr,
             status       = PromotionStatus.FINAL,
             content_hash = content_hash,
+            origin       = self._stamp(),
         )
         self._shadow_results.append(result)
         return result.id, True
@@ -191,9 +176,6 @@ class FrozenStoreCoordinator(StoreCoordinator):
                 return r
         return self._inner.get_payload(entities)
 
-    # ------------------------------------------------------------------
-    # Slots — shadow-first
-    # ------------------------------------------------------------------
 
     def get_slot(self, key: str, default_factory: Callable[[], T]) -> T:
         if key in self._shadow_slots:

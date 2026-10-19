@@ -14,6 +14,7 @@ from nlght.adapters.outbound.tools.builtin.action_semantics import (
     HTTP_PROBE,
 )
 from nlght.core.errors.errors import ToolExecutionError
+from nlght.core.model.trust import SOURCE_WEB
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 if TYPE_CHECKING:
@@ -104,18 +105,19 @@ class HttpProbeTool(ToolBase):
     """Structured HTTP endpoint probe that runs inside the pentest container.
 
     Unlike shell_exec(curl -si ...), binary response bodies are never written
-    into the LLM context — they are summarised (status, content-type, size).
+    into the LLM context. They are summarised by status, content type, and size.
     Text bodies beyond max_body_bytes are previewed with a truncation indicator.
 
     Requires an OsRuntime (runs the probe as a Python script in the container
     so network access uses the same context as all other pentest tools).
 
     Configuration:
-      ``max_body_bytes`` — max body text to include inline (default 4096)
-      ``timeout_s``      — outer operation timeout in seconds (default 20)
+      ``max_body_bytes``: maximum body text to include inline (default 4096)
+      ``timeout_s``: outer operation timeout in seconds (default 20)
     """
 
     KIND: ClassVar[str]     = "http_probe"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_WEB
     PROVIDER: ClassVar[str] = "local"
 
     @classmethod
@@ -126,8 +128,8 @@ class HttpProbeTool(ToolBase):
                 description=(
                     "Probe an HTTP endpoint and return structured result: "
                     "status_code, response headers, and a safe body representation. "
-                    "Binary bodies (images, archives, …) are auto-summarised — never "
-                    "floods context. Use for baseline probes instead of shell_exec(curl -si …)."
+                    "Binary bodies (such as images or archives) are summarised so they never "
+                    "flood context. Use for baseline probes instead of shell_exec with curl -si."
                 ),
                 method_name="probe",
                 parameters=[
@@ -190,7 +192,7 @@ class HttpProbeTool(ToolBase):
 
         runtime  = self._runtime()
         max_body = self._max_body()
-        # Unique per call → concurrent probes of the same URL never collide.
+        # Keep scratch paths unique per call so concurrent probes never collide.
         token    = uuid.uuid4().hex
 
         params = {
@@ -216,7 +218,7 @@ class HttpProbeTool(ToolBase):
             logger.warning("http_probe.exec_failed | url=%s error=%s", url, exc)
             return json.dumps({"error": f"probe execution failed: {exc}", "url": url})
         finally:
-            # Best-effort cleanup — scratch files would otherwise pile up on the
+            # Clean up scratch files on a best-effort basis to avoid accumulation on the
             # workspace volume across probes.
             for _p in (script_path, params_path):
                 try:

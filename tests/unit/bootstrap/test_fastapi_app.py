@@ -300,7 +300,7 @@ def test_ingress_returns_invocation_payload(monkeypatch) -> None:
 def test_catch_all_adapter_does_not_shadow_the_metrics_mount(monkeypatch) -> None:
     # Regression: the generic_json adapter is a catch-all, so /admin and /metrics
     # must be registered before it or Starlette routes them into the workflow
-    # gateway instead. This exercises the mount; /admin uses the same ordering.
+    # gateway instead. This exercises the mount. /admin uses the same ordering.
     monkeypatch.setattr(fastapi_app, "build_container", _stub_build_container_with_metering)
     app = fastapi_app.create_app()
 
@@ -332,7 +332,7 @@ def test_bare_admin_redirects_to_dashboard_despite_catch_all(monkeypatch) -> Non
 
 def test_sync_endpoint_dispatches_and_returns_the_terminal_result(monkeypatch) -> None:
     # With a durable dispatcher, a sync endpoint submits the run and holds the
-    # request open for the worker's result — the same path as async, but waiting.
+    # request open for the worker's result. It uses the same path as async while waiting.
     monkeypatch.setattr(fastapi_app, "build_container", _stub_build_container_sync_dispatch)
     app = fastapi_app.create_app()
 

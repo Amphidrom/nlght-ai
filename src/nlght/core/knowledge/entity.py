@@ -1,29 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What an assertion *is*, and which of its simultaneous cases this one is.
-
-Three levels, kept apart because they have different lifetimes:
-
-    entity    which business quantity is this?
-    variant   for which simultaneously valid case?
-    revision  how has that case changed over time?
-
-**Identity is a schema decision, not a similarity decision.** An assertion's id
-does not identify what a claim currently says — it identifies the business
-question whose value may change. `CHF 500 → 550` is one rule at two states;
-`approval_threshold → prohibition_threshold` is two rules that must never
-supersede one another. So the entity key is assembled from schema fields and
-looked up deterministically, and the similarity matcher is left with entity
-*linking* — which existing entity a new extraction probably corresponds to —
-never with deciding what the database considers identity.
-
-The dividing rule, applied per kind below:
-
-    into the entity key go exactly those dimensions whose change means we are
-    talking about a different business quantity — not those whose change merely
-    describes a new state of the same quantity.
-"""
+"""Separate claim identity, simultaneous variants, and revisions."""
 
 from __future__ import annotations
 
@@ -55,7 +33,7 @@ ENTITY_KEY_FIELDS: dict[str, tuple[str, ...]] = {
     # Thresholds, conditions and scope are the value. Five hundred is what the
     # rule currently says, not what it is.
     RULE: ("subject", "rule_property"),
-    # Reversing a decision is a new state of that decision; what was chosen
+    # Reversing a decision is a new state of that decision. What was chosen
     # before is history, not a separate decision.
     DECISION: ("subject", "decision_type"),
     # Already had the shape: a short name beside a mutable description.
@@ -69,25 +47,16 @@ proposition. See `entity_key`.
 
 
 class EntityKeyUnavailable(ValueError):
-    """An assertion that cannot say which business quantity it is.
+    """Signal missing identity fields without inventing a key.
 
-    Not an error in the corpus: assertions written before the identifying
-    fields existed have none, and a caller decides what to do about that —
-    usually leave them alone until they are extracted again.
+    Older assertions can lack those fields until they are extracted again.
     """
 
 
 class EntityKeyVersionMismatch(ValueError):
-    """One business question already recorded under a different key scheme.
+    """Stop when one business question has incompatible key schemes.
 
-    Both silent readings are wrong. Matching it would treat a key the old scheme
-    produced as if the new one had produced it, and the two do not mean the same
-    thing — that is what the version is for. Ignoring it quietly creates a second
-    assertion for one question, and the corpus then holds the same quantity twice
-    with nobody the wiser.
-
-    So it stops. Migrating what the previous scheme recorded is a deliberate act,
-    and this is what makes somebody perform it.
+    A migration must reconcile old keys before a new scheme can match them.
     """
 
 
@@ -107,27 +76,17 @@ class EntityKey:
 
 
 def entity_key(kind: str, **fields: object) -> EntityKey:
-    """The key for one assertion.
+    """Derive a versioned key from the kind-specific identity fields.
 
-    For `rule`, `decision` and `pattern` that is one fixed pair of fields, and
-    everything else passed in is the value and is ignored here on purpose — a
-    caller may hand over a whole payload without knowing which half is which.
+    Args:
+        kind (str): Kind of knowledge to identify.
+        **fields (object): Kind-specific identity fields used to derive the key.
 
-    For `fact` it is the **whole proposition**: predicate and every role. Not a
-    projection over some of them.
+    Returns:
+        EntityKey: EntityKey for the assertion.
 
-    An earlier version tried to split a fact's roles into identifying and
-    changeable ones, so that *OpenAI's CEO* could be one thing whose value moves
-    from Alice to Bob. Doing that needs to know which relations are functional
-    and which of their arguments carry identity — domain knowledge no platform
-    has without an ontology, and neither a hardcoded list nor a customer writing
-    one before ingesting anything is an answer.
-
-    So the platform does not decide it. Two propositions are the same assertion
-    when they say the same thing; *CEO(OpenAI, Alice)* and *CEO(OpenAI, Bob)* say
-    different things and are two assertions, with a supersession recorded between
-    them. That is also what §7.4 said from the start: a rewording keeps an
-    identity, a material change makes a new assertion.
+    Raises:
+        EntityKeyUnavailable: The kind or required identity fields are missing.
     """
     if kind == FACT:
         return _fact_key(**fields)
@@ -178,7 +137,15 @@ def _fact_key(**fields: object) -> EntityKey:
 
 
 def entity_key_or_none(kind: str, **fields: object) -> EntityKey | None:
-    """The key, or nothing when this assertion cannot yet provide one."""
+    """Resolve an entity key without raising for absent fields.
+
+    Args:
+        kind (str): Kind of knowledge to identify.
+        **fields (object): Kind-specific identity fields used to derive the key.
+
+    Returns:
+        EntityKey | None: EntityKey or None when unavailable.
+    """
     try:
         return entity_key(kind, **fields)
     except EntityKeyUnavailable:
@@ -186,7 +153,14 @@ def entity_key_or_none(kind: str, **fields: object) -> EntityKey | None:
 
 
 def _scope(values: object) -> frozenset[str]:
-    """A scope as a comparable set, with absence meaning one default case."""
+    """Normalize variant scope for set comparison.
+
+    Args:
+        values (object): Optional scalar or iterable scope values.
+
+    Returns:
+        frozenset[str]: Set of canonical scope terms.
+    """
     if values is None:
         return frozenset()
     if isinstance(values, str):
@@ -205,12 +179,7 @@ NEW = "new"
 
 @dataclass(slots=True, frozen=True)
 class VariantMatch:
-    """Which case of an entity a scope names, and how that was decided.
-
-    ``resolution`` is carried out rather than swallowed so a caller can log or
-    review an ``ambiguous`` outcome — it is the case where the corpus grew a
-    variant that a person might have meant as a continuation.
-    """
+    """Carry a matched variant ID and its resolution for audit or review."""
 
     variant_id: str
     resolution: str
@@ -225,29 +194,18 @@ def resolve_variant(
     scope: object,
     known: Mapping[str, object],
 ) -> VariantMatch:
-    """Which case of this entity a scope names — an existing one, or a new one.
+    """Match a scope to an existing or newly minted variant.
 
-    The id is a **surrogate**, minted once and never derived from the scope.
-    That is forced by the behaviour it has to have: widening "employees" to
-    "employees and contractors" continues the variant it replaced, and a key
-    derived from the scope would change with the scope and retire exactly the
-    variant it was meant to continue.
+    Args:
+        entity (object): Entity being resolved.
+        scope (object): Scope of the arriving observation.
+        known (Mapping[str, object]): Known variants keyed by identity.
 
-    Resolution is a ladder, not a score:
+    Returns:
+        VariantMatch: VariantMatch with resolution and surrogate ID.
 
-        exact match
-        → a single unambiguous widening or narrowing
-        → otherwise a new variant
-
-    Deliberately not "the largest overlap wins". Overlapping scopes that hold at
-    the same time are ordinary — employees and managers, engineering and
-    everyone — and picking the biggest intersection between them is a heuristic
-    deciding identity, which is the thing the surrogate id exists to prevent. On
-    a tie, or on an overlap that is neither containment nor equality, no lineage
-    is asserted: a new variant is opened and the outcome says it was ambiguous.
-    That errs towards a corpus holding one case too many, which a person can
-    merge, rather than towards two cases silently becoming one, which nobody
-    sees.
+    Side Effects:
+        May generate a random surrogate ID.
     """
     wanted = _scope(scope)
     scopes = {candidate: _scope(value) for candidate, value in known.items()}
@@ -281,10 +239,12 @@ def _mint() -> str:
 
 
 def new_assertion_id() -> str:
-    """A surrogate for one assertion, minted when it first appears.
+    """Mint a content-independent assertion identifier.
 
-    Opaque and never computed from content, so a rewording changes what the
-    assertion says without changing which assertion it is — and a faulty
-    matcher cannot retroactively decide what the database considers identity.
+    Returns:
+        str: New opaque assertion ID.
+
+    Side Effects:
+        Reads random UUID state.
     """
     return f"a_{uuid.uuid4().hex[:16]}"

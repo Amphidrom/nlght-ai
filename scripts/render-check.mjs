@@ -1,24 +1,20 @@
-// Render-verify documentation diagrams from their real browser output.
+// Verify documentation diagrams from their browser output.
 //
-// A diagram is not done because its ECharts JSON parses. It is done when the
-// rendered figure was looked at, at documentation width *and* narrow. This
-// builds the docs site from the current working tree, serves it, and captures
-// every `figure.nlght-echart` on the requested pages at both widths.
+// ECharts JSON parsing does not prove that the figure renders. Build the docs
+// from the current tree and capture each figure at desktop and narrow widths.
 //
 //   node scripts/render-check.mjs ingestion/retrieval configuration/principals
 //   node scripts/render-check.mjs --all
 //   node scripts/render-check.mjs --home
 //
-// `--all` covers technical documentation under docs/documentation. The home
-// page is a marketing visual and is deliberately reviewed separately with
-// `--home`; the two flags may be combined.
+// `--all` covers technical documentation under docs/documentation. Use
+// `--home` for the home page. The flags may be combined.
 //
-// It always rebuilds and always starts a fresh preview. There is deliberately
-// no way to reuse a running one: a preview already bound to the port makes the
-// new server fail silently and the screenshots then show the previous build.
+// Always rebuild and start a fresh preview. A process already bound to the
+// port can serve stale screenshots if the new server fails to start.
 //
-// Playwright and the site live in the landing repository; NLGHT_LANDING points
-// at it (default ../nlght-landing).
+// Playwright and the site live in the landing repository. NLGHT_LANDING points
+// there (default ../nlght-landing).
 
 import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
@@ -60,11 +56,11 @@ const run = (cmd, cmdArgs, opts = {}) =>
 spawnSync('sh', ['-c', `lsof -ti tcp:${PORT} | xargs -r kill -9`], { stdio: 'ignore' });
 
 {
-  console.log('· importing the working tree and building the site');
+  console.log('Importing the working tree and building the site');
   if (run('node', ['scripts/fetch-docs.mjs']).status !== 0) process.exit(1);
   const build = run('./node_modules/.bin/astro', ['build'], { stdio: ['ignore', 'pipe', 'inherit'] });
   if (build.status !== 0) {
-    console.error('build failed — EChart.astro rejects the option before the browser sees it');
+    console.error('Build failed: EChart.astro rejects the option before the browser sees it');
     process.exit(1);
   }
 }
@@ -89,7 +85,7 @@ for (let i = 0; i < 60; i += 1) {
   } catch { await new Promise((r) => setTimeout(r, 500)); }
 }
 if (!up) {
-  console.error(`preview did not come up on ${PORT} — refusing to screenshot a build that may not be this one`);
+  console.error(`Preview did not start on ${PORT}. Screenshots could show a stale build`);
   stop();
   process.exit(1);
 }
@@ -101,6 +97,10 @@ let failures = 0;
 for (const page of pages) {
   for (const [label, width] of WIDTHS) {
     const tab = await browser.newPage({ viewport: { width, height: 1200 } });
+    if (page === '@home') {
+      // The one-time intro overlays the chart, so inspect the settled page.
+      await tab.addInitScript(() => localStorage.setItem('ei-intro-seen', '1'));
+    }
     const errors = [];
     tab.on('pageerror', (e) => errors.push(String(e)));
     tab.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
@@ -108,7 +108,7 @@ for (const page of pages) {
     const url = page === '@home' ? `${base}/` : `${base}/documentation/${page}/`;
     const response = await tab.goto(url, { waitUntil: 'networkidle' });
     if (!response?.ok()) {
-      console.log(`✗ ${page} [${label}] HTTP ${response?.status()}`);
+      console.log(`FAIL ${page} [${label}] HTTP ${response?.status()}`);
       failures += 1; await tab.close(); continue;
     }
 
@@ -124,16 +124,16 @@ for (const page of pages) {
       const texts = await figure.$$eval('svg text', (nodes) => nodes.map((n) => n.textContent));
       const ok = state === 'ready';
       if (!ok) failures += 1;
-      console.log(`${ok ? '·' : '✗'} ${page} [${label}] #${index} state=${state} texts=${texts.length}`);
+      console.log(`${ok ? 'OK' : 'FAIL'} ${page} [${label}] #${index} state=${state} texts=${texts.length}`);
       if (!ok) {
         const status = await figure.$eval('[data-echart-status]', (n) => n.textContent).catch(() => '');
         if (status?.trim()) console.log(`    status: ${status.trim()}`);
       }
     }
-    if (!figures.length) console.log(`  ${page} [${label}] — no figures`);
+    if (!figures.length) console.log(`  ${page} [${label}]: no figures`);
     if (errors.length) {
       failures += 1;
-      console.log(`✗ ${page} [${label}] console: ${errors.slice(0, 3).join(' | ')}`);
+      console.log(`FAIL ${page} [${label}] console: ${errors.slice(0, 3).join(' | ')}`);
     }
     await tab.close();
   }
@@ -141,5 +141,5 @@ for (const page of pages) {
 
 await browser.close();
 stop();
-console.log(failures ? `\n${failures} problem(s). Screenshots in ${OUT} — look at them.` : `\nAll figures ready. Screenshots in ${OUT} — look at them.`);
+console.log(failures ? `\n${failures} problem(s). Inspect screenshots in ${OUT}.` : `\nAll figures ready. Inspect screenshots in ${OUT}.`);
 process.exit(failures ? 1 : 0);

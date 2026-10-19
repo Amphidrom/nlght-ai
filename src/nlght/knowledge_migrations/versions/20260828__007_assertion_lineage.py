@@ -6,7 +6,7 @@
 Four tables for the three levels the design keeps apart. `knowledge_assertions`
 holds the surrogate that never moves and the entity key that says which business
 question it is. `knowledge_variants` holds the simultaneously valid cases of that
-question — CHF 500 for employees and CHF 5000 for executives are both true, and
+question. CHF 500 for employees and CHF 5000 for executives are both true, and
 revisions are a sequence, so two values true at once cannot be revisions of one
 thing. `knowledge_revisions` holds the states of one case, with the review state
 beside them because whether a claim is still the same claim and whether an
@@ -17,7 +17,7 @@ revision R.
 
 **Nothing is migrated into these.** They start empty and are filled from the
 next run onwards, exactly as the extraction state did. The existing `knowledge`
-graph stays the read path and stays authoritative; deriving these rows from the
+graph stays the read path and stays authoritative. Deriving these rows from the
 assertions already stored would mean guessing which business question each
 sentence was about, which is the guessing this whole design removes.
 

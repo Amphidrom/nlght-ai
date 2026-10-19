@@ -1,28 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Not extracting again what has not changed.
+"""Check extraction-version and document-state comparisons.
 
-The knowledge layer has had no counterpart to the data layer's index state, so
-every run re-extracts every document. That is what makes identity drift the
-normal operating condition rather than an edge case at document change: the
-model is asked the same question again and answers it in slightly different
-words, and under incremental update those different words are a retraction and
-a re-review of something nobody edited.
-
-The skip is keyed on two things and needs both:
-
-    document_content_hash + extraction_version
-
-The version has to be complete — the assertion schema, the segmentation, the
-prompt and the workflow it belongs to, and the model. A partial key skips a
-document after an extraction change, keeping assertions produced by something
-that no longer exists and never producing the ones the new extraction would have
-found.
-
-It is assembled in one place for that reason. The parts the extraction owns are
-folded in by the core and no caller passes them, so a new influence cannot be
-added to the extractor while the version quietly keeps its old value.
+An unchanged document stays current only when its content hash and complete
+extraction version match. Changes to the schema, prompt, segmentation, model,
+or workflow input must change that version.
 """
 
 from __future__ import annotations
@@ -43,10 +26,6 @@ def _version(**overrides: object) -> str:
     return extraction_version(**parts)  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# The version key — assembled in one place
-# ---------------------------------------------------------------------------
-
 def test_the_same_inputs_give_the_same_version() -> None:
     # Otherwise nothing is ever skipped and the whole mechanism is decoration.
     assert _version() == _version()
@@ -63,12 +42,7 @@ def test_the_same_inputs_give_the_same_version() -> None:
     ids=["workflow", "model", "prompt", "settings"],
 )
 def test_every_supplied_part_changes_the_version(changed: dict[str, object]) -> None:
-    """Each on its own, because a forgotten one fails silently.
-
-    A version missing the model would skip every document after a model upgrade
-    — the run reports success, the corpus keeps assertions the old model wrote,
-    and nothing says so.
-    """
+    """Change the extraction version when any supplied influence changes."""
     assert _version(**changed) != _version()
 
 
@@ -118,10 +92,6 @@ def test_an_incomplete_version_is_refused_rather_than_silently_weak(blank: str) 
         _version(**{blank: "  "})
 
 
-# ---------------------------------------------------------------------------
-# The decision
-# ---------------------------------------------------------------------------
-
 def _state(content_hash: str = "c-1", version: str | None = None) -> ExtractionState:
     return ExtractionState(
         document_id="doc-1",
@@ -139,13 +109,7 @@ def test_changed_content_is_not_current() -> None:
 
 
 def test_a_changed_extraction_version_is_not_current() -> None:
-    """The half that is easy to forget, and the dangerous one.
-
-    The document did not change, so a content-only key would skip it. But the
-    prompt or the model did, which is precisely when the corpus needs redoing —
-    a model change is called a deliberate versioned event, and this is what
-    makes its consequence happen.
-    """
+    """Mark unchanged content stale when its extraction version changes."""
     assert not _state().is_current(
         content_hash="c-1", extraction_version=_version(model="ollama/llama3.1")
     )
@@ -163,10 +127,6 @@ def test_a_document_never_extracted_has_no_state_to_be_current() -> None:
     # means current".
     assert _state().document_id == "doc-1"
 
-
-# ---------------------------------------------------------------------------
-# The record refuses to be half a key
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("field", "value"),

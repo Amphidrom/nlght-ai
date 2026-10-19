@@ -21,9 +21,9 @@ class CatalogsSnapshot:
 class NamedResourceConfig:
     """Shared shape for a named, toggleable resource with adapter-specific config.
 
-    ``kind`` selects the adapter implementation; ``config`` is passed through
+    ``kind`` selects the adapter implementation. ``config`` is passed through
     to it unchanged. Subclassed (with no added fields) for each distinct
-    resource kind below purely for self-documenting type names — they are
+    resource kind below purely for self-documenting type names. They are
     otherwise interchangeable, and consumers duck-type on these four
     attributes rather than checking the concrete subclass.
     """
@@ -50,7 +50,7 @@ class WatcherConfig(NamedResourceConfig):
     ``kind`` selects the source (`filesystem`, `confluence`), and ``config``
     carries that source's settings alongside the workflow to trigger and the
     timings. The source block is the same shape the `ingestion.source` step
-    takes, so the two are described identically — deliberately separate values,
+    takes, so the two are described identically. They remain separate values,
     though: a watcher may observe a narrower path than the run it triggers
     ingests.
     """
@@ -58,7 +58,7 @@ class WatcherConfig(NamedResourceConfig):
 
 @dataclass(slots=True)
 class OsRuntimeConfig:
-    """Singular OS runtime configuration — either ``local`` or ``docker``.
+    """Singular OS runtime configuration for ``local`` or ``docker``.
 
     Only exactly one runtime can be configured per deployment.
     """
@@ -161,6 +161,20 @@ class ExecutionConfig:
 
 
 @dataclass(slots=True)
+class ActionAuthorizationConfig:
+    """Whether model-proposed tool calls pass an ActionPolicy, and how long it may take.
+
+    Disabled means no policy and no approval is asked. Argument validation and
+    binding still run. A registered policy replaces ``DefaultActionPolicy``
+    (ADR-0071, ADR-0073).
+    """
+
+    enabled: bool = True
+    policy_timeout_seconds: float = 30.0
+    approval_timeout_seconds: float = 300.0
+
+
+@dataclass(slots=True)
 class EmbeddingConfig:
     """Text-to-vector provider for ingestion and vector retrieval.
 
@@ -176,7 +190,7 @@ class EmbeddingConfig:
     normalize: bool = True
 
     #: Where the model runs. ``auto`` takes a GPU when one is usable and falls
-    #: back to the CPU; a explicit ``cpu``/``cuda``/``cuda:1``/``mps`` overrides
+    #: back to the CPU. An explicit ``cpu``/``cuda``/``cuda:1``/``mps`` overrides
     #: that, which is what a machine with a GPU reserved for something else
     #: needs.
     device: str = "auto"
@@ -185,8 +199,8 @@ class EmbeddingConfig:
     #: is what lets several workers, or a container, share one download.
     cache_dir: str = ""
     #: Whether loading may reach the network. ``auto`` uses the cache when the
-    #: model is fully there and only downloads when it is not; ``always`` never
-    #: reaches out and fails if the cache is incomplete; ``never`` revalidates
+    #: model is fully there and only downloads when it is not. ``always`` never
+    #: reaches out and fails if the cache is incomplete. ``never`` revalidates
     #: every file against the hub on every start.
     offline: str = "auto"
 
@@ -201,6 +215,7 @@ class PlatformConfigSnapshot:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     licensing: LicensingConfig = field(default_factory=LicensingConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    action_authorization: ActionAuthorizationConfig = field(default_factory=ActionAuthorizationConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     #: How a caller's identity is established, if at all. Passed through to the
     #: resolver factory the way an adapter-specific block is, because `type`

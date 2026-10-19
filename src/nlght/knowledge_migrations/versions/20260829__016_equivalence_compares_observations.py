@@ -5,12 +5,12 @@
 
 `knowledge_proposition_equivalence` (migration `0012`) keyed a judgement on two
 rows of `knowledge_propositions`. That is a fact's representation, so three of
-the four kinds could never be audited at all — a reworded `rule` was joined or
+the four kinds could never be audited at all. A reworded `rule` was joined or
 kept apart with nothing recording why.
 
 The comparison unit is an **observation**: what kind it is, what the source said,
 and which assertion inside that sentence is meant. `knowledge_propositions` is
-untouched and goes on holding the structured fact; nothing here generalises it,
+untouched and goes on holding the structured fact. Nothing here generalises it,
 because making a fact's representation everyone's would invent an abstraction no
 invariant asks for.
 
@@ -18,7 +18,7 @@ The old table is dropped rather than kept beside the new one. It never held a
 row, and two assessment tables would be the kind-specific split this is removing.
 
 **The order is the reason these exist.** An assessment written after a merge can
-only describe what happened; a reader cannot tell a judgement that *caused* a
+only describe what happened. A reader cannot tell a judgement that *caused* a
 continuation from one reconstructed to explain it. So both observations are
 durable first, the assessment is appended next, and only then may a `yes`
 continue an assertion. Nothing downstream could serve: `knowledge_evidence`
@@ -99,7 +99,7 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    # An index and not a constraint. Looking a pair up must be quick; forbidding
+    # An index and not a constraint. Looking a pair up must be quick. Forbidding
     # a second answer would hide a model that gave one.
     op.create_index(
         "knowledge_equivalence_by_pair",

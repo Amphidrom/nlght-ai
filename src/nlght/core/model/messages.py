@@ -1,14 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Provider-neutral messages with explicit authority.
-
-Provider role names are transport details, not the platform's trust model.  In
-particular, a caller-supplied ``{"role": "system"}`` is still caller content;
-only installed application code can construct :class:`TrustedInstructionMessage`.
-Knowledge is kept as typed records until a provider adapter deliberately lowers
-it to that provider's safest available untrusted-data representation.
-"""
+"""Define provider-neutral messages and explicit content authority."""
 
 from __future__ import annotations
 
@@ -16,7 +9,54 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias
+
+from nlght.core.model.trust import (
+    PLATFORM_TEXT,
+    SOURCE_CALLER,
+    SOURCE_CALLER_ATTACHMENT,
+    SOURCE_CALLER_HISTORY,
+    UNANNOTATED,
+    ContentOrigin,
+    ContentTrust,
+    SourceRef,
+)
+
+if TYPE_CHECKING:
+    from nlght.core.tools.tool import ToolOutput
+
+
+def caller_origin(principal_id: str) -> ContentOrigin:
+    """Attribute caller content without granting it authority.
+
+    Args:
+        principal_id (str): Caller principal ID, or an empty ID for anonymous callers.
+
+    Returns:
+        ContentOrigin: Untrusted caller origin.
+    """
+    return ContentOrigin.of(SourceRef(
+        SOURCE_CALLER, principal_id or "anonymous", "", ContentTrust.UNTRUSTED,
+    ))
+
+
+def _caller_history_origin(principal_id: str) -> ContentOrigin:
+    """Attribute unverified replayed history to a caller.
+
+    Args:
+        principal_id (str): Caller principal ID.
+
+    Returns:
+        ContentOrigin: Untrusted caller-history origin.
+    """
+    return ContentOrigin.of(SourceRef(
+        SOURCE_CALLER_HISTORY, principal_id or "anonymous", "", ContentTrust.UNTRUSTED,
+    ))
+
+
+#: Separate attached content from caller text because foreign text cannot inherit
+#: the caller's own origin or raise its trust.
+ATTACHMENT_MARKER = "nlght_attachment"
 
 
 class ContextKind(StrEnum):
@@ -32,11 +72,19 @@ class ContextKind(StrEnum):
     PLAYBOOK = "playbook"
     TOOL_GUIDANCE = "tool_guidance"
     PROMPT_SLOT = "prompt_slot"
+    ATTACHMENT = "attachment"
     OTHER = "other"
 
     @classmethod
     def _missing_(cls, value: object) -> ContextKind:
-        """Keep extension element labels typed without a central registry."""
+        """Preserve extension labels as typed context kinds.
+
+        Args:
+            value (object): An unregistered kind value.
+
+        Returns:
+            ContextKind: A string-backed ContextKind member.
+        """
 
         obj = str.__new__(cls, str(value))
         obj._value_ = str(value)
@@ -80,6 +128,9 @@ class ContextProvenance:
     source_name: str = ""
     external_id: str = ""
     support: tuple[ContextSupport, ...] = ()
+    #: Keep provenance typed until serialization so providers cannot treat
+    #: source labels as instructions (ADR-0074).
+    origin: ContentOrigin = UNANNOTATED
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +160,15 @@ def compose_prompt(
     trusted_instructions: str,
     context: Sequence[ContextRecord],
 ) -> PromptEnvelope:
-    """Join separately built authority domains without flattening either one."""
+    """Preserve trusted instructions and context as separate fields.
+
+    Args:
+        trusted_instructions (str): Instructions from a trusted caller.
+        context (Sequence[ContextRecord]): Context records with their own origins.
+
+    Returns:
+        PromptEnvelope: Envelope that keeps instructions and context separate.
+    """
 
     return PromptEnvelope(
         trusted_instructions=trusted_instructions,
@@ -131,12 +190,18 @@ class CallerInstructionMessage:
     content: Any
     claimed_role: str
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    #: Reject authority claimed by the request. Only integration code can
+    #: assign a different origin (ADR-0074).
+    origin: ContentOrigin = field(default_factory=lambda: caller_origin(""))
 
 
 @dataclass(frozen=True, slots=True)
 class UserMessage:
     content: Any
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    #: Keep the origin explicit because a user message can carry foreign text
+    #: whose trust the inbound integration must establish (ADR-0074).
+    origin: ContentOrigin = field(default_factory=lambda: caller_origin(""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +219,8 @@ class AssistantMessage:
     content: Any = ""
     tool_calls: tuple[ToolCall, ...] = ()
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    #: Retain read provenance through model output for later action decisions.
+    origin: ContentOrigin = UNANNOTATED
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +230,8 @@ class ToolResultMessage:
     name: str = ""
     original_role: str = "tool"
     attributes: Mapping[str, Any] = field(default_factory=dict)
+    #: Preserve tool-reported origin. Bare strings cannot establish provenance.
+    origin: ContentOrigin = UNANNOTATED
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,11 +252,20 @@ MessageLike: TypeAlias = CanonicalMessage | Mapping[str, Any]
 
 def normalize_workflow_messages(
     messages: Sequence[MessageLike],
+    *,
+    caller: str = "",
 ) -> list[CanonicalMessage]:
-    """Normalize inbound workflow messages without accepting claimed authority.
+    """Normalize inbound messages without accepting claimed authority.
 
-    Already-canonical messages are preserved for internal callers. Raw messages
-    are the public compatibility edge and can never create a trusted message.
+    Args:
+        messages (Sequence[MessageLike]): Canonical or raw inbound messages.
+        caller (str): Principal ID for raw caller content, if available.
+
+    Returns:
+        list[CanonicalMessage]: Canonical messages with untrusted origin for raw caller content.
+
+    Raises:
+        TypeError: A message has an unsupported shape. ValueError: A role is unsupported.
     """
 
     normalized: list[CanonicalMessage] = []
@@ -214,9 +292,15 @@ def normalize_workflow_messages(
                 content=content,
                 claimed_role=role,
                 attributes=raw,
+                origin=caller_origin(caller),
             ))
         elif role == "user":
-            normalized.append(UserMessage(content=content, attributes=raw))
+            content, attachments = _split_attachments(content, caller, len(normalized))
+            if attachments:
+                normalized.append(UntrustedContextMessage(records=attachments))
+            normalized.append(UserMessage(
+                content=content, attributes=raw, origin=caller_origin(caller),
+            ))
         elif role == "assistant":
             tool_calls = tuple(
                 _normalize_tool_call(call)
@@ -226,6 +310,7 @@ def normalize_workflow_messages(
                 content=content,
                 tool_calls=tool_calls,
                 attributes=raw,
+                origin=_caller_history_origin(caller),
             ))
         elif role in {"tool", "function"}:
             normalized.append(ToolResultMessage(
@@ -234,21 +319,126 @@ def normalize_workflow_messages(
                 name=str(raw.pop("name", "")),
                 original_role=role,
                 attributes=raw,
+                origin=_caller_history_origin(caller),
             ))
         else:
             raise ValueError(f"unsupported workflow message role '{role}'")
     return normalized
 
 
+def _split_attachments(
+    content: object,
+    caller: str,
+    position: int,
+) -> tuple[object, tuple[ContextRecord, ...]]:
+    """Isolate attached foreign content from caller text.
+
+    Args:
+        content (object): User-message content to inspect.
+        caller (str): Caller identity attached to discovered content.
+        position (int): Position of the message in the conversation.
+
+    Returns:
+        tuple[object, tuple[ContextRecord, ...]]: Remaining user content and typed
+            untrusted attachment records.
+    """
+    if not isinstance(content, list):
+        return content, ()
+    kept: list[Any] = []
+    records: list[ContextRecord] = []
+    for index, part in enumerate(content):
+        if not isinstance(part, Mapping) or ATTACHMENT_MARKER not in part:
+            kept.append(part)
+            continue
+        marker = part.get(ATTACHMENT_MARKER)
+        label = str(marker.get("name", "")) if isinstance(marker, Mapping) else ""
+        text = part.get("text")
+        body = text if isinstance(text, str) else json.dumps(
+            {key: value for key, value in part.items() if key != ATTACHMENT_MARKER},
+            ensure_ascii=False, default=str,
+        )
+        record_id = f"attachment:{position}:{index}"
+        records.append(ContextRecord(
+            record_id=record_id,
+            kind=ContextKind.ATTACHMENT,
+            content=body,
+            provenance=ContextProvenance(
+                source=SOURCE_CALLER_ATTACHMENT,
+                item_id=record_id,
+                source_name=label,
+                origin=ContentOrigin.of(SourceRef(
+                    SOURCE_CALLER_ATTACHMENT,
+                    caller or "anonymous",
+                    label,
+                    ContentTrust.UNTRUSTED,
+                    label,
+                )),
+            ),
+            section="Attached by the caller",
+        ))
+    return kept, tuple(records)
+
+
+def message_origin(message: CanonicalMessage) -> ContentOrigin | None:
+    """Read a message's contribution to model-context origin.
+
+    Args:
+        message (CanonicalMessage): A canonical message.
+
+    Returns:
+        ContentOrigin | None: Combined origin, or None for trusted instructions.
+    """
+    if isinstance(message, TrustedInstructionMessage):
+        return None
+    if isinstance(message, UntrustedContextMessage):
+        return ContentOrigin.combine(*(record.provenance.origin for record in message.records))
+    return message.origin
+
+
+def origin_of(messages: Sequence[MessageLike], *, caller: str = "") -> ContentOrigin:
+    """Combine origins of all content in a model context.
+
+    Args:
+        messages (Sequence[MessageLike]): Messages whose content origin is combined.
+        caller (str): Principal ID for raw messages, if available.
+
+    Returns:
+        ContentOrigin: Combined content origin, empty when no content was read.
+    """
+    origins = [
+        origin
+        for message in normalize_workflow_messages(messages, caller=caller)
+        if (origin := message_origin(message)) is not None
+    ]
+    return ContentOrigin.combine(*origins) if origins else ContentOrigin()
+
+
 def append_canonical_tool_turn(
     messages: Sequence[MessageLike],
     tool_calls_raw: Sequence[Mapping[str, Any]],
-    results: Sequence[str],
+    results: Sequence[str | ToolOutput],
     assistant_text: str = "",
 ) -> list[CanonicalMessage]:
-    """Append genuine typed tool calls/results without choosing a provider wire."""
+    """Append typed tool calls and results to a conversation.
+
+    Args:
+        messages (Sequence[MessageLike]): Existing conversation messages.
+        tool_calls_raw (Sequence[Mapping[str, Any]]): Model tool calls in raw or typed form.
+        results (Sequence[str | ToolOutput]): Tool results, including any explicit origin labels.
+        assistant_text (str): Assistant text accompanying the tool calls.
+
+    Returns:
+        list[CanonicalMessage]: Conversation with typed tool calls and results appended.
+
+    Raises:
+        TypeError: A tool call has an unsupported shape.
+    """
 
     current = normalize_workflow_messages(messages)
+    # Attribute an answer to platform text when no untrusted source was read.
+    read_so_far = origin_of(current)
+    if not read_so_far.sources:
+        read_so_far = PLATFORM_TEXT
     calls = tuple(
         ToolCall(
             call_id=str(call.get("id", "")),
@@ -262,12 +452,19 @@ def append_canonical_tool_turn(
         )
         for call in tool_calls_raw
     )
-    current.append(AssistantMessage(content=assistant_text, tool_calls=calls))
+    current.append(AssistantMessage(
+        content=assistant_text, tool_calls=calls, origin=read_so_far,
+    ))
     for call, result in zip(calls, results, strict=False):
+        if isinstance(result, str):
+            content, origin = result, UNANNOTATED
+        else:
+            content, origin = result.content, result.origin
         current.append(ToolResultMessage(
-            content=result,
+            content=content,
             tool_call_id=call.call_id,
             name=call.name,
+            origin=origin,
         ))
     return current
 
@@ -306,11 +503,17 @@ def compose_messages(
     envelope: PromptEnvelope,
     conversation: Sequence[CanonicalMessage],
 ) -> list[CanonicalMessage]:
-    """Assemble trusted framing, history, context, and the current request.
+    """Assemble instructions, context, and conversation in authority order.
 
-    Context is deliberately adjacent to, but before, the final real user
-    request. This preserves the caller's instruction as the last user-level
-    instruction and prevents the prompt builder from owning or duplicating it.
+    Args:
+        envelope (PromptEnvelope): Trusted instructions and labelled context.
+        conversation (Sequence[CanonicalMessage]): Canonical conversation to extend.
+
+    Returns:
+        list[CanonicalMessage]: Messages with context inserted before the latest user request.
+
+    Raises:
+        ValueError: Untrusted context has no current user request.
     """
 
     result = list(conversation)

@@ -3,7 +3,7 @@
 
 """Ingestion workflow steps.
 
-Each step is an ordinary ``StepBase`` — ingestion is a workflow like any other,
+Each step is an ordinary ``StepBase`` because ingestion is a workflow like any other,
 executed over the platform's durable dispatch, with no pipeline engine of its
 own. A pipeline is therefore a workflow version, and recombining its building
 blocks is a configuration change rather than a code change.

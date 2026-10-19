@@ -23,7 +23,7 @@ from nlght.ports.outbound.embedding_client import EmbeddingClient
 logger = logging.getLogger(__name__)
 
 SKIPPED = "skipped"
-"""Verdict when nothing needed embedding — no chunks, or the step is disabled.
+"""Verdict when nothing needed embedding because there are no chunks or the step is disabled.
 
 Distinct from a failure so a lexical-only deployment can route straight on
 instead of treating a missing embedding provider as an error.
@@ -38,8 +38,8 @@ step: one invocation embeds a bounded batch, not every document of the run."""
 class EmbeddedChunk:
     """One chunk with its vector and the provenance to persist alongside it.
 
-    ``semantics`` holds the terms that distinguish this chunk from its siblings;
-    they are written to the index so a keyword search can find the chunk even
+    ``semantics`` holds the terms that distinguish this chunk from its siblings.
+    They are written to the index so a keyword search can find the chunk even
     when the semantic neighbourhood is crowded.
     """
 
@@ -50,7 +50,7 @@ class EmbeddedChunk:
     position: int
     #: Where this chunk sits in the processed text. Carried rather than dropped
     #: because it is the only thing that lets a hit name a span of the document
-    #: it came from — without it the payload's own copy is the only text there is.
+    #: it came from. Without it, the payload's copy is the only available text.
     start_offset: int
     end_offset: int
     content: str
@@ -79,6 +79,12 @@ class IngestionEmbedStep(StepBase):
     """
 
     TYPE = "ingestion.embed"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        SKIPPED = SKIPPED
+        MORE_DOCUMENTS = MORE_DOCUMENTS
 
     def __init__(
         self,
@@ -122,7 +128,7 @@ class IngestionEmbedStep(StepBase):
                 ctx.correlation_id,
             )
             ctx.metadata["ingestion.embedded"] = ()
-            return StepResult(ctx=ctx, verdict=SKIPPED)
+            return StepResult(ctx=ctx, verdict=self.Verdict.SKIPPED)
 
         try:
             document_batch_size = int(self.config.get("document_batch_size", 1))
@@ -139,7 +145,7 @@ class IngestionEmbedStep(StepBase):
         if next_document >= len(documents):
             existing = ctx.metadata.get("ingestion.embedded")
             embedded_count = len(existing) if isinstance(existing, tuple) else 0
-            return StepResult(ctx=ctx, verdict="DEFAULT" if embedded_count else SKIPPED)
+            return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if embedded_count else self.Verdict.SKIPPED)
 
         batch_end = min(next_document + document_batch_size, len(documents))
         batch_documents = documents[next_document:batch_end]
@@ -206,5 +212,5 @@ class IngestionEmbedStep(StepBase):
             dimension,
         )
         if batch_end < len(documents):
-            return StepResult(ctx=ctx, verdict=MORE_DOCUMENTS)
-        return StepResult(ctx=ctx, verdict="DEFAULT" if embedded_so_far else SKIPPED)
+            return StepResult(ctx=ctx, verdict=self.Verdict.MORE_DOCUMENTS)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if embedded_so_far else self.Verdict.SKIPPED)

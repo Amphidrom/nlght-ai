@@ -12,7 +12,7 @@ from nlght.core.signals.signal import Signal
 
 class ExecutionStreamBroker(Protocol):
     """Carries a running execution's live ``Signal``s from the worker performing
-    it to any subscriber relaying them onward — the gateway holding the caller's
+    it to any subscriber relaying them onward, including the gateway holding the caller's
     HTTP stream.
 
     It is a live, best-effort relay, not a store: the durable execution record
@@ -36,14 +36,38 @@ class ExecutionStreamBroker(Protocol):
     """
 
     async def publish(self, execution_id: uuid.UUID, signal: Signal) -> None:
-        """Forward one signal to every current subscriber of this execution."""
+        """Relay one execution signal to active subscribers.
+
+        Args:
+            execution_id (uuid.UUID): Execution whose signal is emitted.
+            signal (Signal): Signal to publish.
+
+        Side Effects:
+            Publishes through the configured stream transport.
+        """
         ...
 
     async def close(self, execution_id: uuid.UUID) -> None:
-        """Signal end-of-stream; every subscriber's iterator then completes."""
+        """End an execution's live signal stream.
+
+        Args:
+            execution_id (uuid.UUID): Execution ID.
+
+        Side Effects:
+            Completes subscriber iterators through the transport.
+        """
         ...
 
     def subscribe(self, execution_id: uuid.UUID) -> AsyncIterator[Signal]:
-        """Yield this execution's signals — the backlog, then the live tail —
-        until the stream is closed."""
+        """Receive backlog and live signals for an execution.
+
+        Args:
+            execution_id (uuid.UUID): Execution ID.
+
+        Returns:
+            AsyncIterator[Signal]: Signal iterator that ends after stream closure.
+
+        Side Effects:
+            Registers a transport subscriber during iteration.
+        """
         ...

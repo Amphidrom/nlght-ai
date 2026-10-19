@@ -1,12 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Write-only index adapter for the data store.
+"""Write data-store projections without exposing an LLM-callable operation.
 
-A tool like any other — activated by a resource row, restricted by access
-policy — but under a `kind` disjoint from `data_store`, so a retrieval
-activation can never reach a write operation. It declares no signatures, so it
-never becomes a callable contract in a request-scoped tool catalog.
+The adapter uses a separate resource kind from retrieval and declares no tool
+signatures. Index state is scoped to its target so writers for different
+collections do not share a false account of what is indexed.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ class IndexCounts:
     """What a target's indexes actually hold, as opposed to what is recorded.
 
     ``lexical_documents`` is directly comparable to the number of index-state
-    rows for the target — one document is one OpenSearch document. The vector
+    rows for the target. One document is one OpenSearch document. The vector
     counts are points, not documents, so they are a signal rather than an
     equation: a collection that is empty while the state claims a populated
     corpus is the signature of a wiped index.
@@ -95,19 +94,20 @@ PROJECTION_SCHEMA_VERSION = "2"
 """What shape this writer projects a document into.
 
 Bumped whenever the payload gains, loses or re-means a field. Version 2 added
-the chunk locator — position and offsets — without which a hit names no span of
+the chunk locator (position and offsets), without which a hit names no span of
 its document. Bumping it is what makes an already-indexed corpus be written
 again; nothing else in the recorded state describes the payload.
 """
 
 
 def _point_id(name: str) -> str:
-    """A stable Qdrant point ID derived from an arbitrary string.
+    """Derive a repeatable Qdrant UUID from an arbitrary content identity.
 
-    Qdrant only accepts an unsigned integer or a UUID as a point ID, but chunk
-    and document identities here are content hashes. A UUIDv5 over the name is
-    deterministic, so re-indexing the same chunk upserts the same point rather
-    than duplicating it — the original hash is kept in the payload.
+    Args:
+        name (str): Original chunk or document identity.
+
+    Returns:
+        str: A UUIDv5 string suitable for Qdrant point IDs.
     """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
@@ -148,7 +148,7 @@ class DataIndexWriterTool(ToolBase):
         # This activation owns every half of the write path: the index state that
         # decides whether a document needs reindexing belongs to the same
         # activation as the indexes it describes. Two writers pointing at
-        # different indexes must not share one record of what is indexed — which
+        # different indexes must not share one record of what is indexed, which
         # the shared pool preserves, because that record is keyed by `target`.
         self.repository = SqlAlchemyIngestionRepository(
             self._connections.engine(pg_url, pool_pre_ping=True)
@@ -164,20 +164,15 @@ class DataIndexWriterTool(ToolBase):
         self._opensearch_password = config.get("opensearch_password")
 
     def projection_fingerprint(self, *, provider: str, model: str, dimension: int) -> str:
-        """How this target projects a document, as one comparable value.
+        """Identify the index projection independently of the processed document.
 
-        Kept apart from `processing_revision_id`, which says what the processed
-        *document* is. This says how that document is turned into index entries,
-        and the two move for different reasons: re-chunking changes the document,
-        swapping the embedding model does not.
+        Args:
+            provider (str): Embedding provider name.
+            model (str): Embedding model name.
+            dimension (int): Embedding vector dimension.
 
-        Before this existed, neither did the second half. `_is_current` compared
-        the source hash, the enricher hash and the index generation — all three
-        of which are unchanged when the embedding model, its dimension, the
-        distance metric or the payload schema change. So changing an embedding
-        model silently reindexed nothing: every document read as already current,
-        the run reported success, and the collection kept vectors from a model
-        the queries were no longer embedded with.
+        Returns:
+            str: Digest of schema version, distance metric, provider, model, and dimension.
         """
         return stable_digest(
             PROJECTION_SCHEMA_VERSION,
@@ -242,30 +237,29 @@ class DataIndexWriterTool(ToolBase):
 
     @property
     def target(self) -> str:
-        """Identity of what this writer writes into, for index-state bookkeeping."""
+        """Identify this writer's index target for per-target state bookkeeping.
+
+        Returns:
+            str: Resource name and collection name joined as one target ID.
+        """
         return f"{self.name}:{self._collection}"
 
     def ensure_ready(self, *, dimension: int) -> bool:
-        """Create the collections and index this writer needs, once per process.
+        """Create missing index structures before the first write in this process.
 
-        Indexing into a missing Qdrant collection or an unmapped OpenSearch
-        index fails or silently produces an unsearchable document, so the
-        bootstrap runs before the first write rather than being a deployment
-        prerequisite nobody documented.
+        Args:
+            dimension (int): Embedding dimension. Zero skips vector collection setup.
 
-        Returns whether anything had to be **created**. That is the signal that
-        the index this writer is pointed at is not the one the recorded index
-        state describes — an emptied Qdrant, a dropped OpenSearch index, a fresh
-        environment on an old database — and the caller rotates the target's
-        index generation on it, which makes every document count as unindexed
-        again. Without it, a wiped index plus an intact index state produces a
-        run that writes nothing and reports success.
+        Returns:
+            bool: True when an index or collection was created and the target generation
+                must rotate.
 
-        A failure to create is raised, never logged and passed over: continuing
-        would write into an index whose mapping was never applied.
+        Side Effects:
+            May create a Qdrant collection or OpenSearch index and records bootstrap
+                state. Creation failures propagate.
         """
         created = False
-        # A dimension of zero means this run produced no vectors at all — a
+        # A dimension of zero means this run produced no vectors at all, as in a
         # pipeline with no embed step. Its OpenSearch index still needs its
         # mapping, so only the vector half is skipped.
         for collection in (self._collection,) if dimension else ():
@@ -280,7 +274,7 @@ class DataIndexWriterTool(ToolBase):
                     )
                 except Exception:
                     # Two workers may bootstrap the same empty deployment at
-                    # once. Losing that race is not a failure — the collection
+                    # once. Losing that race is not a failure because the collection
                     # is there. Anything else is.
                     if not self._vector.collection_exists(collection):
                         raise
@@ -300,13 +294,13 @@ class DataIndexWriterTool(ToolBase):
         return created
 
     def observed_counts(self) -> IndexCounts:
-        """What the indexes actually hold right now, for reconciliation.
+        """Read actual index counts for reconciliation with recorded state.
 
-        Refreshes the OpenSearch index first: documents are written with
-        ``refresh=False``, so an unrefreshed count would report a divergence
-        that is only a delay. A collection or index that does not exist counts
-        as empty rather than raising — "it is gone" is the finding, not an
-        error.
+        Returns:
+            IndexCounts: OpenSearch document count and Qdrant point count. Missing indexes count as zero.
+
+        Side Effects:
+            Refreshes and queries OpenSearch, queries Qdrant, and logs missing indexes.
         """
         try:
             self._lexical.indices.refresh(index=self._index)
@@ -343,25 +337,20 @@ class DataIndexWriterTool(ToolBase):
         metadata: dict[str, Any],
         chunks: list[ChunkProjection],
     ) -> None:
-        """Replace one document: write the new revision, then prune the old one.
+        """Upsert a new document revision before pruning old vector points.
 
-        Write-then-prune, not delete-then-write. Deleting first left a window in
-        which the document had no chunks at all and a search missed it entirely.
-        Writing first means the document is always present: for a moment it may
-        carry chunks of both revisions, which shows a stale passage beside a
-        fresh one — the far milder failure of the two.
+        Args:
+            document_id (str): Stable identity of the document.
+            path (str): Source path stored in index payloads.
+            text (str): Whole document text for the lexical index.
+            source_revision_id (str): Revision identified by citations.
+            processing_revision_id (str): Published processing revision for currency checks.
+            metadata (dict[str, Any]): Additional lexical document fields.
+            chunks (list[ChunkProjection]): Embedded chunk projections for the vector index.
 
-        A chunk's point id is derived from its content hash, so a chunk that did
-        not change keeps its id and the upsert overwrites it in place, carrying
-        the new ``processing_revision_id`` with it. The prune then removes what
-        the previous revision left behind: same document, older revision. That is
-        a constant-size filter, unlike naming every surviving chunk id, and it is
-        what keeps a document whose chunk count shrank from retaining orphans.
-
-        Both fassungen go into the payload. ``processing_revision_id`` is what a
-        reader checks against the published revision and what the prune filters
-        on; ``source_revision_id`` is what a citation names, and it does not move
-        when only the pipeline changed.
+        Side Effects:
+            Upserts Qdrant points, prunes older points for the document, then replaces
+                its OpenSearch document.
         """
         if chunks:
             self._vector.upsert(
@@ -408,22 +397,31 @@ class DataIndexWriterTool(ToolBase):
         )
 
     async def delete_document(self, *, document_id: str) -> None:
-        """Remove a document from both halves of the index.
+        """Remove one document from both index backends.
 
-        Every call here raises on failure. The caller clears the document's
-        index state immediately afterwards, so a failure reported as success
-        would drop the document out of the database's view while leaving it in
-        the index — where no later run would ever find it again, because it
-        appears in no further snapshot.
+        Args:
+            document_id (str): Stable identity of the document to remove.
+
+        Side Effects:
+            Deletes Qdrant points and the OpenSearch document. Backend failures propagate.
         """
         self._delete_vectors(document_id)
         self._lexical.delete(index=self._index, id=document_id, ignore=[404], refresh=False)
 
     def _delete_vectors(self, document_id: str, *, collection: str | None = None) -> None:
-        """Delete every point of a document. Raises if the store refuses."""
+        """Delete every vector point belonging to one document.
+
+        Args:
+            document_id (str): Document whose points must be removed.
+            collection (str | None): Optional collection override. Defaults to this
+                writer's collection.
+
+        Side Effects:
+            Deletes matching Qdrant points. A backend failure propagates.
+        """
         self._vector.delete(
             collection_name=collection or self._collection,
-            # The qdrant client rejects a raw dict here — it wants a typed
+            # The Qdrant client rejects a raw dict here and requires a typed
             # points selector.
             points_selector=FilterSelector(
                 filter=Filter(
@@ -438,12 +436,14 @@ class DataIndexWriterTool(ToolBase):
         )
 
     def _prune_superseded_vectors(self, document_id: str, *, processing_revision_id: str) -> None:
-        """Delete this document's points that belong to an earlier revision.
+        """Remove a document's vector points from older processing revisions.
 
-        Raises if the store refuses. A swallowed failure here would leave the
-        previous revision's chunks in place, and the caller would then record
-        the document as current — so its stale text would stay searchable and
-        no later run would ever touch the document again.
+        Args:
+            document_id (str): Document whose old points must be removed.
+            processing_revision_id (str): Revision whose points must remain.
+
+        Side Effects:
+            Deletes stale Qdrant points. A backend failure propagates.
         """
         self._vector.delete(
             collection_name=self._collection,

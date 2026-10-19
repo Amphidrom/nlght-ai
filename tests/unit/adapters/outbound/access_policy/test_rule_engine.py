@@ -74,11 +74,6 @@ def _resource(name: str = "web_search", kind: str = "http") -> ResourceDef:
     )
 
 
-# ---------------------------------------------------------------------------
-# Defaults — no rules, no restriction
-# ---------------------------------------------------------------------------
-
-
 async def test_empty_rule_set_allows_everything() -> None:
     engine = _engine([])
     assert await engine.decide("tool", "anything", _caller(), "llama3") is True
@@ -96,11 +91,6 @@ async def test_rules_for_other_subject_type_do_not_apply() -> None:
     assert await engine.decide("tool", "web_search", _caller(), None) is True
 
 
-# ---------------------------------------------------------------------------
-# Allowlist semantics
-# ---------------------------------------------------------------------------
-
-
 async def test_allow_rule_with_matching_condition_allows() -> None:
     engine = _engine([
         _rule(subject="web_search", conditions={"model": ["llama3"]}),
@@ -109,7 +99,7 @@ async def test_allow_rule_with_matching_condition_allows() -> None:
 
 
 async def test_allow_rule_with_unmatched_condition_denies() -> None:
-    # Rules exist for the subject but none match → deny (allowlist).
+    # A governed subject needs a matching allow rule.
     engine = _engine([
         _rule(subject="web_search", conditions={"model": ["llama3"]}),
     ])
@@ -124,11 +114,6 @@ async def test_unconditional_allow_rule_allows() -> None:
 async def test_deny_rule_denies() -> None:
     engine = _engine([_rule(subject="web_search", effect="deny")])
     assert await engine.decide("tool", "web_search", _caller(), "llama3") is False
-
-
-# ---------------------------------------------------------------------------
-# Globs
-# ---------------------------------------------------------------------------
 
 
 async def test_subject_glob_matches() -> None:
@@ -146,11 +131,6 @@ async def test_condition_value_glob_matches() -> None:
     ])
     assert await engine.decide("tool", "x", _caller(), "llama3.2") is True
     assert await engine.decide("tool", "x", _caller(), "gpt-4") is False
-
-
-# ---------------------------------------------------------------------------
-# Conditions — AND across keys, OR within values
-# ---------------------------------------------------------------------------
 
 
 async def test_condition_values_are_or_combined() -> None:
@@ -191,7 +171,7 @@ async def test_missing_context_value_fails_condition() -> None:
     engine = _engine([
         _rule(subject="t", conditions={"model": ["llama3"]}),
     ])
-    # No model bound → the condition cannot be satisfied → deny.
+    # An absent model cannot satisfy a model condition.
     assert await engine.decide("tool", "t", _caller(), None) is False
 
 
@@ -207,11 +187,6 @@ async def test_unknown_condition_key_never_matches() -> None:
         _rule(subject="t", conditions={"moon_phase": ["full"]}),
     ])
     assert await engine.decide("tool", "t", _caller(), "llama3") is False
-
-
-# ---------------------------------------------------------------------------
-# Priority and deny-precedence
-# ---------------------------------------------------------------------------
 
 
 async def test_higher_priority_rule_wins() -> None:
@@ -232,18 +207,13 @@ async def test_deny_wins_on_equal_priority() -> None:
 
 
 async def test_allow_all_except_denied_model() -> None:
-    # "allow everything except tool access from gpt-*" — deny needs priority.
+    # A matching deny rule overrides the broad allow rule for gpt-* tools.
     engine = _engine([
         _rule(subject="*", effect="deny", priority=10, conditions={"model": ["gpt-*"]}),
         _rule(subject="*", effect="allow", priority=0),
     ])
     assert await engine.decide("tool", "shell", _caller(), "gpt-4") is False
     assert await engine.decide("tool", "shell", _caller(), "llama3") is True
-
-
-# ---------------------------------------------------------------------------
-# Caching
-# ---------------------------------------------------------------------------
 
 
 async def test_rules_are_cached_within_ttl() -> None:
@@ -262,11 +232,6 @@ async def test_invalidate_cache_forces_reload() -> None:
     engine.invalidate_cache()
     await engine.decide("tool", "a", None, None)
     assert repo.calls == 2
-
-
-# ---------------------------------------------------------------------------
-# Port facades
-# ---------------------------------------------------------------------------
 
 
 async def test_the_resource_facade_decides_on_the_address() -> None:
@@ -334,7 +299,7 @@ async def test_a_resource_rule_scoped_to_a_workflow_denies_every_other() -> None
 
     assert await policy.is_allowed(resource, _caller(workflow="answer"), None) is True
     assert await policy.is_allowed(resource, _caller(workflow="ingest"), None) is False
-    # No workflow at all is denied too — deliberately, so nothing running
+    # An absent workflow is denied too, so nothing running
     # outside a flow becomes a way past a workflow-scoped rule.
     assert await policy.is_allowed(resource, _caller(workflow=None), None) is False
 
@@ -369,11 +334,6 @@ async def test_playbook_facade() -> None:
     assert await policy.is_allowed("research", _caller(), "llama3") is True
     assert await policy.is_allowed("research", _caller(), "gpt-4") is False
     assert await policy.is_allowed("other", _caller(), "gpt-4") is True
-
-
-# ---------------------------------------------------------------------------
-# workflow condition
-# ---------------------------------------------------------------------------
 
 
 async def test_workflow_condition_allows_only_the_named_flow() -> None:
@@ -454,14 +414,7 @@ async def test_workflow_condition_applies_to_models_and_playbooks_too() -> None:
 
 
 def test_every_subject_type_is_accepted_wherever_the_list_is_needed() -> None:
-    """The list of subject types is derived, never restated.
-
-    It was written out in three places: the domain type, the repository's
-    validity check, and the admin form's validation. Adding `resource` to one of
-    them left the other two rejecting it — the repository dropped every rule
-    naming a resource as "malformed" with a warning, and the subject then read as
-    ungoverned, which is the failure mode where a policy silently allows.
-    """
+    """Use the same subject-type set in policy, persistence, and admin validation."""
     from typing import get_args
 
     from nlght.adapters.inbound.http.admin.router import _POLICY_SUBJECT_TYPES

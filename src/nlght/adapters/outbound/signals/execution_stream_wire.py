@@ -1,30 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Wire format for an execution stream carried between nodes.
+"""Encode, decode, and reassemble transport-neutral signal frames.
 
-Transport-neutral on purpose: it turns a ``Signal`` into self-describing text
-frames and back, and knows nothing about PostgreSQL, Redis, or any other
-carrier. A transport adapter supplies only the byte budget of one message and
-the delivery mechanism; this module owns framing, fragmentation, and reassembly,
-so a second transport reuses it instead of reinventing it.
-
-A frame is a small JSON object:
-
-``o``  origin — the publishing broker's node id, so a transport that echoes a
-       message back to its sender can drop its own frames.
-``e``  execution id the frame belongs to.
-``t``  ``"s"`` a signal, or ``"c"`` end-of-stream for that execution.
-``r``  signal role, ``k`` signal kind, ``c`` signal content (signal frames only).
-``m``  message id, ``i`` fragment index, ``n`` fragment count — present only when
-       one signal did not fit in a single message and was split.
-
-Fragmentation exists because a carrier bounds one message (PostgreSQL caps a
-``NOTIFY`` payload at 8000 bytes). Content is split so that each *encoded* frame
-fits the budget; the receiver rejoins the pieces in index order. Fragments of one
-signal are published back-to-back on a single connection, so they arrive in
-order; a reassembly that never completes is bounded and discarded (see
-``StreamFrameAssembler``).
+The assembler retains bounded partial messages until completion or eviction.
 """
 
 from __future__ import annotations
@@ -36,15 +15,10 @@ from dataclasses import dataclass
 from nlght.core.signals.signal import Signal
 
 # Reassembly buffers held at once, and fragments per buffer. Both cap what a
-# truncated or malicious sender can make a receiver retain; the oldest buffer is
+# truncated or malicious sender can make a receiver retain. The oldest buffer is
 # dropped first, which costs at most one incomplete signal of a live stream.
 _MAX_PENDING_MESSAGES = 256
 _MAX_FRAGMENTS = 4096
-
-# Smallest content slice we will cut. Guards the splitting loop against pathological
-# escaping (a character can encode to six bytes) demanding an empty slice.
-_MIN_FRAGMENT_CHARS = 8
-
 
 @dataclass(frozen=True)
 class StreamFrame:
@@ -75,10 +49,21 @@ def encode_signal(
     message_id: int,
     budget: int,
 ) -> list[str]:
-    """Encode one signal as the frames needed to carry it within ``budget`` bytes.
+    """Encode a signal as frames that fit the transport byte budget.
 
-    Returns a single frame whenever the signal fits, which is the ordinary case —
-    a token delta is far below any transport's message limit.
+    Args:
+        origin (uuid.UUID): Identity of the publishing node.
+        execution_id (uuid.UUID): Execution that emitted the signal.
+        signal (Signal): Signal to encode.
+        message_id (int): Positive ID shared by fragments of this signal.
+        budget (int): Maximum encoded bytes per frame.
+
+    Returns:
+        list[str]: One frame, or ordered fragments for a larger signal.
+
+    Raises:
+        ValueError: A fragmented signal has an invalid message ID, cannot fit
+            the frame budget, or exceeds the receiver's fragment limit.
     """
     single = _encode(
         {
@@ -93,6 +78,8 @@ def encode_signal(
     if len(single.encode()) <= budget:
         return [single]
 
+    if type(message_id) is not int or message_id < 1:
+        raise ValueError("fragmented signals require a positive message ID")
     chunks = _split(signal.content, origin, execution_id, signal, message_id, budget)
     total = len(chunks)
     return [
@@ -114,15 +101,26 @@ def encode_signal(
 
 
 def encode_close(origin: uuid.UUID, execution_id: uuid.UUID) -> str:
-    """Encode the end-of-stream frame for one execution."""
+    """Encode an end-of-stream frame for one execution.
+
+    Args:
+        origin (uuid.UUID): Identity of the publishing node.
+        execution_id (uuid.UUID): Execution whose stream ended.
+
+    Returns:
+        str: Encoded close frame.
+    """
     return _encode({"o": origin.hex, "e": execution_id.hex, "t": "c"})
 
 
 def decode_frame(payload: str) -> StreamFrame | None:
-    """Decode one frame, or ``None`` if it is not one we understand.
+    """Decode a supported stream frame and reject malformed metadata.
 
-    A transport carries whatever anyone put on it; an unreadable frame is
-    dropped rather than allowed to break a live stream.
+    Args:
+        payload (str): JSON frame received from the transport.
+
+    Returns:
+        StreamFrame | None: Decoded frame, or None for unreadable and unsupported input.
     """
     try:
         raw = json.loads(payload)
@@ -149,18 +147,32 @@ def decode_frame(payload: str) -> StreamFrame | None:
         )
     except KeyError:
         return None
+    message_id = raw.get("m", 0)
+    index = raw.get("i", 0)
+    count = raw.get("n", 1)
+    if any(type(value) is not int for value in (message_id, index, count)):
+        return None
+    if (
+        count < 1
+        or count > _MAX_FRAGMENTS
+        or index < 0
+        or index >= count
+        or (count > 1 and message_id < 1)
+        or (count == 1 and message_id < 0)
+    ):
+        return None
     return StreamFrame(
         origin=origin,
         execution_id=execution_id,
         signal=signal,
-        message_id=int(raw.get("m", 0)),
-        index=int(raw.get("i", 0)),
-        count=int(raw.get("n", 1)),
+        message_id=message_id,
+        index=index,
+        count=count,
     )
 
 
 class StreamFrameAssembler:
-    """Rejoins fragmented signals; passes whole ones straight through.
+    """Rejoins fragmented signals. Passes whole ones straight through.
 
     Kept separate from the transport so every adapter reassembles identically.
     Buffers are bounded (``_MAX_PENDING_MESSAGES``) and evicted oldest-first, so a
@@ -171,7 +183,17 @@ class StreamFrameAssembler:
         self._pending: dict[tuple[str, str, int], dict[int, str]] = {}
 
     def push(self, frame: StreamFrame) -> StreamFrame | None:
-        """Feed one frame; return the complete frame once it can be delivered."""
+        """Accept a frame and reassemble a complete signal when possible.
+
+        Args:
+            frame (StreamFrame): Decoded signal fragment, whole signal, or close frame.
+
+        Returns:
+            StreamFrame | None: Complete frame when deliverable, otherwise None.
+
+        Side Effects:
+            May add or evict a bounded partial-message buffer.
+        """
         if not frame.is_fragment or frame.signal is None:
             return frame
 
@@ -198,7 +220,14 @@ class StreamFrameAssembler:
         )
 
     def forget(self, execution_id: uuid.UUID) -> None:
-        """Drop any half-assembled signal of a stream that has ended."""
+        """Discard partial messages for a completed execution.
+
+        Args:
+            execution_id (uuid.UUID): Execution whose pending fragments are removed.
+
+        Side Effects:
+            Removes matching reassembly buffers.
+        """
         for key in [key for key in self._pending if key[1] == execution_id.hex]:
             del self._pending[key]
 
@@ -211,11 +240,21 @@ def _split(
     message_id: int,
     budget: int,
 ) -> list[str]:
-    """Cut ``content`` so every resulting *encoded* frame fits ``budget``.
+    """Split signal text by actual encoded byte size.
 
-    Measures the real encoding rather than assuming a ratio: JSON escaping
-    expands some characters up to sixfold, and a fixed estimate would either
-    overflow the budget or waste most of it.
+    Args:
+        content (str): Signal text to fragment.
+        origin (uuid.UUID): Identity of the publishing node.
+        execution_id (uuid.UUID): Execution that emitted the signal.
+        signal (Signal): Signal whose role and kind enter each frame.
+        message_id (int): Positive ID shared by the fragments.
+        budget (int): Maximum encoded bytes per frame.
+
+    Returns:
+        list[str]: Ordered content slices that fit in encoded frames.
+
+    Raises:
+        ValueError: The budget is too small or too many fragments are needed.
     """
     overhead = len(
         _encode(
@@ -227,30 +266,43 @@ def _split(
                 "k": signal.kind,
                 "c": "",
                 "m": message_id,
-                "i": 0,
-                "n": 999_999,
+                "i": _MAX_FRAGMENTS - 1,
+                "n": _MAX_FRAGMENTS,
             }
         ).encode()
     )
-    room = max(budget - overhead, _MIN_FRAGMENT_CHARS)
+    room = budget - overhead
+    if room < 1:
+        raise ValueError("frame budget cannot hold a fragment header")
 
     chunks: list[str] = []
     rest = content
     while rest:
+        if _encoded_size(rest[0]) > room:
+            raise ValueError("frame budget cannot hold one encoded character")
         # `room` characters can never encode to fewer than `room` bytes, so it is a
-        # safe starting guess; shrink until the encoded slice fits.
+        # safe starting guess. Shrink until the encoded slice fits.
         take = min(len(rest), room)
         while take > 1 and _encoded_size(rest[:take]) > room:
             # Scale by how far over budget we are, and always make progress.
             scaled = take * room // _encoded_size(rest[:take])
             take = max(1, min(take - 1, scaled))
         chunks.append(rest[:take])
+        if len(chunks) > _MAX_FRAGMENTS:
+            raise ValueError("signal needs more fragments than the receiver accepts")
         rest = rest[take:]
     return chunks
 
 
 def _encoded_size(text: str) -> int:
-    """Bytes ``text`` occupies inside a frame — its JSON encoding without the quotes."""
+    """Measure text inside a JSON-encoded frame.
+
+    Args:
+        text (str): Content to measure.
+
+    Returns:
+        int: Encoded byte count excluding the surrounding JSON quotes.
+    """
     return len(_encode(text).encode()) - 2
 
 

@@ -33,7 +33,7 @@ class KnowledgeReviewFlagStep(StepBase):
         kinds:          under "thresholds", always quarantine these kinds
         types:          under "thresholds", always quarantine these types
 
-    An absent policy defaults to ``all`` — the safe direction, because an
+    An absent policy defaults to ``all``, the safe direction because an
     unreviewed assertion that silently became retrievable is the failure that
     matters here.
 
@@ -79,7 +79,7 @@ class KnowledgeReviewFlagStep(StepBase):
             "[%s] knowledge.review_flag.done | policy=%s total=%d quarantined=%d",
             ctx.correlation_id, policy, len(classified), quarantined,
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     def _reason(self, item: ExtractedItem, policy: str) -> str | None:
         if policy == POLICY_ALL:

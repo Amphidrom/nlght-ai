@@ -137,6 +137,18 @@ async def test_layered_extractor_builds_artifacts_relations_requests_and_dedupli
     assert dedup.filter([candidate, candidate]) == [candidate]
 
 
+async def test_layered_extractor_orders_references_by_first_mention() -> None:
+    """Keep multi-artifact references in first-mention order across hash seeds."""
+    extractor = LayeredObserveExtractor(use_ner=False)
+    result = await extractor.extract(
+        "Hier ist Beta:\n```text\nbeta content\n```\n"
+        "Hier ist Alpha:\n```text\nalpha content\n```\n"
+        "Vergleiche Beta mit Alpha."
+    )
+
+    assert result.referenced_labels == ["Beta", "Alpha"]
+
+
 async def test_layered_extractor_recall_and_optional_ner_failure(monkeypatch) -> None:
     def fail_load(_):
         raise ImportError("optional dependency unavailable")

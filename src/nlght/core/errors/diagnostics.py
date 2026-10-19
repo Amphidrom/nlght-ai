@@ -59,7 +59,7 @@ class Diagnostics:
 
     Callers serialise this to JSON and store it as a WorkingAtom
     (AtomType.ERROR) in the StoreCoordinator.  The stores themselves
-    only ever hold plain strings — Diagnostics is a vocabulary type
+    only ever hold plain strings. Diagnostics is a vocabulary type
     for building that string content consistently.
     """
 

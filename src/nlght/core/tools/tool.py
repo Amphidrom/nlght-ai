@@ -6,9 +6,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from nlght.core.model.trust import UNANNOTATED, ContentOrigin
+
 if TYPE_CHECKING:
     from nlght.core.tools.action import ActionSemanticsResolver, ToolArgumentBinder
     from nlght.ports.outbound.os_runtime import OsRuntime
+
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """A tool result and the origin of its content (ADR-0074).
+
+    A tool method may return this instead of a ``str``. The origin labels the
+    *content*: a trusted tool that returns a web page returns untrusted
+    content. A bare ``str`` is unannotated, and unannotated is untrusted.
+    """
+
+    content: str
+    origin: ContentOrigin = UNANNOTATED
 
 
 @dataclass(frozen=True)
@@ -76,7 +91,7 @@ class ToolOption:
     choices: list[Any] | None = None
     placeholder: str = ""
     secret: bool = False
-    """Rendered as a password field — the value is still stored in plain config."""
+    """Render as a password field while storing the value in plain config."""
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -127,6 +142,12 @@ class ToolBase:
 
     KIND: ClassVar[str]
     PROVIDER: ClassVar[str]
+    #: The source kind a plain ``str`` result of this tool is labelled with,
+    #: always as untrusted content (ADR-0074) when output comes
+    #: from somewhere nobody configured as trusted: the web, a shell, a remote.
+    #: Empty leaves a plain result unannotated. A tool that can say more returns
+    #: a ``ToolOutput``. This can never label anything trusted.
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = ""
 
     def __init__(
         self,
@@ -134,19 +155,22 @@ class ToolBase:
         name: str,
         config: dict[str, Any],
         os_runtime: OsRuntime | None = None,
+        resource_id: str = "",
         **_: object,
     ) -> None:
         self.name = name
         self.config = config
         self.os_runtime = os_runtime
+        #: The resource's persistent id, stable across renames. Scopes the
+        #: sources this activation labels (ADR-0074). Empty outside the runtime.
+        self.resource_id = resource_id
 
     @classmethod
     def options(cls) -> list[ToolOption]:
-        """The configuration keys this tool understands.
+        """Declare typed configuration options for a tool.
 
-        Override to make a resource self-describing: the admin UI renders these
-        as typed inputs. The default is empty, which means "free-form JSON" and
-        preserves existing behaviour.
+        Returns:
+            list[ToolOption]: Empty option list until a subclass overrides it.
         """
         return []
 

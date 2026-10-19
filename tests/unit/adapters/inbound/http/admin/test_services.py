@@ -23,6 +23,17 @@ async def _service() -> tuple[AdminService, object]:
     return AdminService(engine), engine
 
 
+def test_admin_lists_registered_step_verdicts_before_execution() -> None:
+    assert AdminService.step_verdicts("ingestion.source", {}) == (
+        "DEFAULT", "done", "failed", "incomplete",
+    )
+    assert AdminService.step_verdicts("knowledge.parse_html", {})[-1] == "empty"
+    assert AdminService.step_verdicts("passthrough", {"verdict": "needs_review"}) == (
+        "DEFAULT", "done", "failed", "needs_review",
+    )
+    assert AdminService.step_verdicts("unknown", {}) == ()
+
+
 async def test_admin_service_manages_workflow_versions_steps_and_graph() -> None:
     svc, engine = await _service()
     try:
@@ -192,11 +203,16 @@ def test_step_types_expose_their_configuration_options() -> None:
     assert options["include"]["type"] == "array"
     assert source["doc"]
 
+    persist_options = {
+        option["name"]: option for option in catalogue["knowledge.persist"]["options"]
+    }
+    assert persist_options["writer"]["required"] is True
+
 
 def test_a_step_without_declared_options_still_appears() -> None:
     catalogue = {entry["type"]: entry for entry in AdminService.step_types()}
 
-    # done/failed declare nothing; they must not vanish from the catalogue, and
+    # done/failed declare nothing. They must not vanish from the catalogue, and
     # the UI falls back to raw JSON for them.
     assert catalogue["done"]["options"] == []
 
@@ -242,22 +258,12 @@ def test_credentials_are_marked_so_the_form_can_mask_them() -> None:
 def test_a_tool_without_declared_options_still_appears() -> None:
     catalogue = {entry["kind"]: entry for entry in AdminService.resource_kinds()}
 
-    # shell declares none; it must keep the raw JSON editor rather than vanish.
+    # shell declares none. It must keep the raw JSON editor rather than vanish.
     assert catalogue["shell"]["options"] == []
 
 
-# ---------------------------------------------------------------------------
-# a resource is at one address, and only one resource is
-# ---------------------------------------------------------------------------
-
-
 async def test_the_same_name_under_two_kinds_is_two_resources() -> None:
-    """The address is `<kind>/<name>`, so the kind is part of what is unique.
-
-    An operator naming both their data store and their knowledge store `main` is
-    not a conflict — `data_store/main` and `knowledge_store/main` are different
-    addresses.
-    """
+    """Allow the same resource name under different kinds."""
     svc, engine = await _service()
     try:
         first = await svc.create_resource(
@@ -297,7 +303,7 @@ async def test_a_second_resource_at_one_address_is_refused() -> None:
 
 
 async def test_renaming_a_resource_onto_a_taken_address_is_refused() -> None:
-    """The update path is guarded too — creating is not the only way in."""
+    """Reject a resource rename that collides with an existing address."""
     svc, engine = await _service()
     try:
         await svc.create_resource(

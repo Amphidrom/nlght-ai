@@ -5,17 +5,17 @@
 
 The knowledge counterpart to the data layer's index state. Without it every run
 asks the model about every document again, and the model answers the same
-question in slightly different words each time — which, once assertions are
-updated incrementally rather than rebuilt, is a retraction and a re-review of
-something nobody edited.
+question in slightly different words each time. Once assertions are
+updated incrementally rather than rebuilt, that variation retracts and
+requires review of something nobody edited.
 
 Two columns decide it together. `content_hash` is the text the extraction was
-given; `extraction_version` folds the assertion schema, the prompt and its
+given. `extraction_version` folds the assertion schema, the prompt and its
 workflow, and the model. Either alone would be wrong in one direction: content
 alone skips a document after a model change, version alone skips an edited one.
 
 No backfill. An empty table means nothing is skipped, so the first run after
-this migration extracts everything once and records what it did — the safe
+this migration extracts everything once and records what it did. This is the safe
 direction, and the only honest one, because nothing here can know what version
 produced the assertions that already exist.
 

@@ -40,7 +40,7 @@ class _Llm:
         self.response = response
         self.prompts: list[str] = []
 
-    def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):
+    def stream(self, messages, tools=None, tool_choice=None):
         self.prompts.append(messages[0]["content"])
         response = self.response.replace(
             "{quote}", quote_from(str(messages[0]["content"]))
@@ -52,7 +52,7 @@ class _Llm:
 
         return _gen()
 
-    async def call(self, messages, *, temperature=None) -> None: ...
+    async def call(self, messages) -> None: ...
 
     def append_tool_turn(self, messages, tool_calls_raw, results, assistant_text=""):
         return messages
@@ -266,6 +266,18 @@ async def test_extraction_rejects_invalid_unit_batch_size() -> None:
         await KnowledgeExtractStep(config={"unit_batch_size": 0}).run(ctx)
 
 
+@pytest.mark.parametrize("value", [0.0, 0.7])
+async def test_extraction_refuses_a_temperature_and_names_the_provider_setting(value: float) -> None:
+    # Sampling is the model provider's configuration. An unknown step key would
+    # pass silently, and a determinism pin that silently stops applying is the
+    # drift this step exists to prevent, so the key is refused, not ignored.
+    ctx = _ctx(_Llm(_VALID))
+    ctx.metadata["knowledge.units"] = ()
+
+    with pytest.raises(WorkflowConfigurationError, match=r"model_providers\[\]\.config\.temperature"):
+        await KnowledgeExtractStep(config={"temperature": value}).run(ctx)
+
+
 async def test_extraction_without_a_model_is_a_configuration_error() -> None:
     ctx = _ctx(None)
     ctx.metadata["knowledge.units"] = ()
@@ -381,6 +393,11 @@ def _persist_step(monkeypatch, repo, **config):
     Through the writer activation. There is no injected repository any more: a
     connection reached past the activation would let one platform-wide URL
     decide where every pipeline writes.
+
+    Args:
+        monkeypatch (Any): Pytest fixture for replacing collaborators.
+        repo (Any): Repository stub used by the helper.
+        **config (object): Persistence step configuration overrides.
     """
     from nlght.adapters.outbound.workflow.steps.knowledge import persist as persist_module
 
@@ -479,7 +496,7 @@ class _Loader:
         self._instance = instance
 
     def instantiate(self, *, kind, provider, name, config, **runtime_deps):
-        # The real loader forwards whatever the caller hands it — store
+        # The real loader forwards whatever the caller hands it. Store
         # connections today, something else tomorrow. Absorbing them keeps this
         # fake from breaking every time a step gains a dependency.
         self.runtime_deps = runtime_deps
@@ -540,7 +557,7 @@ async def test_persisting_indexes_assertions_for_lexical_search(monkeypatch) -> 
 
 async def test_persisting_without_a_writer_is_refused() -> None:
     # There is no central connection to fall back on, so a step without a
-    # writer resource has no database at all — it must say so rather than
+    # writer resource has no database at all. It must say so rather than
     # appear to succeed while storing nothing.
     ctx = _ctx()
     ctx.metadata["knowledge.extracted"] = _items()
@@ -606,15 +623,7 @@ async def test_persisting_records_the_lineage_of_an_identifiable_assertion(monke
 
 
 async def test_an_assertion_without_the_identifying_fields_gets_no_lineage(monkeypatch) -> None:
-    """Explicitly no lineage, rather than a key made up from the wording.
-
-    A rule extracted before `subject` and `rule_property` were asked for cannot
-    name a business question. Deriving a key from its sentence would give it one
-    a later run cannot reproduce, so every run would open a new assertion for the
-    same claim — the drift this design removes, arriving through the migration
-    meant to end it. It is still persisted to the graph; only its lineage is
-    absent.
-    """
+    """Persist a legacy rule to the graph without inventing a lineage key."""
     ctx = _ctx()
     ctx.metadata["knowledge.extracted"] = (
         ExtractedItem(
@@ -668,15 +677,7 @@ async def test_an_assertion_without_a_document_gets_no_lineage(monkeypatch) -> N
 
 
 async def test_a_quarantined_assertion_never_reaches_the_index(monkeypatch) -> None:
-    """Nothing written, and nothing deleted either.
-
-    Quarantine means the claim does not go to OpenSearch. It used to be
-    *withdrawn* instead, which was wrong twice over: quarantine is not a
-    retraction, and on a corpus whose policy quarantines everything it meant one
-    pointless delete per assertion per run against a document that had never
-    been written — an initial run over a fresh index issued a delete for every
-    single candidate.
-    """
+    """Keep a quarantined assertion out of the search index."""
     ctx = _ctx()
     ctx.metadata["knowledge.extracted"] = _items()
     repo = _StoringRepo()
@@ -692,7 +693,7 @@ async def test_a_quarantined_assertion_never_reaches_the_index(monkeypatch) -> N
         resource_activator=ResourceActivator(resources=_Resources([_resource()]), loader=_Loader(writer)),
     ).run(ctx)
 
-    # No classification step ran, so everything is quarantined — the safe
+    # No classification step ran, so everything is quarantined. This is the safe
     # fallback, and the case an initial run hits.
     assert writer.indexed == []
     assert writer.removed == []
@@ -724,17 +725,7 @@ async def test_only_the_released_half_of_a_batch_is_indexed(monkeypatch) -> None
 
 
 async def test_a_fact_that_cannot_be_placed_is_counted_and_not_stored(monkeypatch) -> None:
-    """The step's half of the invariant, for the route extraction cannot see.
-
-    A fact whose evidence names no document gets no lineage and therefore no
-    revision, and a fact with no revision has nowhere to keep what it says.
-    Storing it anyway wrote a graph row asserting nothing — so it is skipped,
-    counted, and logged with enough to find the producer that emitted it.
-
-    Skipping is only safe because it is *counted*: a claim silently absent and a
-    claim silently unreadable are the same fault, and the number is what makes
-    this one visible in a run report.
-    """
+    """Count and skip a fact lacking the document evidence needed for lineage."""
     from nlght.adapters.outbound.workflow.steps.knowledge import persist as persist_module
 
     ctx = _ctx()
@@ -760,24 +751,14 @@ async def test_a_fact_that_cannot_be_placed_is_counted_and_not_stored(monkeypatc
 
     # Placeable after all: a three-field fact projects losslessly onto the
     # legacy row, so the payload holds the whole claim even without a revision.
-    # What cannot be stored is a claim with *no* home — neither a revision nor a
-    # payload that fits — which the case below is.
+    # A claim with *no* home cannot be stored: neither a revision nor a
+    # payload that fits, which the case below is.
     assert result.ctx.metadata["knowledge.unplaceable"] == 0
     assert result.ctx.metadata["knowledge.persisted"] == 1
 
 
 async def test_a_claim_with_nowhere_to_live_is_counted_and_not_stored(monkeypatch) -> None:
-    """The guard, stated as what a claim *has* rather than what kind it is.
-
-    A proposition lives on the revision a sighting produces, so a candidate with
-    no lineage has no revision to keep it on. That is survivable while the legacy
-    payload can hold the whole claim. It is not survivable when both are missing:
-    the graph row then has no payload, no proposition and no revision, and says
-    nothing at all.
-
-    Four roles is the case — for a `fact` or, now that every kind has a
-    proposition, for any of them.
-    """
+    """Count and skip a claim without lineage or a lossless legacy payload."""
     from nlght.adapters.outbound.workflow.steps.knowledge import persist as persist_module
 
     ctx = _ctx()
@@ -811,7 +792,7 @@ async def test_a_claim_with_nowhere_to_live_is_counted_and_not_stored(monkeypatc
 
 async def test_a_rule_without_evidence_is_still_stored(monkeypatch) -> None:
     # The guard is about claims that need a revision to be readable at all. A
-    # rule *is* its payload, so a lineage-less one loses nothing — and a corpus
+    # rule *is* its payload, so a lineage-less one loses nothing, and a corpus
     # written before entity keys existed is full of them.
     from nlght.adapters.outbound.workflow.steps.knowledge import persist as persist_module
 
@@ -840,18 +821,7 @@ async def test_a_rule_without_evidence_is_still_stored(monkeypatch) -> None:
 
 
 async def test_readiness_is_established_before_the_first_write(monkeypatch) -> None:
-    """`ready → writes allowed` / `not ready → no knowledge persistence`.
-
-    The ordering half of the invariant. Bootstrapping lazily — on the first
-    document, or per batch — would leave a window where candidates are committed
-    to PostgreSQL before the mapping exists, and an OpenSearch index with no
-    mapping stores what it is given and makes it unsearchable.
-
-    So a writer that cannot make itself ready stops the step before any
-    candidate is written, and the repository is untouched. Asserted at the step
-    rather than trusted from reading it, because the call sits in `_writer()`
-    and someone moving it into the loop would look like a tidy-up.
-    """
+    """Stop knowledge writes until the search index is ready."""
     from nlght.adapters.outbound.workflow.steps.knowledge import persist as persist_module
 
     class _UnreadyWriter(_IndexWriter):

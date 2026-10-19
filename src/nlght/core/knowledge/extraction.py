@@ -1,25 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What was extracted from a document, and by which extraction.
-
-The knowledge layer had no counterpart to the data layer's index state, so every
-run asked the model about every document again. That is not merely wasteful: the
-model answers the same question in slightly different words each time, and once
-assertions are updated incrementally those different words are a retraction and
-a re-review of something nobody edited. Identity drift stops being an edge case
-at document change and becomes the normal operating condition.
-
-Two things decide whether extraction may be skipped, and it takes both:
-
-    document_content_hash + extraction_version
-
-The version covers everything that can change what the extraction produces — the
-assertion schema, the prompt and the workflow it belongs to, and the model.
-Leave one out and a document is skipped after that thing changed: the run reports
-success, the corpus keeps assertions written by an extraction that no longer
-exists, and the ones the new extraction would have found are never produced.
-"""
+"""Track which extraction produced each document claim."""
 
 from __future__ import annotations
 
@@ -49,21 +31,19 @@ def extraction_version(
     prompt: str,
     settings: Mapping[str, Any],
 ) -> str:
-    """Everything that decides what an extraction produces, folded in one place.
+    """Bind an extraction to every factor that can change its result.
 
-    Assembled here and nowhere else. Composing it at the call site is how a new
-    influence gets forgotten — the factor is added to the extractor, the version
-    keeps its old value, and every document is skipped after a change that
-    should have redone them. So the parts this module owns are folded in here,
-    and a caller supplies only what it alone knows.
+    Args:
+        workflow (str): Workflow identity.
+        model (str): Model identity.
+        prompt (str): Extraction prompt text.
+        settings (Mapping[str, Any]): Caller-owned extraction settings.
 
-    ``settings`` is whatever of the caller's configuration shapes the result. It
-    is serialised canonically, so reordering a config block is not a change and
-    adding a key is.
+    Returns:
+        str: Stable digest of the complete extraction contract.
 
-    The caller's parts must not be blank: a blank one would make two genuinely
-    different extractions look alike, which is the single failure this key
-    exists to prevent, so it is refused rather than hashed.
+    Raises:
+        ValueError: A required workflow, model, or prompt value is blank.
     """
     supplied = {"workflow": workflow, "model": model, "prompt": prompt}
     missing = [name for name, value in supplied.items() if not value.strip()]
@@ -108,11 +88,14 @@ class ExtractionState:
             )
 
     def is_current(self, *, content_hash: str, extraction_version: str) -> bool:
-        """Whether this document may be left alone.
+        """Permit a skip only when content and extraction both match.
 
-        Both halves, and not either: unchanged content under a changed model is
-        exactly when the corpus needs redoing, and unchanged extraction over
-        changed content is the ordinary reason to run at all.
+        Args:
+            content_hash (str): Hash of the current source content.
+            extraction_version (str): Current extraction contract digest.
+
+        Returns:
+            bool: True only when the stored content and extraction contract both match.
         """
         return (
             self.content_hash == content_hash

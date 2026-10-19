@@ -1,23 +1,12 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Rule-based access policies backed by the ``access_policies`` table.
+"""Evaluate stored access rules for resources, tools, models, and playbooks.
 
-One ``AccessRuleEngine`` holds the cached rule set; three thin facades adapt
-it to the AccessPolicy ports (tool, model, playbook). Rules are fetched
-through an ``AccessRuleRepository`` and cached for a short TTL so catalog
-builds (which check every resource) trigger at most one query per window —
-with an empty table the engine adds no per-subject work beyond a list check.
-
-Decision semantics per subject (see ADR-0022):
-
-1. Collect enabled rules whose ``subject_type`` matches and whose ``subject``
-   glob matches the subject name.
-2. No rules → **allow** (an empty policy table restricts nothing).
-3. Otherwise sort by priority (highest first; ``deny`` before ``allow`` on
-   equal priority) and take the first rule whose conditions are satisfied —
-   its effect decides.
-4. Rules exist but none matched → **deny** (allowlist semantics).
+One engine caches enabled rules for the four access-policy ports. An empty
+policy table allows access. Otherwise the highest-priority matching rule
+decides, with denials winning ties. A subject with rules but no matching
+conditions is denied (ADR-0022).
 """
 
 from __future__ import annotations
@@ -42,7 +31,7 @@ _HEADER_PREFIX = "header:"
 
 
 class AccessRuleEngine:
-    """Evaluates stored access rules; shared by the three port facades."""
+    """Evaluate stored access rules for the policy port facades."""
 
     def __init__(
         self,
@@ -104,7 +93,7 @@ class AccessRuleEngine:
         return False
 
     def invalidate_cache(self) -> None:
-        """Drop the cached rule set — the next check re-reads the repository."""
+        """Drop cached rules so the next check reads the repository."""
         self._cache = None
         self._cache_at = 0.0
 
@@ -146,7 +135,7 @@ class AccessRuleEngine:
                     return value
             return None
         logger.warning(
-            "access_policy.unknown_condition | rule=%s key=%r (known: %s, %s<name>) — treating as unmatched",
+            "access_policy.unknown_condition | rule=%s key=%r (known: %s, %s<name>): treating as unmatched",
             rule.rule_id, key, ", ".join(_KNOWN_CONDITION_KEYS), _HEADER_PREFIX,
         )
         return None
@@ -165,7 +154,7 @@ class AccessRuleEngine:
 
 
 class ResourceRuleAccessPolicy:
-    """ResourceAccessPolicy facade — subject is the resource's address.
+    """ResourceAccessPolicy facade for a resource address.
 
     Authorizes the resource as a whole: whether this caller may activate it at
     all. That is the only question for a resource used inside a workflow step,
@@ -185,7 +174,7 @@ class ResourceRuleAccessPolicy:
 
 
 class ToolRuleAccessPolicy:
-    """ToolAccessPolicy facade — subject is one signature of one resource.
+    """ToolAccessPolicy facade for one signature of one resource.
 
     This used to decide on `resource.name`, which meant a rule named a tool and
     authorized a whole resource. It now decides on
@@ -211,10 +200,10 @@ class ToolRuleAccessPolicy:
 
 
 class ModelRuleAccessPolicy:
-    """ModelAccessPolicy facade — subject is the model name itself.
+    """ModelAccessPolicy facade for a model name.
 
     A ``model`` condition on a model rule matches against the model name,
-    which lets e.g. ``subject='*'`` rules stay expressible; header/host
+    which lets e.g. ``subject='*'`` rules stay expressible. Header/host
     conditions apply to the caller as usual.
     """
 
@@ -230,7 +219,9 @@ class ModelRuleAccessPolicy:
 
 
 class PlaybookRuleAccessPolicy:
-    """PlaybookAccessPolicy facade — subject is the playbook name."""
+    """Playbook access policy keyed by playbook name."""
+
+
 
     def __init__(self, engine: AccessRuleEngine) -> None:
         self._engine = engine

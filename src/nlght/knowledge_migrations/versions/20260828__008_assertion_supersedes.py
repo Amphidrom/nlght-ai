@@ -4,15 +4,15 @@
 """One assertion took another's place: knowledge_assertion_lineage.
 
 A rewording keeps an assertion and adds a revision to it. A material change does
-not — `CEO(OpenAI, Alice)` and `CEO(OpenAI, Bob)` say different things, so they
+not. `CEO(OpenAI, Alice)` and `CEO(OpenAI, Bob)` say different things, so they
 are two assertions, and what connects them is that the second replaced the first.
 
 An **edge table**, not a column on the assertion, because succession is not
 one-to-one:
 
-    A → B          a claim replaced
-    A → B, C       one rule split into two
-    A, B → C       two folded into one
+    A replaced by B          a claim replaced
+    A split into B and C     one rule split into two
+    A and B folded into C    two folded into one
 
 A `superseded_by` field can express none of the latter two, and a corpus of
 policies does both routinely.
@@ -23,8 +23,8 @@ be one thing whose value moved. Deciding which roles identify a relation and
 which are its state is domain knowledge no platform has without an ontology, and
 neither a shipped vocabulary nor asking a customer to declare one before
 ingesting is an answer. So the platform stops deciding it: an assertion is its
-whole proposition, and succession is recorded — with who decided it and why —
-rather than inferred from the words.
+whole proposition. Succession records who decided it and why instead of being
+inferred from the words.
 
 Empty, with no backfill. Nothing existing supersedes anything, and working out
 retrospectively what replaced what is exactly the guessing this design removes.

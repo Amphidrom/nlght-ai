@@ -10,7 +10,7 @@ from nlght.adapters.outbound.tools.builtin.shell import ShellTool
 from nlght.adapters.outbound.tools.builtin.web_search import WebSearchTool
 from nlght.adapters.outbound.tools.loader import ToolLoader
 
-# Global registry — extension point for users.
+# Register custom tools before server startup.
 #
 # Register before server start:
 #
@@ -29,7 +29,7 @@ tool_registry.register(WebSearchTool)
 tool_registry.register(FetchUrlTool)
 tool_registry.register(LoadMemoryArtifactTool)
 
-# Data Store — one activation spanning Qdrant and OpenSearch, plus the corpus
+# The data store spans Qdrant, OpenSearch, and the corpus
 # it answers from. There is no separate lexical or vector store kind: keyword
 # and semantic discovery are two capabilities of one store over one corpus, and
 # splitting them into a kind each made what the ingestion writes and what
@@ -40,7 +40,7 @@ try:
 except ImportError:
     pass
 
-# Data index writer — a tool under a kind disjoint from data_store, declaring
+# The data index writer uses a kind disjoint from data_store and declares
 # no signatures, so retrieval can never reach a write operation.
 try:
     from nlght.adapters.outbound.stores.data_writer import DataIndexWriterTool
@@ -48,14 +48,14 @@ try:
 except ImportError:
     pass
 
-# Knowledge index writer — write-only, disjoint kind, no signatures.
+# Keep the knowledge index writer write-only and separate from retrieval.
 try:
     from nlght.adapters.outbound.stores.knowledge_writer import KnowledgeIndexWriterTool
     tool_registry.register(KnowledgeIndexWriterTool)
 except ImportError:
     pass
 
-# Knowledge Store — one activation spanning OpenSearch and PostgreSQL.
+# One knowledge store activation spans OpenSearch and PostgreSQL.
 try:
     from nlght.adapters.outbound.stores.knowledge import KnowledgeStoreTool
     tool_registry.register(KnowledgeStoreTool)

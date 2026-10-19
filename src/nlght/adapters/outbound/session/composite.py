@@ -7,7 +7,7 @@ from nlght.ports.outbound.session_key_resolver import SessionKeyResolver
 
 
 class CompositeSessionKeyResolver(SessionKeyResolver):
-    """Tries multiple resolvers in order; returns the first hit."""
+    """Tries multiple resolvers in order. Returns the first hit."""
 
     def __init__(self, resolvers: list[SessionKeyResolver]) -> None:
         self._resolvers = resolvers

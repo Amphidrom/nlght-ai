@@ -5,7 +5,7 @@
 
 The step machine's budget used to be a constant, and constants are wrong here in
 both directions. Twenty is plenty for a workflow that answers a request and far
-too few for one that works through a corpus a document at a time — that one
+too few for one that works through a corpus a document at a time. Such a workflow
 spends a step on each, and only the workflow knows how many there will be.
 
 Nullable on purpose, and the three states mean different things: NULL leaves it

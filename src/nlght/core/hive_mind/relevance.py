@@ -1,20 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""RelevanceEngine — scores knowledge objects on four dimensions.
-
-Dimensions:
-    Recency     — how recently was the object updated?
-    Proximity   — how close are the object's entities to the current signal?
-    Volatility  — how often has the object been mutated?
-    Dependency  — is the object in the dependency chain of the current intent?
-
-Usage::
-
-    engine = RelevanceEngine(weights=RelevanceWeights(), strategy=ScoringStrategy.WEIGHTED_SIGMOID)
-    score  = engine.score_atom(atom, signal_entities, intent, now)
-    score  = engine.score_result(result, signal_entities, intent, now)
-"""
+"""Score memory elements and reduce them to a token budget."""
 
 from __future__ import annotations
 
@@ -41,7 +28,7 @@ from nlght.core.hive_mind.models import (
 
 logger = logging.getLogger(__name__)
 
-# Half-life in seconds — after this time, recency score is 0.5 (5 minutes)
+# Set the half-life to five minutes, when recency falls to 0.5.
 _RECENCY_HALF_LIFE_SECONDS = 300.0
 
 
@@ -91,9 +78,8 @@ def _sigmoid(x: float) -> float:
 class RelevanceEngine:
     """Scores KnowledgeAtoms and SessionResults for relevance to the current signal.
 
-    Parameters:
-        weights:   Dimension weights (must sum to 1.0).
-        strategy:  Scoring formula (linear / weighted_sigmoid / multiplicative).
+    Dimension weights sum to 1.0. The scoring strategy selects a linear,
+    weighted sigmoid, or multiplicative formula.
 
     There is no threshold. It existed to discard anything scoring below 0.15, and
     that is a decision this class is in the wrong place to make: a low score says
@@ -118,9 +104,6 @@ class RelevanceEngine:
             self.weights.volatility, self.weights.dependency,
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def score(
         self,
@@ -130,13 +113,17 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> RelevanceScore:
-        """How well this matches the moment — one definition, for everything.
+        """Score one element on recency, proximity, volatility, and dependency.
 
-        There used to be two, `score_atom` and `score_result`, differing in which
-        field each read and in one hardcoded `volatility = 0.0`. That difference
-        is real and it is an *input*: a session result does not mutate. It was
-        never a second meaning of relevance, and having it look like one is what
-        let two storage types drift apart.
+        Args:
+            signals (RelevanceInputs): Relevance signals for one element.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
+
+        Returns:
+            RelevanceScore: Weighted relevance score and its components.
         """
         recency    = _recency_score(signals.updated_at, now)
         proximity  = _proximity_score(list(signals.entities), signal_entities, intent)
@@ -159,25 +146,17 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> list[MentalElement]:
-        """Every element, scored and ordered — and **none of them discarded**.
+        """Score and order all elements without discarding any.
 
-        This is the half of the architecture that was missing. Reduction was made
-        blind to what an element is made of; deciding what may *reach* the
-        reduction was not, and it was doing so with a score threshold and a
-        per-type count. A durable fact about the user could therefore be dropped
-        for being the eleventh session result, before anything had a chance to
-        notice it was the sort of thing you must not lose:
+        Args:
+            elements (Sequence[MentalElement]): Elements to score and order.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
 
-            13 results stored, max_results = 10
-            → the one marked IMPORTANT was gone
-            → the budget engine never saw it
-
-        So nothing is forgotten before it becomes an element. What survives is a
-        question about retention, cost and relevance together, and it is asked in
-        exactly one place (ADR-0054).
-
-        Ordered for readability and for the reduction's tie-breaks; the order is
-        not a selection.
+        Returns:
+            list[MentalElement]: Every element with an updated score, highest first.
         """
         scored = [
             replace(
@@ -199,18 +178,17 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> RelevanceScore:
-        """A working atom's signals, mapped onto the one scoring function.
+        """Map a working atom to the shared relevance score.
 
-        Two of the four are read from fields that exist, and that is the whole
-        of the fix: `created_at` rather than an `updated_at` no atom has ever
-        had, and the entities the caller supplies.
+        Args:
+            atom (object): Working atom to score.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
 
-        The other two are neutral, and honestly so. `mutation_count` is zero
-        because nothing in the platform ever modifies an atom after it is
-        written — branches move them, never rewrite them — so it is the same
-        statement `score_result` makes about session results. `dependency` needs
-        `dependency_ids`, which no production path populates for any sort; that
-        is a dormant dimension platform-wide and not an atom's gap to fill.
+        Returns:
+            RelevanceScore: Relevance score for the atom.
         """
         return self.score(
             RelevanceInputs(
@@ -230,10 +208,17 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> RelevanceScore:
-        """A session result's signals, mapped onto the one scoring function.
+        """Map a session result to the shared relevance score.
 
-        `mutation_count` is zero because a session result does not mutate — an
-        input, stated once, rather than a scoring rule of its own.
+        Args:
+            result (object): Session result to score.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
+
+        Returns:
+            RelevanceScore: Relevance score for the result.
         """
         return self.score(
             RelevanceInputs(
@@ -255,7 +240,18 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> list[ScoredAtom]:
-        """Score every atom and order them. Discards nothing — see `rank`."""
+        """Score and order every working atom.
+
+        Args:
+            atoms (list[Any]): Working atoms to score and order.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
+
+        Returns:
+            list[ScoredAtom]: Every atom with its score, highest first.
+        """
         scored = [
             ScoredAtom(
                 atom=atom,
@@ -274,7 +270,18 @@ class RelevanceEngine:
         now:             datetime,
         dependency_ids:  set[str] | None = None,
     ) -> list[ScoredResult]:
-        """Score every result and order them. Discards nothing — see `rank`."""
+        """Score and order every session result.
+
+        Args:
+            results (list[Any]): Session results to score and order.
+            signal_entities (list[str]): Entities in the current signal.
+            intent (str): Current user intent.
+            now (datetime): Time used for recency scoring.
+            dependency_ids (set[str] | None): Optional IDs of prerequisite elements.
+
+        Returns:
+            list[ScoredResult]: Every result with its score, highest first.
+        """
         scored = [
             ScoredResult(
                 result=result,
@@ -285,9 +292,6 @@ class RelevanceEngine:
         scored.sort(key=lambda item: item.score.total, reverse=True)
         return scored
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     def _compute_total(
         self,
@@ -325,18 +329,15 @@ class RelevanceEngine:
             # float.__pow__ types as Any in typeshed for the general case (a
             # fractional exponent on a negative base could yield complex) --
             # r/p/v/d are all guaranteed positive above, so this is always a
-            # real float; the float() cast just makes that explicit to mypy.
+            # real float. The float() cast just makes that explicit to mypy.
             raw = float((r ** w.recency) * (p ** w.proximity) * (v ** w.volatility) * (d ** w.dependency))
             return max(0.0, min(1.0, raw))
 
         return 0.0
 
-# ---------------------------------------------------------------------------
-# Reduction: what survives a budget, and in which form
-# ---------------------------------------------------------------------------
 #
-# `filter_atoms` and `filter_results` above answer a different question — what is
-# relevant to this turn at all — and they answer it per storage type, by a
+# `filter_atoms` and `filter_results` above determine what is
+# relevant to this turn at all, and they answer it per storage type, by a
 # threshold and a count. What follows answers "what fits", over elements, and it
 # is deliberately blind to what those elements are made of.
 #
@@ -351,7 +352,7 @@ class ReducedView:
     """What survived, at what level, and what it cost."""
 
     #: Every element that is being said, with the level it is said at. Elements
-    #: reduced to `OMIT` are not here — they are in `forgotten`.
+    #: reduced to `OMIT` are in `forgotten` instead.
     kept: tuple[tuple[MentalElement, Representation], ...] = ()
     #: Dropped entirely, worst first, so a report can say what was lost.
     forgotten: tuple[MentalElement, ...] = ()
@@ -365,11 +366,11 @@ class ReducedView:
 
 
 #: The order in which information is given up. A fixed total order, and every
-#: reduction is a **prefix** of it — which is what makes the guarantees hold by
+#: reduction is a **prefix** of it, which is what makes the guarantees hold by
 #: construction rather than by testing:
 #:
-#:     more budget → fewer steps applied → every element at the same level or fuller
-#:     less budget → more steps applied  → information only ever decreases
+#:     More budget applies fewer steps, preserving each element's level or increasing it.
+#:     Less budget applies more steps, so information only decreases.
 #:
 #: Read it as a sentence: spend the dispensable first, then say the merely useful
 #: briefly, then stop saying it, then say the important briefly, and only then
@@ -386,10 +387,13 @@ _GIVING_UP: tuple[tuple[Retention, Level], ...] = (
 
 
 def _steps(elements: Sequence[MentalElement]) -> list[tuple[str, Level]]:
-    """Every reduction available, in the order they are taken.
+    """Order available reduction steps by retention and relevance.
 
-    Within one band the least relevant element gives way first, and ties break on
-    the element id so two runs over one input reduce identically.
+    Args:
+        elements (Sequence[MentalElement]): Mental elements and their offered representation levels.
+
+    Returns:
+        list[tuple[str, Level]]: Ordered element IDs and levels to give up.
     """
     ordered: list[tuple[str, Level]] = []
     for retention, level in _GIVING_UP:
@@ -406,25 +410,17 @@ def _steps(elements: Sequence[MentalElement]) -> list[tuple[str, Level]]:
 def reduce_to_budget(
     elements: Sequence[MentalElement], *, budget: int
 ) -> ReducedView:
-    """The fullest view of these elements that fits, and what it cost to get there.
+    """Select the fullest offered representations within a budget.
 
-    **Type-blind on purpose.** Nothing here reads `element.kind`, and nothing may:
-    the moment a reduction branches on where information came from, a corpus has
-    one policy per store again and no way to weigh a memory against a passage.
-    What decides is what the element *is worth* (`retention`), how well it
-    matches the moment (`relevance`), and what it costs to say.
+    Args:
+        elements (Sequence[MentalElement]): Mental elements in preference order.
+        budget (int): Nonnegative token budget.
 
-    **A prefix of a fixed order.** The reduction applies steps from `_GIVING_UP`
-    until the total fits, and stops. Two consequences follow without being
-    separately arranged: a larger budget applies a prefix of the steps a smaller
-    one applies, so no element is ever *less* complete when there is more room;
-    and information only ever decreases as the budget shrinks.
+    Returns:
+        ReducedView: Selected representations and forgotten elements.
 
-    **Nothing is invented.** An element is only ever moved to a level it already
-    offers, and the text of that level was written by whatever knows what the
-    element is. Provenance rides along untouched, so a compacted element can
-    still say where it came from — and that it is no longer a verbatim quote of
-    it.
+    Raises:
+        ValueError: The budget is negative.
     """
     if budget < 0:
         raise ValueError("a reduction budget cannot be negative")

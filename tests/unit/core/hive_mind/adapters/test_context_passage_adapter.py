@@ -1,11 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""ContextPassage → MentalElement — the last retrieval-specific code there is.
+"""Adapt retrieved passages into generic mental elements.
 
-After this adapter a passage is an element like any other and is weighed against a
-remembered fact by the same rules. Everything retrieval knows about itself stops
-here.
+Retrieval-specific meaning ends at the adapter boundary.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ def _passage(text: str, rank: int = 1, provenance: Provenance | None = None) -> 
 
 def test_the_observed_wording_is_carried_unchanged() -> None:
     # ADR-0048 all the way through: the sentence a citation quotes is the one the
-    # source said. The adapter may add a bullet for the prompt; it may not touch
+    # source said. The adapter may add a bullet for the prompt. It may not touch
     # the words.
     element = passage_elements([_passage("The value is limited to 100 characters.")])[0]
 
@@ -44,13 +42,7 @@ def test_the_fusion_rank_becomes_relevance() -> None:
 
 
 def test_the_rank_never_becomes_retention() -> None:
-    """The two questions the design keeps apart.
-
-    Rank says how well this matched the question among what was found. Retention
-    says what losing it would cost. A passage that ranked first is well matched,
-    not important — and if rank raised retention it would start outranking things
-    that genuinely must not be lost.
-    """
+    """Keep retrieval rank separate from retention value."""
     first, last = passage_elements([_passage("a", rank=1), _passage("b", rank=2)])
 
     assert first.retention is last.retention is Retention.USEFUL
@@ -81,7 +73,7 @@ def test_a_passage_belongs_to_its_own_section() -> None:
 
 
 def test_two_stores_finding_one_passage_stay_one_element() -> None:
-    # The fusion already decided that; the adapter must not undo it by making an
+    # The fusion already decided that. The adapter must not undo it by making an
     # element per finder.
     passage = ContextPassage(
         text="found twice", carrier=DOCUMENT, carrier_id="d1",

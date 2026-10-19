@@ -32,7 +32,7 @@ from nlght.core.execution import (
 )
 
 #: How each dialect names the violated address constraint. PostgreSQL reports
-#: the constraint by name; SQLite names the columns and never the constraint, so
+#: the constraint by name. SQLite names the columns but not the constraint, so
 #: matching on the name alone would translate the error on the deployment target
 #: and not in any test. Both are listed rather than falling back to "any
 #: IntegrityError is an address conflict", which would report a foreign-key or
@@ -43,7 +43,17 @@ _ADDRESS_CONSTRAINT = ("uq_resource_address", "resources.kind, resources.name")
 def _address_conflict(
     error: IntegrityError, kind: str, name: str
 ) -> Exception:
-    """The address conflict, or the original error if it was something else."""
+    """Translate only a resource-address uniqueness failure.
+
+    Args:
+        error (IntegrityError): Database integrity error to inspect.
+        kind (str): Resource kind named in a duplicate-address error.
+        name (str): Resource name named in a duplicate-address error.
+
+    Returns:
+        Exception: ResourceAddressAlreadyExists for a matching constraint. Otherwise the
+            original error.
+    """
     reported = str(getattr(error, "orig", error))
     if any(marker in reported for marker in _ADDRESS_CONSTRAINT):
         return ResourceAddressAlreadyExists(kind=kind, name=name)
@@ -62,9 +72,6 @@ class AdminService:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    # ------------------------------------------------------------------
-    # Workflows
-    # ------------------------------------------------------------------
 
     async def list_workflows(self) -> list[Workflow]:
         async with AsyncSession(self._engine) as session:
@@ -86,12 +93,22 @@ class AdminService:
         concurrency: str,
         max_hops: int | None,
     ) -> Workflow | None:
-        """Change a workflow's properties.
+        """Update a workflow without changing its versions or steps.
 
-        The form for this was already written; there was no route behind it, so
-        a workflow's name, capabilities, concurrency and now its hop budget
-        could only ever be chosen when it was created. Versions and steps are
-        edited elsewhere and are untouched here.
+        Args:
+            wid (uuid.UUID): Workflow identity.
+            name (str): New display name.
+            description (str | None): Optional description.
+            enabled (bool): Whether the workflow is enabled.
+            capabilities (list[str]): Declared workflow capabilities.
+            concurrency (str): Blocking or non-blocking execution mode.
+            max_hops (int | None): Optional maximum step-hop count.
+
+        Returns:
+            Workflow | None: Updated workflow, or None when the identity does not exist.
+
+        Side Effects:
+            Writes workflow properties to PostgreSQL.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             workflow = await session.get(Workflow, wid)
@@ -165,9 +182,6 @@ class AdminService:
             await session.refresh(workflow)
             return workflow
 
-    # ------------------------------------------------------------------
-    # Workflow Versions
-    # ------------------------------------------------------------------
 
     async def get_version(self, vid: uuid.UUID) -> WorkflowVersion | None:
         async with AsyncSession(self._engine) as session:
@@ -182,7 +196,17 @@ class AdminService:
             return result.scalar_one_or_none()
 
     async def fork_latest_version(self, wid: uuid.UUID) -> WorkflowVersion:
-        """Create a new draft version, copying steps from the highest existing version."""
+        """Create a draft version from the latest workflow version.
+
+        Args:
+            wid (uuid.UUID): Workflow whose version is forked.
+
+        Returns:
+            WorkflowVersion: New draft version with copied steps, or an empty first version.
+
+        Side Effects:
+            Reads and writes workflow versions and steps in PostgreSQL.
+        """
         async with AsyncSession(self._engine) as session:
             result = await session.execute(
                 select(WorkflowVersion)
@@ -237,9 +261,6 @@ class AdminService:
             version.status = "active"
             await session.commit()
 
-    # ------------------------------------------------------------------
-    # Workflow Steps
-    # ------------------------------------------------------------------
 
     async def get_step(self, sid: uuid.UUID) -> WorkflowStep | None:
         async with AsyncSession(self._engine) as session:
@@ -301,7 +322,15 @@ class AdminService:
             await session.commit()
 
     async def save_graph(self, vid: uuid.UUID, transitions: dict[str, dict[str, str]]) -> None:
-        """Overwrite transitions for all steps in a version from the graph editor output."""
+        """Replace every step transition for a workflow version.
+
+        Args:
+            vid (uuid.UUID): Workflow version identity.
+            transitions (dict[str, dict[str, str]]): Transitions keyed by step identity.
+
+        Side Effects:
+            Writes step transitions to PostgreSQL.
+        """
         async with AsyncSession(self._engine) as session:
             result = await session.execute(
                 select(WorkflowStep).where(WorkflowStep.workflow_version_id == vid)
@@ -310,9 +339,6 @@ class AdminService:
                 step.transitions = transitions.get(str(step.workflow_step_id), {})
             await session.commit()
 
-    # ------------------------------------------------------------------
-    # Resources
-    # ------------------------------------------------------------------
 
     async def list_resources(self) -> list[Resource]:
         async with AsyncSession(self._engine) as session:
@@ -385,9 +411,6 @@ class AdminService:
             await session.refresh(resource)
             return resource
 
-    # ------------------------------------------------------------------
-    # Access policies
-    # ------------------------------------------------------------------
 
     async def list_policies(self) -> list[AccessPolicyRule]:
         async with AsyncSession(self._engine) as session:
@@ -467,10 +490,13 @@ class AdminService:
 
     @staticmethod
     def step_types() -> list[dict[str, object]]:
-        """Registered step types with the options each one understands.
+        """List registered workflow steps and their configuration options.
 
-        Lets the admin UI offer a typed form instead of asking an operator to
-        recall a step's config keys and hand-write JSON.
+        Returns:
+            list[dict[str, object]]: Step type descriptions for the Admin UI.
+
+        Side Effects:
+            Reads the step registry.
         """
         types: list[dict[str, object]] = []
         for step_type, step_cls in sorted(step_registry._registry.items()):
@@ -495,11 +521,28 @@ class AdminService:
         return types
 
     @staticmethod
-    def resource_kinds() -> list[dict[str, object]]:
-        """Registered tool kinds with the configuration each one understands.
+    def step_verdicts(step_type: str, config: dict[str, object]) -> tuple[str, ...]:
+        """List verdicts offered by a registered step with its current config.
 
-        Same idea as ``step_types``: the resource form can then offer typed
-        inputs instead of asking an operator to recall a tool's config keys.
+        Args:
+            step_type (str): Registered step type name.
+            config (dict[str, object]): Persisted step configuration.
+
+        Returns:
+            tuple[str, ...]: Step verdicts, or an empty tuple for unknown types.
+        """
+        step_cls = step_registry._registry.get(step_type)
+        return step_cls.verdicts(config) if step_cls is not None else ()
+
+    @staticmethod
+    def resource_kinds() -> list[dict[str, object]]:
+        """List registered tool kinds and their configuration options.
+
+        Returns:
+            list[dict[str, object]]: Resource kind descriptions for the Admin UI.
+
+        Side Effects:
+            Reads the tool registry.
         """
         kinds: list[dict[str, object]] = []
         seen: set[str] = set()
@@ -538,9 +581,9 @@ class ExecutionObservationService:
     here writes.
 
     It builds its own repository on the **general** engine rather than borrowing
-    the dispatcher's. The execution pool is deliberately tight — sized to the
-    worker's concurrency, no overflow, a five-second timeout — because it exists
-    to keep claims and heartbeats prompt. An operator holding a page open on a
+    the dispatcher's. The execution pool is sized to the worker's concurrency,
+    with no overflow and a five-second timeout, to keep claims and heartbeats
+    prompt. An operator holding a page open on a
     refresh interval would compete with the worker loop for those connections
     and could stall the very claims the page is there to display. Same database,
     different pool.
@@ -555,7 +598,17 @@ class ExecutionObservationService:
         self._executions = SqlAlchemyExecutionRepository(engine)
 
     async def _workflow_names(self, workflow_ids: set[uuid.UUID]) -> dict[uuid.UUID, str]:
-        """Names for a page of runs — an execution stores only the id."""
+        """Resolve names for a page of execution records.
+
+        Args:
+            workflow_ids (set[uuid.UUID]): Workflow identities referenced by the page.
+
+        Returns:
+            dict[uuid.UUID, str]: Workflow names keyed by identity.
+
+        Side Effects:
+            Reads workflow rows from PostgreSQL.
+        """
         if not workflow_ids:
             return {}
         async with AsyncSession(self._engine) as session:
@@ -649,7 +702,7 @@ class ExecutionObservationService:
 class RunState:
     """What a *run* is doing, which is not always what its execution is doing.
 
-    A distribution flow submits one child per document batch and ends — it must,
+    A distribution flow submits one child per document batch and ends. It must,
     because waiting would hold a worker for as long as the corpus takes. Its own
     execution therefore succeeds within a second or two while the work it handed
     out has barely started. Reporting that execution's status as the run's is how
@@ -666,7 +719,15 @@ class RunState:
 
 
 def run_state(record: ExecutionRecord, fan_out: FanOutSummary | None) -> RunState:
-    """Derive what to show for one run from its execution and its children."""
+    """Summarize a run using its execution and child results.
+
+    Args:
+        record (ExecutionRecord): Top-level execution record.
+        fan_out (FanOutSummary | None): Optional summary of child executions.
+
+    Returns:
+        RunState: Display state for the whole run.
+    """
     status = record.status
     if fan_out is None or fan_out.total == 0:
         return RunState(status.value, status.value, "")
@@ -696,12 +757,13 @@ def run_state(record: ExecutionRecord, fan_out: FanOutSummary | None) -> RunStat
 
 
 def _aware(moment: datetime | None) -> datetime | None:
-    """Read a stored timestamp as UTC when the backend dropped its offset.
+    """Restore UTC to timestamps returned without an offset.
 
-    The column is timezone-aware and Postgres hands it back that way. SQLite has
-    nowhere to keep the offset, so the same value returns naive — and comparing
-    it against ``now`` would raise rather than be wrong, which at least is loud.
-    Everything written here is UTC, so saying so is a restoration, not a guess.
+    Args:
+        moment (datetime | None): Stored timestamp or None.
+
+    Returns:
+        datetime | None: Aware UTC timestamp, or None when no timestamp exists.
     """
     if moment is None:
         return None
@@ -712,29 +774,27 @@ def _aware(moment: datetime | None) -> datetime | None:
 class RunTiming:
     """How long a run took, measured over the whole run rather than one execution.
 
-    A distribution flow's execution starts and completes in a second or two; the
+    A distribution flow's execution starts and completes in a second or two. The
     corpus it handed out takes hours. Its ``completed_at`` is therefore not when
     the ingest finished, and reading it as such is the same mistake as reading
-    its status as the run's — the run is over when the last child is.
+    its status as the run's because the run ends when the last child does.
     """
 
     started_at: datetime | None
     finished_at: datetime | None
     """When the whole run ended. None while anything is still to finish."""
     elapsed: timedelta | None
-    """Start to finish — or to now, while it is still going."""
+    """Time from start to finish, or to now for a running execution."""
     running: bool
     child_time: timedelta | None
-    """Time the children spent between them; None for a run that never fanned out."""
+    """Combined child execution time, or None without fan-out."""
 
     @property
     def parallel_factor(self) -> float | None:
-        """How much more work was done than time passed.
+        """Estimate child work relative to elapsed run time.
 
-        The gap between the two durations is the whole point of fanning out, and
-        stating it saves the reader dividing: forty minutes of child time inside
-        a six-minute run is roughly seven workers' worth. Below 1.1 there is
-        nothing to report — one worker did it, or the run spent its time waiting.
+        Returns:
+            float | None: Child-time to elapsed-time ratio, or None below 1.1 or without timing.
         """
         if self.child_time is None or self.elapsed is None:
             return None
@@ -748,7 +808,19 @@ class RunTiming:
 def run_timing(
     record: ExecutionRecord, fan_out: FanOutSummary | None, *, now: datetime | None = None
 ) -> RunTiming:
-    """Derive a run's timing from its execution and, if it fanned out, its children."""
+    """Measure elapsed time for a run and its children.
+
+    Args:
+        record (ExecutionRecord): Top-level execution record.
+        fan_out (FanOutSummary | None): Optional summary of child executions.
+        now (datetime | None): Optional clock value for an unfinished run.
+
+    Returns:
+        RunTiming: Whole-run timing and accumulated child time.
+
+    Side Effects:
+        Reads the clock when now is omitted.
+    """
     moment = now or datetime.now(UTC)
     # The parent is the honest beginning: no child can start before it did. It
     # falls back to submission time for a run still waiting to be claimed.
@@ -765,7 +837,7 @@ def run_timing(
         )
 
     finished = _aware(fan_out.finished_at)
-    # A child that outlives the parent decides the end; a parent that somehow
+    # A child that outlives the parent decides the end. A parent that somehow
     # outlives every child decides it instead. Whichever is later is the finish.
     parent_completed = _aware(record.completed_at)
     if finished is not None and parent_completed is not None:

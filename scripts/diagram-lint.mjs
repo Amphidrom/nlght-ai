@@ -6,7 +6,8 @@
 //   2. The visible box label is `series.data[].name`. A `rectGraph.nodes[].label`
 //      that differs from it is never shown, so a technical id ends up on screen.
 //
-// Cheap enough to run on every edit; `render-check.mjs` remains the proof.
+// Run these cheap static checks on every edit. Use `render-check.mjs` to
+// verify the browser output.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -21,7 +22,7 @@ const walk = (dir) => readdirSync(dir).flatMap((e) => {
 const problems = [];
 
 // A duplicate key in an object literal is silently kept as the *last* one, so
-// inserting `label: { color: … }` above an existing `label: { show: true, … }`
+// inserting one `label` object above an existing `label` object
 // drops the insertion without a word. Scan brace frames for repeated keys.
 function duplicateKeys(source, where, name) {
   const frames = [new Map()];
@@ -45,7 +46,7 @@ function duplicateKeys(source, where, name) {
       const frame = frames[frames.length - 1];
       const line = source.slice(0, i).split('\n').length;
       if (frame.has(key[1])) {
-        problems.push(`${where}: ${name} sets "${key[1]}" twice in one object (lines ${frame.get(key[1])} and ${line}) — the first is silently discarded`);
+        problems.push(`${where}: ${name} sets "${key[1]}" twice in one object (lines ${frame.get(key[1])} and ${line}). The first is silently discarded`);
       } else {
         frame.set(key[1], line);
       }
@@ -68,7 +69,7 @@ for (const file of walk(BASE)) {
       const keys = Object.keys(scope);
       return new Function(...keys, `return ${literal};`)(...keys.map((k) => scope[k]));
     } catch (error) {
-      problems.push(`${where}: ${label} is not valid JavaScript — ${error.message}`);
+      problems.push(`${where}: ${label} is not valid JavaScript: ${error.message}`);
       return undefined;
     }
   };
@@ -97,32 +98,20 @@ for (const file of walk(BASE)) {
       const entries = [option.legend.data ?? []].flat().map((d) => d?.name ?? d).filter(Boolean);
       const unbound = entries.filter((e) => !bindable.has(e));
       if (entries.length && unbound.length === entries.length) {
-        problems.push(`${where}: ${name} configures a legend that binds to nothing — it will draw no items (a graph series needs series.categories, or an empty named series per entry)`);
+        problems.push(`${where}: ${name} configures a legend that binds to nothing. It will draw no items (a graph series needs series.categories, or an empty named series per entry)`);
       } else if (unbound.length) {
         problems.push(`${where}: ${name} legend entries bind to nothing: ${unbound.join(', ')}`);
       }
     }
 
-    // A graph series refuses duplicate node names at runtime — it throws
+    // Duplicate graph node names prevent the figure from rendering because the runtime throws
     // "Graph nodes have duplicate name or id" and the figure never renders.
     for (const graph of graphs) {
       const seen = new Set();
       for (const item of graph.data ?? []) {
         const id = item?.name ?? item;
         if (typeof id !== 'string') continue;
-        if (seen.has(id)) problems.push(`${where}: ${name} has two graph nodes named "${id}" — the series will not render`);
-        seen.add(id);
-      }
-    }
-
-    // A graph series refuses duplicate node names at runtime — it throws
-    // "Graph nodes have duplicate name or id" and the figure never renders.
-    for (const graph of graphs) {
-      const seen = new Set();
-      for (const item of graph.data ?? []) {
-        const id = item?.name ?? item;
-        if (typeof id !== 'string') continue;
-        if (seen.has(id)) problems.push(`${where}: ${name} has two graph nodes named "${id}" — the series will not render`);
+        if (seen.has(id)) problems.push(`${where}: ${name} has two graph nodes named "${id}". The series will not render`);
         seen.add(id);
       }
     }
@@ -137,17 +126,17 @@ for (const file of walk(BASE)) {
     const names = (graphs[0]?.data ?? []).map((d) => d?.name ?? d);
     const nodes = rectGraph.nodes ?? [];
     if (names.length !== nodes.length) {
-      problems.push(`${where}: ${name} has ${names.length} series data entries but ${nodes.length} rectGraph nodes — the compiler pairs them by index`);
+      problems.push(`${where}: ${name} has ${names.length} series data entries but ${nodes.length} rectGraph nodes. The compiler pairs them by index`);
       continue;
     }
     nodes.forEach((node, index) => {
       if (node.label !== undefined && node.label !== names[index]) {
-        problems.push(`${where}: ${name} node "${node.id}" carries label "${node.label}" but the drawn text is the series name "${names[index]}" — a technical id would be shown`);
+        problems.push(`${where}: ${name} node "${node.id}" carries label "${node.label}" but the drawn text is the series name "${names[index]}". A technical id would be shown`);
       }
     });
   }
 }
 
-for (const problem of problems) console.log(`✗ ${problem}`);
+for (const problem of problems) console.log(`FAIL ${problem}`);
 console.log(problems.length ? `\n${problems.length} problem(s).` : 'No dead legends, no hidden labels.');
 process.exit(problems.length ? 1 : 0);

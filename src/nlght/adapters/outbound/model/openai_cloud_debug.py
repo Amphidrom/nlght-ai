@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 from nlght.adapters.outbound.model._tool_helpers import (
     append_openai_tool_turn,
+    context_origin_of,
     contract_to_openai_tool,
+    execute_tool_call,
     terminal_tool_names,
 )
 from nlght.adapters.outbound.model.openai_cloud import _to_openai_messages
@@ -24,6 +26,7 @@ from nlght.ports.outbound.signal_emitter import SignalEmitter
 if TYPE_CHECKING:
     from nlght.core.metering.context import MeteringContext
     from nlght.core.model.budget import TokenBudget
+    from nlght.core.tools.tool import ToolOutput
     from nlght.ports.outbound.tool_catalog import ToolCatalog
 
 logger = logging.getLogger(__name__)
@@ -46,7 +49,7 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 
 class OpenAICloudModelClient(ModelProviderBackend):
-    """OpenAI cloud model provider — one instance per configured provider.
+    """OpenAI cloud model provider with one instance per configuration.
 
     Requires ``pip install 'nlght-ai[openai]'``.
 
@@ -61,6 +64,7 @@ class OpenAICloudModelClient(ModelProviderBackend):
         api_key: str,
         default_model: str,
         base_url: str = DEFAULT_OPENAI_BASE_URL,
+        temperature: float | None = None,
     ) -> None:
         try:
             from openai import AsyncOpenAI  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
@@ -79,9 +83,18 @@ class OpenAICloudModelClient(ModelProviderBackend):
                 "Install with: pip install 'nlght-ai[openai]'"
             ) from exc
         self._default_model = default_model
+        self._temperature = temperature
 
     async def list_models(self) -> list[ModelInfo]:
-        """Fetch available models from the OpenAI /v1/models endpoint."""
+        """List available models from the OpenAI endpoint.
+
+        Returns:
+            list[ModelInfo]: Remote model IDs, or configured fallback models
+            when the request fails.
+
+        Side Effects:
+            Calls the remote models endpoint and logs failures.
+        """
         try:
             page = await self._client.models.list()
             return [ModelInfo(name=m.id) for m in page.data]
@@ -126,9 +139,6 @@ class OpenAICloudModelClient(ModelProviderBackend):
         logger.info("token_budget.window | model=%s window=%d source=static", resolved, window)
         return _Budget(window, client_max_tokens=client_max_tokens)
 
-    # ------------------------------------------------------------------
-    # Internal transport
-    # ------------------------------------------------------------------
 
     async def _call(
         self,
@@ -282,13 +292,9 @@ class OpenAICloudModelClient(ModelProviderBackend):
         yield ModelStreamEvent(kind="done")
 
 
-# ---------------------------------------------------------------------------
-# BoundOpenAICloudModelClient
-# ---------------------------------------------------------------------------
-
-
 class BoundOpenAICloudModelClient(ModelClient):
-    """Request-scoped ModelClient for OpenAI — implements the ModelClient port."""
+    """Request-scoped OpenAI client implementing the ModelClient port."""
+
 
     def __init__(
         self,
@@ -311,10 +317,16 @@ class BoundOpenAICloudModelClient(ModelClient):
 
     @property
     def token_budget(self) -> TokenBudget | None:
-        """The budget this client will enforce, so a prompt is built to it."""
+        """Expose the budget enforced by this model client.
+
+        Returns:
+            TokenBudget | None: A TokenBudget or None when no budget is configured.
+        """
         return self._token_budget
 
-    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+    async def call(self, messages: Sequence[MessageLike]) -> None:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_openai_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
@@ -379,7 +391,7 @@ class BoundOpenAICloudModelClient(ModelClient):
                 "openai.call.tool_loop | round=%d calls=%d dispatch_names=%s",
                 _round, len(tool_calls_raw), [tc["name"] for tc in tool_calls_raw],
             )
-            results = [await self._tool_catalog.execute(tc) for tc in tool_calls_raw]
+            results = [await execute_tool_call(self._tool_catalog, tc, context_origin) for tc in tool_calls_raw]
             current = append_openai_tool_turn(current, tool_calls_raw, results, content)
             if terminal_names and any(tc.get("name") in terminal_names for tc in tool_calls_raw):
                 break
@@ -404,9 +416,9 @@ class BoundOpenAICloudModelClient(ModelClient):
         messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
-        *,
-        temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_openai_messages(messages)
         # Derive tools from catalog if none explicitly passed
         effective_tools = tools
@@ -416,7 +428,7 @@ class BoundOpenAICloudModelClient(ModelClient):
 
         input_t = output_t = 0
 
-        # Without a catalog the caller handles tool calls — pass all events through.
+        # Pass tool-call events through when no catalog owns the tool loop.
         if self._tool_catalog is None:
             async for event in self._backend._stream_events(
                 messages, self._model, tools=effective_tools, tool_choice=tool_choice, temperature=temperature,
@@ -443,7 +455,7 @@ class BoundOpenAICloudModelClient(ModelClient):
                     logger.warning("metering.record_tokens.failed | %s", exc)
             return
 
-        # With catalog: internal tool loop — only token/done reach the caller.
+        # With catalog: internal tool loop, only token/done reach the caller.
         current_messages = list(messages)
         terminal_names = terminal_tool_names(self._tool_catalog)
         for _round in range(10):
@@ -479,7 +491,7 @@ class BoundOpenAICloudModelClient(ModelClient):
                 "openai.stream.tool_loop | round=%d calls=%d names=%s",
                 _round, len(tool_calls_raw), [tc["name"] for tc in tool_calls_raw],
             )
-            results = [await self._tool_catalog.execute(tc) for tc in tool_calls_raw]
+            results = [await execute_tool_call(self._tool_catalog, tc, context_origin) for tc in tool_calls_raw]
             for tc, result_text in zip(tool_calls_raw, results, strict=False):
                 logger.info("openai.tool_call | name=%s chars=%d", tc["name"], len(result_text))
             current_messages = append_openai_tool_turn(current_messages, tool_calls_raw, results, assistant_text)
@@ -507,7 +519,7 @@ class BoundOpenAICloudModelClient(ModelClient):
         self,
         messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
-        results: list[str],
+        results: Sequence[str | ToolOutput],
         assistant_text: str = "",
     ) -> list[CanonicalMessage]:
         return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

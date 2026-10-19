@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
+
+from nlght.core.model.messages import MessageLike, origin_of
+from nlght.core.model.trust import UNANNOTATED, ContentOrigin
 
 if TYPE_CHECKING:
     from nlght.core.tools.tool import ToolParameter
@@ -15,13 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 def terminal_tool_names(tool_catalog: ToolCatalog | None) -> set[str]:
-    """Names of tools whose invocation ends the model turn.
+    """Read terminal tool names from the catalog contract.
 
-    ``terminal`` is contract-level metadata only — it is never serialised into the
-    tool schema sent to a provider (see ``contract_to_openai_tool``), so honouring
-    it stays fully wire-compatible with OpenAI / Anthropic / MCP tool definitions.
-    A client uses this set to stop its tool loop (and, where the wire protocol
-    allows, close the stream) once such a tool is called.
+    Args:
+        tool_catalog (ToolCatalog | None): Active tool catalog, if one is bound.
+
+    Returns:
+        set[str]: Names of calls that end the current model turn.
+
+    Notes:
+        Terminal metadata remains outside provider wire schemas.
     """
     if tool_catalog is None:
         return set()
@@ -29,7 +36,14 @@ def terminal_tool_names(tool_catalog: ToolCatalog | None) -> set[str]:
 
 
 def _param_to_json_schema(p: ToolParameter) -> dict[str, Any]:
-    """Lower a single ToolParameter to a JSON-Schema property object."""
+    """Lower one tool parameter to a JSON Schema property.
+
+    Args:
+        p (ToolParameter): Tool parameter contract.
+
+    Returns:
+        dict[str, Any]: JSON Schema property for the parameter.
+    """
     prop: dict[str, Any] = {"type": getattr(p, "type", None) or "string"}
     desc = getattr(p, "description", "")
     if desc:
@@ -44,12 +58,16 @@ def _param_to_json_schema(p: ToolParameter) -> dict[str, Any]:
 
 
 def params_to_json_schema(parameters: list[ToolParameter] | None) -> dict[str, Any]:
-    """Lower a list[ToolParameter] to a standard JSON-Schema object.
+    """Lower tool parameters to one canonical JSON Schema object.
 
-    This is the single canonical lowering: every model client serialises tools
-    through here, so the wire schema is plain JSON Schema (``items``/``enum``/
-    nested) — deckungsgleich mit OpenAI/Anthropic/MCP.  Parameters without
-    ``enum``/``items`` produce exactly the same schema as before.
+    Args:
+        parameters (list[ToolParameter] | None): Parameter contracts, or None for an empty schema.
+
+    Returns:
+        dict[str, Any]: Object schema with properties and required fields.
+
+    Notes:
+        All model clients use this lowering for nested items and enums.
     """
     properties: dict[str, Any] = {}
     required: list[str] = []
@@ -61,7 +79,14 @@ def params_to_json_schema(parameters: list[ToolParameter] | None) -> dict[str, A
 
 
 def contract_to_openai_tool(contract: ToolContract) -> dict[str, Any]:
-    """Convert a ToolContract to an OpenAI-format tool definition."""
+    """Serialize a tool contract in OpenAI tool format.
+
+    Args:
+        contract (ToolContract): Tool contract to expose to the model.
+
+    Returns:
+        dict[str, Any]: Provider tool definition containing its JSON Schema.
+    """
     return {
         "type": "function",
         "function": {
@@ -72,9 +97,48 @@ def contract_to_openai_tool(contract: ToolContract) -> dict[str, Any]:
     }
 
 
-async def execute_tool_call(tool_catalog: ToolCatalog, tc: dict[str, Any]) -> str:
-    """Thin backward-compatible wrapper — delegates to ``catalog.execute(tc)``."""
-    return await tool_catalog.execute(tc)
+def context_origin_of(messages: Sequence[MessageLike]) -> ContentOrigin:
+    """Combine the origins of messages about to reach the model.
+
+    Args:
+        messages (Sequence[MessageLike]): Workflow messages or raw provider messages.
+
+    Returns:
+        ContentOrigin: Combined content origin. Unreadable messages remain unannotated.
+
+    Notes:
+        Provenance decoding does not interrupt the tool loop.
+    """
+    try:
+        return origin_of(messages)
+    except (TypeError, ValueError):
+        return UNANNOTATED
+
+
+async def execute_tool_call(
+    tool_catalog: ToolCatalog,
+    tc: dict[str, Any],
+    context_origin: ContentOrigin | None = None,
+) -> str:
+    """Execute a model-proposed call through the catalog.
+
+    Args:
+        tool_catalog (ToolCatalog): Catalog that authorizes and executes the call.
+        tc (dict[str, Any]): Provider tool-call payload.
+        context_origin (ContentOrigin | None): Origin of content the model read before
+            calling the tool.
+
+    Returns:
+        str: Text returned by the tool.
+
+    Side Effects:
+        Executes the call and records input and result origins when supported.
+    """
+    execute_with_origin = getattr(tool_catalog, "execute_with_origin", None)
+    if execute_with_origin is None:
+        return await tool_catalog.execute(tc)
+    output = await execute_with_origin(tc, context_origin=context_origin)
+    return str(output.content)
 
 
 def append_ollama_native_tool_turn(
@@ -83,16 +147,25 @@ def append_ollama_native_tool_turn(
     results: list[str],
     assistant_text: str = "",
 ) -> list[dict[str, Any]]:
-    """Append tool turns in Ollama native /api/chat format.
+    """Append tool calls and results in Ollama native chat format.
 
-    Ollama expects tool_calls without id/type, arguments as a dict (not JSON string),
-    and tool result messages as plain {"role": "tool", "content": "..."}.
+    Args:
+        messages (list[dict[str, Any]]): Existing provider conversation.
+        tool_calls_raw (list[dict[str, Any]]): Tool calls proposed by the model.
+        results (list[str]): Tool results paired with the calls.
+        assistant_text (str): Assistant text accompanying the calls.
+
+    Returns:
+        list[dict[str, Any]]: Messages with native assistant calls and plain tool results.
+
+    Notes:
+        Native calls use dictionary arguments without OpenAI id/type fields.
     """
     tc_list: list[dict[str, Any]] = []
     for tc in tool_calls_raw:
         entry: dict[str, Any] = {"function": {"name": tc["name"], "arguments": tc.get("input", {})}}
         # Provider-opaque continuation token (Gemini 3.x thought_signature, base64).
-        # Other providers ignore the extra key; Google re-emits it in
+    # Other providers ignore the extra key. Google re-emits it in
         # _to_google_contents. Kept at the tool_call level so it survives the
         # canonical round-trip.
         if tc.get("thought_signature"):
@@ -110,7 +183,17 @@ def append_openai_tool_turn(
     results: list[str],
     assistant_text: str = "",
 ) -> list[dict[str, Any]]:
-    """Append assistant-with-tool_calls + tool-result messages (canonical OpenAI format)."""
+    """Append tool calls and results in OpenAI chat format.
+
+    Args:
+        messages (list[dict[str, Any]]): Existing provider conversation.
+        tool_calls_raw (list[dict[str, Any]]): Tool calls proposed by the model.
+        results (list[str]): Tool results paired with the calls.
+        assistant_text (str): Assistant text accompanying the calls.
+
+    Returns:
+        list[dict[str, Any]]: Messages with assistant tool calls and paired tool results.
+    """
     tc_list = [
         {
             "id": tc["id"],

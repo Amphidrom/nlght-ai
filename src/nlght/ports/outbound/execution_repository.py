@@ -26,11 +26,16 @@ class ExecutionRepository(Protocol):
     async def get(self, execution_id: uuid.UUID) -> ExecutionRecord | None: ...
 
     async def fan_out_summary(self, parent_execution_id: uuid.UUID) -> FanOutSummary:
-        """Count the children of one fanned-out run by state.
+        """Count child executions by state without loading their records.
 
-        An aggregate rather than the records themselves: a run may fan out a
-        document per child, and asking whether the corpus is done must not mean
-        loading the corpus.
+        Args:
+            parent_execution_id (uuid.UUID): Parent execution ID.
+
+        Returns:
+            FanOutSummary: Fan-out summary for that parent.
+
+        Side Effects:
+            Reads child execution states.
         """
         ...
 
@@ -38,8 +43,8 @@ class ExecutionRepository(Protocol):
 
     # -- observation ---------------------------------------------------------
     #
-    # Everything below is read-only and exists so a queue that decides what runs
-    # can be looked at. The dispatch path above never calls it.
+    # Keep observation reads separate from dispatch so listing work cannot
+    # affect the execution claim path.
 
     async def list_runs(
         self,
@@ -49,11 +54,19 @@ class ExecutionRepository(Protocol):
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[ExecutionRecord, ...]:
-        """Top-level runs, newest first — the ones no other execution fanned out.
+        """Page top-level runs without flooding results with children.
 
-        A fanned-out corpus is one run with hundreds of children; listing every
-        execution would bury the hundred runs that matter under one. Children
-        are reached through their parent.
+        Args:
+            status (ExecutionStatus | None): Optional execution-status filter.
+            workflow_id (uuid.UUID | None): Optional workflow filter.
+            limit (int): Maximum page size.
+            offset (int): Number of top-level runs to skip.
+
+        Returns:
+            tuple[ExecutionRecord, ...]: Matching top-level executions in newest-first order.
+
+        Side Effects:
+            Reads execution records.
         """
         ...
 
@@ -63,39 +76,93 @@ class ExecutionRepository(Protocol):
         status: ExecutionStatus | None = None,
         workflow_id: uuid.UUID | None = None,
     ) -> int:
-        """How many top-level runs match, so a listing can be paged."""
+        """Count top-level runs for observation paging.
+
+        Args:
+            status (ExecutionStatus | None): Optional execution-status filter.
+            workflow_id (uuid.UUID | None): Optional workflow filter.
+
+        Returns:
+            int: Number of matching runs.
+
+        Side Effects:
+            Reads execution records.
+        """
         ...
 
     async def fan_out_summaries(
         self, parent_execution_ids: tuple[uuid.UUID, ...]
     ) -> dict[uuid.UUID, FanOutSummary]:
-        """``fan_out_summary`` for a whole page of runs in one query.
+        """Summarize child states for multiple runs in one query.
 
-        A listing shows the child state of every run on it; asking per row would
-        be one query per run, which is the difference between a page that loads
-        and one that crawls.
+        Args:
+            parent_execution_ids (tuple[uuid.UUID, ...]): Parent execution IDs.
+
+        Returns:
+            dict[uuid.UUID, FanOutSummary]: Fan-out summary keyed by parent ID.
+
+        Side Effects:
+            Reads child execution states.
         """
         ...
 
     async def list_children(
         self, parent_execution_id: uuid.UUID, *, limit: int = 50, offset: int = 0
     ) -> tuple[ExecutionRecord, ...]:
-        """The children of one run, oldest first — the order they were handed out."""
+        """Page child executions in submission order.
+
+        Args:
+            parent_execution_id (uuid.UUID): Parent execution to inspect.
+            limit (int): Maximum page size.
+            offset (int): Number of child runs to skip.
+
+        Returns:
+            tuple[ExecutionRecord, ...]: Child executions in oldest-first order.
+
+        Side Effects:
+            Reads execution records.
+        """
         ...
 
     async def attempts(self, execution_id: uuid.UUID) -> tuple[ExecutionAttempt, ...]:
-        """Every try at one execution, in order, with the worker that held it."""
+        """List the attempts of one execution.
+
+        Args:
+            execution_id (uuid.UUID): Execution ID.
+
+        Returns:
+            tuple[ExecutionAttempt, ...]: Ordered attempts with worker attribution.
+
+        Side Effects:
+            Reads attempt records.
+        """
         ...
 
     async def status_counts(self, *, since: datetime | None = None) -> ExecutionStatusCounts:
-        """Executions per status, optionally only those created since a moment."""
+        """Count executions by status for observation.
+
+        Args:
+            since (datetime | None): Optional earliest creation time.
+
+        Returns:
+            ExecutionStatusCounts: Counts grouped by execution status.
+
+        Side Effects:
+            Reads execution records.
+        """
         ...
 
     async def list_workers(self, *, now: datetime | None = None) -> tuple[WorkerStatus, ...]:
-        """Registered workers with their capabilities and current load.
+        """List worker capabilities and current load.
 
-        ``now`` decides which leases count as expired; a caller that passes its
-        own clock gets a consistent picture across several calls.
+        Args:
+            now (datetime | None): Optional clock value for consistent lease expiry checks.
+
+        Returns:
+            tuple[WorkerStatus, ...]: Registered worker status records.
+
+        Side Effects:
+            Reads worker registrations and leases.
         """
         ...
 

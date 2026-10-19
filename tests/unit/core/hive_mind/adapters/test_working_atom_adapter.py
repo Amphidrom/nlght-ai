@@ -1,11 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""WorkingAtom → MentalElement.
+"""Adapt working atoms into mental elements.
 
-Two judgements live here: which atoms read as context rather than as planning,
-and how an atom's embedded `[kind:…]` prefix is normalised. Both used to be in
-the renderer.
+The adapter assigns presentation context and normalizes embedded kind prefixes.
 """
 
 from __future__ import annotations
@@ -57,7 +55,7 @@ def test_readable_atoms_become_context_and_the_rest_become_planning() -> None:
 
 def test_an_embedded_kind_prefix_is_shown_once_and_not_twice() -> None:
     # The content may already carry the prefix from whoever wrote it. Stripping
-    # and re-adding is presentation embedded in stored data — not fixed here,
+    # and re-adding is presentation embedded in stored data, not fixed here,
     # but not lost either.
     element = context_atom_elements(_model(
         _atom("[kind:decision] | we chose Postgres", tags=["kind:decision"])
@@ -81,12 +79,7 @@ def test_tags_filter_which_atoms_are_offered_at_all() -> None:
 
 
 def test_the_reference_resolver_runs_before_any_cost_is_computed() -> None:
-    """The placement is a correctness matter, not a tidiness one.
-
-    A resolver may return different text — and a different number of entries.
-    Running it after an element is priced would make every cost a lie and the
-    budget guarantee with it, so the cost must be of what the resolver produced.
-    """
+    """Resolve references before assigning representation token costs."""
     from nlght.core.hive_mind.models import estimate_tokens
 
     resolved = context_atom_elements(

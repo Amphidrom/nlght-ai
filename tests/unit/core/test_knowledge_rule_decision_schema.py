@@ -1,21 +1,12 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""`rule` and `decision` gain a subject and a property, canonically.
+"""Check canonical identity fields on rule and decision payloads.
 
-Both kinds were identified by free text — a rule by its whole sentence, a
-decision by two of them — so two runs agreed only when the model answered word
-for word. `pattern` has had the right shape all along: a short name beside a
-mutable description. These two get the same, and `fact` already had it.
-
-    rule:     subject + rule_property   identify;  rule_text is the body
-    decision: subject + decision_type   identify;  decision and effect are the body
-
-**The fields are introduced here; nothing is re-identified yet.** Identity still
-comes from content, so these tests are about the schema — that the fields exist,
-that they are canonical, and that assertions written before them still load.
-Re-deriving identity from them belongs with entities, variants and lineage, and
-doing it earlier would retract a corpus on a matcher that is not yet built.
+Rule entity keys use subject and rule_property. Decision entity keys use
+subject and decision_type. Their body text remains separate from those fields.
+Older payloads without the field pairs still load, though they cannot supply
+those keys until the missing identity fields are resolved.
 """
 
 from __future__ import annotations
@@ -28,9 +19,6 @@ from nlght.core.knowledge import (
     canonical_term,
 )
 
-# ---------------------------------------------------------------------------
-# Canonicalisation — the same value however it was written
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "written",
@@ -64,10 +52,6 @@ def test_a_blank_term_is_refused() -> None:
         canonical_term("   ")
 
 
-# ---------------------------------------------------------------------------
-# rule
-# ---------------------------------------------------------------------------
-
 def test_a_rule_carries_a_subject_and_a_property_beside_its_text() -> None:
     payload = RulePayload(
         rule_text="Expenses above CHF 500 require approval.",
@@ -97,8 +81,7 @@ def test_two_rules_about_one_subject_keep_their_properties_apart() -> None:
 
 
 def test_a_reworded_rule_keeps_the_same_subject_and_property() -> None:
-    # The pair a later entity key is built from. Two phrasings, one business
-    # question — which is what makes the pair worth having.
+    # The pair names one business question across two phrasings.
     monday = RulePayload(
         rule_text="Access tokens must not be written to application logs.",
         subject="access_token", rule_property="logging_prohibition",
@@ -110,10 +93,6 @@ def test_a_reworded_rule_keeps_the_same_subject_and_property() -> None:
 
     assert (monday.subject, monday.rule_property) == (tuesday.subject, tuesday.rule_property)
 
-
-# ---------------------------------------------------------------------------
-# decision
-# ---------------------------------------------------------------------------
 
 def test_a_decision_carries_a_subject_and_a_type() -> None:
     payload = DecisionPayload(
@@ -139,10 +118,6 @@ def test_two_decisions_about_one_subject_keep_their_types_apart() -> None:
 
     assert technology.decision_type != retention.decision_type
 
-
-# ---------------------------------------------------------------------------
-# What was written before the fields existed
-# ---------------------------------------------------------------------------
 
 def test_a_rule_written_before_the_fields_still_loads() -> None:
     """The reason the fields are optional rather than required.
@@ -190,21 +165,11 @@ def test_a_decision_may_not_carry_half_the_pair() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# The line that is deliberately not crossed yet
-# ---------------------------------------------------------------------------
+def test_fingerprint_includes_body_even_with_identity_fields() -> None:
+    """Change the content fingerprint when a rule body is reworded.
 
-def test_identity_does_not_use_the_new_fields_yet() -> None:
-    """Schema migration is not identity migration.
-
-    The fields exist and are extracted; assertions already stored are not
-    re-identified. Deriving identity from them now would rewrite what every
-    existing assertion is, against a matcher that is not built — so the corpus
-    would be retracted and re-reviewed on a mechanism nobody has tested.
-
-    This test is the guard on that ordering. When entity keys land it fails, and
-    failing is the reminder to do the migration deliberately rather than as a
-    side effect.
+    Rule entity identity uses the canonical field pair. A fingerprint still
+    addresses the complete extracted content.
     """
     from nlght.core.knowledge import ExtractedItem
 

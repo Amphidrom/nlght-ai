@@ -38,19 +38,19 @@ class OllamaHttpProtocolAdapter:
     """Registers Ollama-native API routes on the gateway.
 
     Exposes the Ollama ``/api/`` surface:
-    - ``GET  /api/tags``      — list models (via ModelProviderBackend.list_models)
-    - ``GET  /api/ps``        — running models (RunningModelsCapable or empty list)
-    - ``GET  /api/version``   — version (NativeProxyCapable or 501)
-    - ``POST /api/show``      — model info (NativeProxyCapable or 501)
-    - ``POST /api/generate``  — generate (NativeProxyCapable or 501)
-    - ``POST /api/chat``      — chat (workflow executor or direct ModelClient inference)
+    - ``GET  /api/tags``: list models (via ModelProviderBackend.list_models)
+    - ``GET  /api/ps``: running models (RunningModelsCapable or empty list)
+    - ``GET  /api/version``: version (NativeProxyCapable or 501)
+    - ``POST /api/show``: model info (NativeProxyCapable or 501)
+    - ``POST /api/generate``: generate (NativeProxyCapable or 501)
+    - ``POST /api/chat``: chat (workflow executor or direct ModelClient inference)
 
     Model listing and running-model queries go through the configured
     ModelProviderBackend instead of an HTTP proxy, so any provider kind
     (Ollama, Anthropic, OpenAI, Google) can back an Ollama-protocol adapter.
 
     Ollama-native-only endpoints (generate, show, version) are proxied via
-    ``NativeProxyCapable.native_base_url`` when available; otherwise 501.
+    ``NativeProxyCapable.native_base_url`` when available. Otherwise 501.
     """
 
     def __init__(
@@ -65,9 +65,6 @@ class OllamaHttpProtocolAdapter:
         self._workflow_mapping: dict[str, str] = workflow_mapping or {}
         self._model_provider_name = model_provider_name
 
-    # ------------------------------------------------------------------
-    # Router
-    # ------------------------------------------------------------------
 
     def build_router(self) -> APIRouter:
         router = APIRouter(prefix="/api")
@@ -99,9 +96,6 @@ class OllamaHttpProtocolAdapter:
 
         return router
 
-    # ------------------------------------------------------------------
-    # GET /api/tags
-    # ------------------------------------------------------------------
 
     async def _list_models(self, request: Request) -> JSONResponse:
         if self._model_backend is None:
@@ -121,9 +115,6 @@ class OllamaHttpProtocolAdapter:
             )
         return JSONResponse(content={"models": entries})
 
-    # ------------------------------------------------------------------
-    # GET /api/ps
-    # ------------------------------------------------------------------
 
     async def _list_running(self, request: Request) -> JSONResponse:
         if self._model_backend is not None and isinstance(
@@ -145,9 +136,6 @@ class OllamaHttpProtocolAdapter:
             return JSONResponse(content={"models": entries})
         return JSONResponse(content={"models": []})
 
-    # ------------------------------------------------------------------
-    # POST /api/chat  — workflow executor or direct inference
-    # ------------------------------------------------------------------
 
     async def _handle_chat(self, request: Request) -> Response:
         container = getattr(request.app.state, "container", None)
@@ -198,7 +186,20 @@ class OllamaHttpProtocolAdapter:
         return await self._direct_inference(request)
 
     async def _direct_inference(self, request: Request) -> Response:
-        """Direct model inference — replaces the legacy httpx proxy fallback."""
+        """Serve an Ollama chat request through the configured model backend.
+
+        Args:
+            request (Request): HTTP request containing an Ollama chat body.
+
+        Returns:
+            Response: JSON completion or streaming NDJSON response.
+
+        Raises:
+            HTTPException: The body is invalid or no model backend is configured.
+
+        Side Effects:
+            Invokes the model. Streaming requests run it in a background task.
+        """
         if self._model_backend is None:
             raise HTTPException(503, _NO_BACKEND)
 
@@ -245,9 +246,6 @@ class OllamaHttpProtocolAdapter:
             content=_build_ollama_response(content, model=model or "")
         )
 
-    # ------------------------------------------------------------------
-    # Native-proxy helpers (Ollama-only endpoints)
-    # ------------------------------------------------------------------
 
     async def _native_proxy_get(self, request: Request, path: str) -> Response:
         base = self._native_url()
@@ -301,10 +299,6 @@ class OllamaHttpProtocolAdapter:
         raise HTTPException(501, _NOT_SUPPORTED)
 
 
-# ------------------------------------------------------------------
-# Signal → Ollama NDJSON serialisation
-# ------------------------------------------------------------------
-
 async def _stream_as_ndjson(
     signals: AsyncIterable[Signal],
     model: str,
@@ -329,7 +323,15 @@ async def _stream_as_ndjson(
 
 
 def _openai_result_to_ollama(result: dict[str, Any], model: str) -> dict[str, Any]:
-    """Convert execute() OpenAI-format dict to Ollama response format."""
+    """Translate a workflow result to an Ollama chat response.
+
+    Args:
+        result (dict[str, Any]): OpenAI-style workflow result.
+        model (str): Model name included in the response.
+
+    Returns:
+        dict[str, Any]: Ollama message, timestamp, and completion status.
+    """
     choices = result.get("choices", [{}])
     message = choices[0].get("message", {}) if choices else {}
     return {
@@ -353,10 +355,6 @@ def _build_ollama_response(content: str, model: str) -> dict[str, Any]:
         "done_reason": "stop",
     }
 
-
-# ------------------------------------------------------------------
-# Module-level helpers
-# ------------------------------------------------------------------
 
 def _forward_headers(request: Request) -> dict[str, str]:
     return {

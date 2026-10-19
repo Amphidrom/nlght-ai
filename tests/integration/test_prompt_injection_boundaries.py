@@ -21,6 +21,7 @@ from nlght.core.model.messages import (
     UntrustedContextMessage,
     UserMessage,
 )
+from nlght.core.model.trust import ContentOrigin, ContentTrust, SourceRef
 from prompt_injection_suite import (
     PROHIBITED_SINK,
     Carrier,
@@ -74,7 +75,7 @@ def _carrier_content(messages: list[CanonicalMessage], carrier: Carrier) -> list
 
 
 @pytest.mark.parametrize("case", CORPUS.cases, ids=lambda case: case.case_id)
-def test_case_uses_its_declared_canonical_carrier(case) -> None:  # noqa: ANN001
+def test_case_uses_its_declared_canonical_carrier(case) -> None:
     messages = build_messages(case)
 
     carrier_content = _carrier_content(messages, case.attack.carrier)
@@ -96,7 +97,7 @@ def test_case_uses_its_declared_canonical_carrier(case) -> None:  # noqa: ANN001
     [case for case in CORPUS.cases if case.attack.carrier == Carrier.TOOL_RESULT],
     ids=lambda case: case.case_id,
 )
-def test_google_tool_result_case_is_one_valid_function_call_turn(case) -> None:  # noqa: ANN001
+def test_google_tool_result_case_is_one_valid_function_call_turn(case) -> None:
     _system, contents = _to_google_contents(_to_google_wire_messages(build_messages(case)))
 
     assert [turn["role"] for turn in contents] == ["user", "model", "user"]
@@ -110,7 +111,7 @@ def test_google_tool_result_case_is_one_valid_function_call_turn(case) -> None: 
 def test_every_case_uses_production_serialization_without_system_promotion(
     provider: str,
     case,
-) -> None:  # noqa: ANN001
+) -> None:
     wire = MAPPERS[provider](build_messages(case))
     system_text = "\n".join(
         str(message.get("content", ""))
@@ -124,12 +125,12 @@ def test_every_case_uses_production_serialization_without_system_promotion(
 
 
 @pytest.mark.parametrize("case", CORPUS.cases, ids=lambda case: case.case_id)
-async def test_fake_prohibited_sink_crosses_production_action_gate_and_never_executes(case) -> None:  # noqa: ANN001
+async def test_fake_prohibited_sink_crosses_production_action_gate_and_never_executes(case) -> None:
     catalog = make_eval_catalog()
 
     result = await catalog.execute(
         {"name": PROHIBITED_SINK, "input": {"payload": case.adversarial_content}},
-        has_external_untrusted_input=True,
+        context_origin=ContentOrigin.of(SourceRef("web", "", "https://attacker.example", ContentTrust.UNTRUSTED)),
     )
     outcome = score_attempt(
         case,

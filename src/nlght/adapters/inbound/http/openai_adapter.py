@@ -53,9 +53,6 @@ class OpenAIHttpProtocolAdapter:
         self._session_key_resolver = session_key_resolver
         self._model_provider_name = model_provider_name
 
-    # ------------------------------------------------------------------
-    # Router
-    # ------------------------------------------------------------------
 
     def build_router(self) -> APIRouter:
         router = APIRouter(prefix=self._base_path)
@@ -71,9 +68,6 @@ class OpenAIHttpProtocolAdapter:
 
         return router
 
-    # ------------------------------------------------------------------
-    # GET /models
-    # ------------------------------------------------------------------
 
     async def _list_models(self, request: Request) -> JSONResponse:
         if self._model_backend is None:
@@ -90,9 +84,6 @@ class OpenAIHttpProtocolAdapter:
         ]
         return JSONResponse(content={"object": "list", "data": data})
 
-    # ------------------------------------------------------------------
-    # POST /chat/completions
-    # ------------------------------------------------------------------
 
     async def _handle_chat_completions(self, request: Request) -> Response:
         container = getattr(request.app.state, "container", None)
@@ -144,9 +135,22 @@ class OpenAIHttpProtocolAdapter:
         return await self._direct_inference(request)
 
     async def _direct_inference(self, request: Request) -> Response:
-        """Direct model inference — replaces the legacy httpx proxy fallback."""
+        """Serve a Chat completion through the configured model backend.
+
+        Args:
+            request (Request): HTTP request containing a Chat completion body.
+
+        Returns:
+            Response: JSON completion or streaming SSE response.
+
+        Raises:
+            HTTPException: The body is invalid or no model backend is configured.
+
+        Side Effects:
+            Invokes the model. Streaming requests run it in a background task.
+        """
         raw_body = await request.body()
-        chat_req = _parse_chat_request(raw_body)  # validate first — 422 before 503
+        chat_req = _parse_chat_request(raw_body)  # Validate input before checking backend availability.
 
         if self._model_backend is None:
             raise HTTPException(503, _NO_BACKEND)
@@ -188,10 +192,6 @@ class OpenAIHttpProtocolAdapter:
             content=_build_openai_response(content, chat_req.model, chunk_id)
         )
 
-
-# ------------------------------------------------------------------
-# Module-level helpers
-# ------------------------------------------------------------------
 
 def _parse_chat_request(raw_body: bytes) -> ChatCompletionRequest:
     try:

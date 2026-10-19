@@ -17,9 +17,10 @@ class WorkflowExecutor(Protocol):
     """Outbound port for workflow execution.
 
     The caller selects the method based on ``invocation.trigger.stream``:
-    - ``execute``        — full response collected, returns assembled dict
-    - ``stream``         — SSE-formatted bytes yielded incrementally (OpenAI wire format)
-    - ``stream_signals`` — raw Signal objects yielded; adapter serialises to wire format
+
+    - ``execute`` collects and returns the full response.
+    - ``stream`` yields SSE-formatted bytes incrementally.
+    - ``stream_signals`` yields raw signals for an adapter to serialize.
     """
 
     async def execute(self, invocation: WorkflowInvocation) -> dict[str, Any]: ...

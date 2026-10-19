@@ -1,17 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The access contract, end to end, over stored rules.
+"""Exercise stored resource and tool rules across runtime boundaries.
 
-Every other test in this slice holds one mechanism. These hold the *contract* —
-what an operator writes down and what they get — over a real rule table, a real
-engine, a real activator and a real catalog. They are deliberately written in
-terms of workflows and resources rather than in terms of the classes underneath,
-so a later re-implementation of any of those still has to satisfy them.
-
-    resource   authorizes a ResourceDef as a whole
-    tool       authorizes one ToolSignature of one such resource
-    workflow   is a condition on either, never a subject
+A resource rule governs activation, a tool rule governs one signature, and
+workflow conditions constrain either subject.
 """
 
 from __future__ import annotations
@@ -96,7 +89,14 @@ class _Resources:
 
 
 def _caller(workflow: str | None) -> RequestContext:
-    """A caller as the executor hands it on — carrying the workflow it resolved."""
+    """Build a caller with the workflow identity resolved by the executor.
+
+    Args:
+        workflow (str | None): Workflow identity resolved for the caller.
+
+    Returns:
+        RequestContext: Caller context with the resolved workflow identity.
+    """
     return RequestContext(
         correlation_id="cid", request_id="rid",
         received_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -135,14 +135,14 @@ def _reset_counts() -> None:
     _WriterTool.built = 0
 
 
-def _engine(sqlite_engine) -> AccessRuleEngine:  # noqa: ANN001
+def _engine(sqlite_engine) -> AccessRuleEngine:
     # No cache window: each test writes rules and reads them back immediately.
     return AccessRuleEngine(
         SqlAlchemyAccessRuleRepository(sqlite_engine), cache_ttl_seconds=0.0
     )
 
 
-def _activator(rows, loader, sqlite_engine) -> ResourceActivator:  # noqa: ANN001
+def _activator(rows, loader, sqlite_engine) -> ResourceActivator:
     return ResourceActivator(
         resources=_Resources(rows),
         loader=loader,
@@ -150,7 +150,7 @@ def _activator(rows, loader, sqlite_engine) -> ResourceActivator:  # noqa: ANN00
     )
 
 
-def _catalog(rows, loader, sqlite_engine) -> ToolCatalogBuilder:  # noqa: ANN001
+def _catalog(rows, loader, sqlite_engine) -> ToolCatalogBuilder:
     engine = _engine(sqlite_engine)
     return ToolCatalogBuilder(
         loader=loader,
@@ -160,20 +160,10 @@ def _catalog(rows, loader, sqlite_engine) -> ToolCatalogBuilder:  # noqa: ANN001
     )
 
 
-# ---------------------------------------------------------------------------
-# what an operator writes, and what they get
-# ---------------------------------------------------------------------------
-
-
 async def test_a_workflow_scoped_resource_rule_admits_one_workflow(
     sqlite_engine, session_factory, rows, loader
 ) -> None:
-    """ALLOW resource data_store/data-main WHEN workflow=answer.
-
-    The named workflow may activate it. Every other workflow is denied — not by
-    a deny rule, but because a subject with an allow rule is governed, and a
-    caller matching none of its conditions satisfies nothing.
-    """
+    """Allow one workflow to activate the governed resource."""
     await seed_policy(
         session_factory, "resource", "data_store/data-main",
         effect="allow", conditions={"workflow": ["answer"]},
@@ -211,7 +201,7 @@ async def test_a_caller_outside_any_workflow_is_denied_by_a_scoped_rule(
 async def test_an_unconditional_resource_rule_admits_every_workflow(
     sqlite_engine, session_factory, rows, loader
 ) -> None:
-    """ALLOW resource data_store/shared — how "anyone may use this" is said."""
+    """Allow every workflow to activate an unconditionally allowed resource."""
     await seed_policy(session_factory, "resource", "data_store/shared", effect="allow")
     activator = _activator(rows, loader, sqlite_engine)
 
@@ -225,12 +215,7 @@ async def test_an_unconditional_resource_rule_admits_every_workflow(
 async def test_a_writer_is_governed_by_the_resource_rule_that_names_it(
     sqlite_engine, session_factory, rows, loader
 ) -> None:
-    """The gap this slice closed.
-
-    A writer offers no signatures, and that was treated as its protection — but
-    a model was never what used it. A step was, and a step reached it without
-    passing anything. It is authorized as a resource now, like everything else.
-    """
+    """Apply the resource policy to a writer activated by a step."""
     await seed_policy(
         session_factory, "resource", "data_index_writer/writer-main",
         effect="allow", conditions={"workflow": ["ingest"]},
@@ -271,24 +256,20 @@ async def test_a_tool_rule_cannot_reinstate_a_denied_resource(
 async def test_a_tool_rule_narrows_within_a_resource_the_caller_may_use(
     sqlite_engine, session_factory, rows, loader
 ) -> None:
-    """The two levels doing two different jobs, in one configuration.
-
-    The workflow may use the resource — a step could activate it — and is
-    offered exactly one of its two operations.
-    """
+    """Limit offered tools after granting access to their resource."""
     await seed_policy(
         session_factory, "tool", "data_store/*::data-search-keyword",
         effect="allow", conditions={"workflow": ["answer"]},
     )
     # One data store, so this is about the tool level. With both visible the
-    # catalog would refuse the build over `data-search` — correctly, and that
+    # catalog would correctly refuse the build over `data-search`, and that
     # has its own test.
     only_main = [row for row in rows if row.name != "shared"]
     builder = _catalog(only_main, loader, sqlite_engine)
 
     catalog = await builder.build(model="llama3", caller=_caller("answer"))
 
-    # `data-search` has no tool rule at all, so it is ungoverned and offered;
+    # `data-search` has no tool rule, so it remains ungoverned and offered.
     # `data-search-keyword` is governed and allowed for this workflow.
     assert sorted(catalog.names()) == ["data-search", "data-search-keyword"]
 
@@ -301,13 +282,7 @@ async def test_a_tool_rule_narrows_within_a_resource_the_caller_may_use(
 async def test_the_catalog_filters_where_a_step_would_fail(
     sqlite_engine, session_factory, rows, loader
 ) -> None:
-    """Two consumers, two right answers to the same denial.
-
-    A model is not told about what it may not use — silence is the correct
-    answer to "what can I call". A step that named the resource has stated a
-    requirement, and silence there would run a workflow other than the one that
-    was configured.
-    """
+    """Filter denied tools from the catalog and reject required step access."""
     await seed_policy(
         session_factory, "resource", "data_store/data-main",
         effect="allow", conditions={"workflow": ["answer"]},
@@ -329,7 +304,7 @@ async def test_the_catalog_filters_where_a_step_would_fail(
 async def test_no_rules_at_all_restricts_nothing(
     sqlite_engine, rows, loader
 ) -> None:
-    """An empty policy table is not an empty allowlist — the documented default."""
+    """Leave resources unrestricted when the policy table is empty."""
     activator = _activator(rows, loader, sqlite_engine)
 
     instance = await activator.activate(
@@ -342,12 +317,7 @@ async def test_no_rules_at_all_restricts_nothing(
 async def test_seeding_a_resource_row_matches_the_address_a_rule_names(
     session_factory, sqlite_engine
 ) -> None:
-    """The two halves of the contract meet at the address, so they must agree.
-
-    A rule names `<kind>/<name>`; a resource row carries a kind and a name. If
-    those ever drift apart the rules stop matching and every subject reads as
-    ungoverned — which is the failure mode that allows rather than denies.
-    """
+    """Match a resource row against the rule for its kind and name."""
     from nlght.adapters.outbound.persistence.resource_repository import (
         SqlAlchemyResourceRepository,
     )

@@ -22,7 +22,7 @@ from nlght.adapters.inbound.http.admin.services import (
 )
 from nlght.core.access import SubjectType
 from nlght.core.errors.errors import ResourceAddressAlreadyExists
-from nlght.core.execution import ExecutionStatus
+from nlght.core.execution import ExecutionRecord, ExecutionStatus
 
 if TYPE_CHECKING:
     from fastapi.templating import Jinja2Templates
@@ -53,12 +53,17 @@ def _format_seconds(seconds: float) -> str:
     return f"{int(seconds // 3600)} h {int((seconds % 3600) // 60)} m"
 
 
-def _duration(record: Any) -> str:  # noqa: ANN401 (an ExecutionRecord, kept out of the template layer's imports)
-    """How long one *execution* took, or has been going.
+def _duration(record: ExecutionRecord) -> str:
+    """Format elapsed time for one execution record.
 
-    Not the same as how long a run took: a distribution flow's execution is over
-    in a second while the work it handed out has barely started. Use the ``span``
-    filter over a ``RunTiming`` for the run.
+    Args:
+        record (ExecutionRecord): Execution with creation and completion times.
+
+    Returns:
+        str: Elapsed time for the execution, including ongoing executions.
+
+    Notes:
+        A fan-out run's duration is computed separately by ``RunTiming``.
     """
     started = record.started_at or record.created_at
     finished = record.completed_at or datetime.now(UTC)
@@ -66,20 +71,34 @@ def _duration(record: Any) -> str:  # noqa: ANN401 (an ExecutionRecord, kept out
 
 
 def _span(value: timedelta | None) -> str:
-    """A duration already worked out, or an em dash where there is none yet."""
+    """Format a run duration or its missing-value marker.
+
+    Args:
+        value (timedelta | None): Computed duration, if available.
+
+    Returns:
+        str: Readable duration or the UI's missing-value marker.
+    """
     if value is None:
-        return "—"
+        return "N/A"
     return _format_seconds(value.total_seconds())
 
 
 def _at(moment: datetime | None) -> str:
-    """A timestamp, or an em dash — never an empty cell that reads as zero."""
+    """Format a timestamp or its missing-value marker.
+
+    Args:
+        moment (datetime | None): Timestamp, if available.
+
+    Returns:
+        str: Formatted timestamp or the UI's missing-value marker.
+    """
     if moment is None:
-        return "—"
+        return "N/A"
     return moment.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _pretty_json(value: Any) -> str:  # noqa: ANN401 (arbitrary trigger payloads and diagnostics)
+def _pretty_json(value: object) -> str:
     try:
         return json.dumps(value, indent=2, sort_keys=True, default=str)
     except (TypeError, ValueError):
@@ -90,7 +109,7 @@ def _tmpl() -> Jinja2Templates:
     global _templates
     if _templates is None:
         from fastapi.templating import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            Jinja2Templates as _Jinja2Templates,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+            Jinja2Templates as _Jinja2Templates,
         )
         _templates = _Jinja2Templates(directory=str(_TEMPLATES_DIR))
         _templates.env.filters["duration"] = _duration
@@ -122,10 +141,6 @@ async def _verify_csrf(request: Request) -> None:
 admin_router = APIRouter(default_response_class=HTMLResponse, dependencies=[Depends(_verify_csrf)])
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _svc(request: Request) -> AdminService:
     engine = getattr(request.app.state.container, "engine", None)
     if engine is None:
@@ -134,7 +149,18 @@ def _svc(request: Request) -> AdminService:
 
 
 def _parse_json_field(raw: str, default: dict[str, Any]) -> dict[str, Any]:
-    """Parse a JSON-object form field; empty input returns ``default``."""
+    """Parse an Admin form field as a JSON object.
+
+    Args:
+        raw (str): JSON text, or empty text for the default.
+        default (dict[str, Any]): Value returned for an empty field.
+
+    Returns:
+        dict[str, Any]: Parsed object or the supplied default.
+
+    Raises:
+        HTTPException: The text is invalid JSON or is not an object.
+    """
     raw = raw.strip()
     if not raw:
         return default
@@ -148,12 +174,17 @@ def _parse_json_field(raw: str, default: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_max_hops(raw: str) -> int | None:
-    """Three states, and they mean different things.
+    """Parse the optional workflow step budget from an Admin form.
 
-    Empty leaves the budget to the runtime's default, a number sets it, and 0
-    removes the guard — a deployment that would rather have a run which never
-    stops than one which stops early may say so. Negative is neither and is
-    refused rather than silently read as unbounded.
+    Args:
+        raw (str): Empty text, zero, or a positive whole number.
+
+    Returns:
+        int | None: Explicit budget, zero for unlimited, or ``None`` for the
+        runtime default.
+
+    Raises:
+        HTTPException: The value is negative or not a whole number.
     """
     raw = raw.strip()
     if not raw:
@@ -174,17 +205,25 @@ def _parse_capabilities(raw: str) -> list[str]:
     return [c.strip() for c in raw.splitlines() if c.strip()]
 
 
-#: Derived from the domain type, not restated — a third copy of this list is a
+#: Derive valid subject types from the domain. A third copy of this list is a
 #: third place for a new subject type to be rejected as invalid.
 _POLICY_SUBJECT_TYPES = frozenset(get_args(SubjectType))
 _POLICY_EFFECTS = {"allow", "deny"}
 
 
 def _parse_conditions(raw: str) -> dict[str, list[str]]:
-    """Parse the conditions JSON field: {key: pattern | [patterns, ...]}."""
+    """Normalize Admin policy conditions to lists of patterns.
+
+    Args:
+        raw (str): JSON object mapping keys to strings or string lists.
+
+    Returns:
+        dict[str, list[str]]: Pattern lists keyed by condition name.
+
+    Raises:
+        HTTPException: The JSON object or any condition value is invalid.
+    """
     parsed = _parse_json_field(raw, {})
-    if not isinstance(parsed, dict):
-        raise HTTPException(status_code=422, detail="Conditions must be a JSON object.")
     conditions: dict[str, list[str]] = {}
     for key, value in parsed.items():
         if isinstance(value, str):
@@ -224,17 +263,13 @@ def _render(request: Request, template: str, context: dict[str, Any]) -> HTMLRes
     return response
 
 
-# ---------------------------------------------------------------------------
-# Dashboard
-# ---------------------------------------------------------------------------
-
 @admin_router.get("/static/{asset}", response_class=FileResponse)
 async def admin_static(asset: str) -> FileResponse:
     if asset not in _STATIC_ASSETS:
         raise HTTPException(status_code=404, detail="Static asset not found.")
     path = _STATIC_DIR / asset
     # An allowlisted but optional asset (the dagre pair) may simply not be
-    # vendored; that is a 404, not the 500 a missing file would otherwise raise.
+    # vendored. That is a 404, not the 500 a missing file would otherwise raise.
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Static asset not found.")
     return FileResponse(path)
@@ -242,12 +277,14 @@ async def admin_static(asset: str) -> FileResponse:
 
 @admin_router.get("", include_in_schema=False)
 async def dashboard_root() -> RedirectResponse:
-    """Redirect the bare ``/admin`` to the dashboard at ``/admin/``.
+    """Redirect the bare admin path to the dashboard.
 
-    Starlette would normally issue this trailing-slash redirect itself, but when
-    a generic_json catch-all (`/{full_path:path}`) is registered it produces a
-    full match for the bare path first and the automatic redirect never runs.
-    An explicit route, registered before the catch-all, restores it.
+    Returns:
+        RedirectResponse: HTTP 307 redirect to ``/admin/``.
+
+    Notes:
+        The explicit route takes precedence over the generic JSON catch-all,
+        which otherwise prevents Starlette's automatic slash redirect.
     """
     return RedirectResponse(url="/admin/", status_code=307)
 
@@ -262,16 +299,12 @@ async def dashboard(request: Request) -> HTMLResponse:
         "workflow_count": len(workflows),
         "resource_count": len(resources),
         "recent_workflows": workflows[:5],
-        # A day is the window in which a failure is still worth acting on; the
+        # A day is the window in which a failure is still worth acting on. The
         # all-time count would be a number nobody can do anything about.
         "execution_counts": await executions.counts(within=timedelta(days=1)),
         "workers": await executions.workers(),
     })
 
-
-# ---------------------------------------------------------------------------
-# Workflows
-# ---------------------------------------------------------------------------
 
 @admin_router.get("/workflows", response_class=HTMLResponse)
 async def list_workflows(request: Request) -> HTMLResponse:
@@ -376,10 +409,6 @@ async def fork_version(request: Request, wid: uuid.UUID) -> RedirectResponse:
     return _redirect(f"/admin/versions/{version.workflow_version_id}")
 
 
-# ---------------------------------------------------------------------------
-# Versions
-# ---------------------------------------------------------------------------
-
 @admin_router.get("/versions/{vid}", response_class=HTMLResponse)
 async def version_detail(request: Request, vid: uuid.UUID) -> HTMLResponse:
     svc = _svc(request)
@@ -396,11 +425,12 @@ async def version_detail(request: Request, vid: uuid.UUID) -> HTMLResponse:
             "is_terminal": s.is_terminal,
             "is_resume": s.is_resume,
             "transitions": s.transitions,
+            "verdicts": AdminService.step_verdicts(s.type, getattr(s, "config", {})),
         }
         for s in version.steps
     ])
     return _render(request, "versions/detail.html", {
-        # Only offer the layered layout when its files are actually vendored;
+    # Only offer the layered layout when its files are actually vendored.
         # a script tag for a missing asset would 404 into the console for nothing.
         "has_dagre": all((_STATIC_DIR / asset).is_file() for asset in _DAGRE_ASSETS),
         "version": version,
@@ -430,10 +460,6 @@ async def save_graph(request: Request, vid: uuid.UUID, body: GraphSaveRequest) -
     await svc.save_graph(vid, body.transitions)
     return {"ok": True}
 
-
-# ---------------------------------------------------------------------------
-# Steps
-# ---------------------------------------------------------------------------
 
 @admin_router.get("/versions/{vid}/steps/new", response_class=HTMLResponse)
 async def new_step_form(request: Request, vid: uuid.UUID) -> HTMLResponse:
@@ -538,10 +564,6 @@ async def delete_step(request: Request, sid: uuid.UUID) -> RedirectResponse:
     return _redirect(f"/admin/versions/{vid}")
 
 
-# ---------------------------------------------------------------------------
-# Resources
-# ---------------------------------------------------------------------------
-
 @admin_router.get("/resources", response_class=HTMLResponse)
 async def list_resources(request: Request) -> HTMLResponse:
     svc = _svc(request)
@@ -633,10 +655,6 @@ async def toggle_resource(request: Request, rid: uuid.UUID) -> HTMLResponse:
         "res": resource,
     })
 
-
-# ---------------------------------------------------------------------------
-# Access policies
-# ---------------------------------------------------------------------------
 
 @admin_router.get("/policies", response_class=HTMLResponse)
 async def list_policies(request: Request) -> HTMLResponse:
@@ -736,10 +754,6 @@ async def delete_policy(request: Request, rule_id: uuid.UUID) -> RedirectRespons
     await svc.delete_policy(rule_id)
     return _redirect("/admin/policies")
 
-
-# ---------------------------------------------------------------------------
-# Executions — read-only
-# ---------------------------------------------------------------------------
 
 def _executions(request: Request) -> ExecutionObservationService:
     engine = getattr(request.app.state.container, "engine", None)

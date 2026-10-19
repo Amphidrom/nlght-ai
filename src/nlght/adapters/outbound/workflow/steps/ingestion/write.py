@@ -34,21 +34,15 @@ logger = logging.getLogger(__name__)
 
 
 def _revision_of(document: ProcessedDocument) -> DocumentRevisionWrite:
-    """The durable record of one document revision, text included.
+    """Build a durable revision record from a processed document.
 
-    ``content`` is ``document.text`` unchanged — the authority. It is stored
-    rather than derived later because neither of the two things that could
-    stand in for it actually can: the index payload is a projection, rebuilt or
-    dropped as an operational act and holding the document in two different
-    shapes across two backends; and a refetch returns what the source holds
-    *now*, in the source's own representation. Chunk offsets index this exact
-    string, and an offset into any other string is not the same span.
+    Args:
+        document (ProcessedDocument): Document and processing metadata to record.
 
-    ``None`` for a document with no usable text, which still belongs in the
-    snapshot so that its absence is never mistaken for a deletion.
-
-    ``artifact_ref`` stays what it was — source, document, and the source's own
-    revision — but it is now provenance only, never a way to read the text back.
+    Returns:
+        DocumentRevisionWrite: Revision with unchanged document text, source
+        provenance, and processing metadata. Text may be ``None`` for a
+        document that remains observed but has no usable content.
     """
     return DocumentRevisionWrite(
         document_id=document.document_id,
@@ -87,13 +81,19 @@ class IngestionWriteStep(StepBase):
     Indexing is idempotent per document: a document whose content and
     processing revision already match the recorded index state is skipped, so a
     rerun over an unchanged source costs nothing and retrieval is never
-    disturbed. There is no generation switch — replacement happens one document
+    disturbed. There is no generation switch. Replacement happens one document
     at a time.
 
     Reads ``ingestion.processed`` and, when present, ``ingestion.embedded``.
     """
 
     TYPE = "ingestion.write"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_TO_DO = NOTHING_TO_DO
+        MORE_DOCUMENTS = MORE_DOCUMENTS
 
     def __init__(
         self,
@@ -143,10 +143,10 @@ class IngestionWriteStep(StepBase):
         repository = writer.repository
         chunks_by_document = self._chunks_by_document(ctx)
         # Whether this pipeline embeds at all. A lexical-only pipeline is a
-        # legitimate shape; a pipeline that embeds and then produces no chunk
+        # legitimate shape. A pipeline that embeds and then produces no chunk
         # for a document with text is not.
         embedded = ctx.metadata.get("ingestion.embedded") is not None
-        # Collections and mappings must exist before the first write; a missing
+        # Collections and mappings must exist before the first write. A missing
         # Qdrant collection fails and an unmapped OpenSearch index produces
         # documents nothing can find.
         embedding = self._embedding_descriptor(ctx)
@@ -158,14 +158,14 @@ class IngestionWriteStep(StepBase):
             provider=embedding[0], model=embedding[1], dimension=dimension
         )
         # Creating a collection or index means the indexes this writer points at
-        # are not the ones the recorded state describes — emptied, dropped, or a
+        # are not the ones the recorded state describes: emptied, dropped, or a
         # fresh environment on an old database. Rotating the generation is what
         # turns that into "everything must be written again" instead of a run
         # that skips every document and reports success into an empty index.
         if writer.ensure_ready(dimension=dimension):
             generation = await repository.rotate_generation(target=writer.target)
             logger.info(
-                "[%s] ingestion.write.generation_rotated | target=%s — index was created, "
+                "[%s] ingestion.write.generation_rotated | target=%s: index was created, "
                 "every document will be written again",
                 ctx.correlation_id, writer.target,
             )
@@ -186,7 +186,7 @@ class IngestionWriteStep(StepBase):
         # The corpus record first, in one short transaction with no external
         # call in it. It is what makes deletion possible: a document absent from
         # a *complete* snapshot is tombstoned here, and only then removed from
-        # the index below. It is run once per workflow pass; document writes
+        # the index below. It is run once per workflow pass. Document writes
         # continue in bounded batches after this point.
         if not bool(ctx.metadata.get("ingestion.write.snapshot_committed", False)):
             removed = await self._commit_snapshot(ctx, repository, writer, documents)
@@ -198,13 +198,13 @@ class IngestionWriteStep(StepBase):
         next_document = int(ctx.metadata.get("ingestion.write.next_document", 0))
         if next_document >= len(documents):
             written_total = int(ctx.metadata.get("ingestion.written", 0))
-            return StepResult(ctx=ctx, verdict="DEFAULT" if written_total or removed else NOTHING_TO_DO)
+            return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if written_total or removed else self.Verdict.NOTHING_TO_DO)
 
         batch_end = min(next_document + document_batch_size, len(documents))
         written = 0
         skipped = 0
         for document in documents[next_document:batch_end]:
-            # Observed but unusable — a binary file, or one that would not
+            # This observed document is unusable: a binary file, or one that would not
             # decode. It belongs in the snapshot, so absence never mistakes it
             # for a deletion, but there is nothing to index.
             if not document.accepted:
@@ -218,7 +218,7 @@ class IngestionWriteStep(StepBase):
             chunks = chunks_by_document.get(document.document_id, [])
             # A pipeline that embeds and a document that has text must produce
             # chunks. None means the document would be written lexically but not
-            # vectorially, and then recorded as fully indexed — a divergence
+            # vectorially, and then recorded as fully indexed. That divergence
             # nothing would ever repair. A pipeline with no embed step at all,
             # and a document whose text is empty, are both legitimate.
             if embedded and document.text and not chunks:
@@ -265,8 +265,8 @@ class IngestionWriteStep(StepBase):
             ctx.correlation_id, writer.target, batch_end, len(documents), written, written_total, skipped, removed,
         )
         if batch_end < len(documents):
-            return StepResult(ctx=ctx, verdict=MORE_DOCUMENTS)
-        return StepResult(ctx=ctx, verdict="DEFAULT" if written_total or removed else NOTHING_TO_DO)
+            return StepResult(ctx=ctx, verdict=self.Verdict.MORE_DOCUMENTS)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if written_total or removed else self.Verdict.NOTHING_TO_DO)
 
     async def _commit_snapshot(
         self,
@@ -275,16 +275,25 @@ class IngestionWriteStep(StepBase):
         writer: DataIndexWriterTool,
         documents: tuple[ProcessedDocument, ...],
     ) -> int:
-        """Record what the source contained, then act on what left it.
+        """Commit a source snapshot and remove tombstoned index entries.
 
-        Every observed document goes in, accepted or not: the tombstone rule is
-        "absent from a complete snapshot", so leaving out a binary file would
-        declare it deleted.
+        Args:
+            ctx (WorkflowStepContext): Context holding the acquired source snapshot.
+            repository (IngestionRepository): Authority for snapshot and index state.
+            writer (DataIndexWriterTool): Index writer used to remove tombstones.
+            documents (tuple[ProcessedDocument, ...]): Observed documents,
+                including documents excluded from indexing.
 
-        Tombstoned documents are removed from the index *after* the transaction
-        commits, and their index state is cleared only once the backend call
-        returned — a crash in between leaves the state saying "indexed", which
-        re-runs the removal rather than losing it.
+        Returns:
+            int: Number of tombstoned documents removed from the index.
+
+        Raises:
+            WorkflowConfigurationError: No acquired snapshot is available.
+
+        Side Effects:
+            Commits the observation before removing tombstones. Clears index
+            state only after each backend deletion succeeds, so a retry repeats
+            an interrupted removal.
         """
         snapshot = ctx.metadata.get("ingestion.snapshot")
         if not isinstance(snapshot, SourceSnapshot):
@@ -330,22 +339,18 @@ class IngestionWriteStep(StepBase):
         generation: str,
         fingerprint: str,
     ) -> bool:
-        """Whether this document is already in *this* incarnation of the target.
+        """Check whether a document matches the current index projection.
 
-        Four things have to agree, and each covers what the others cannot.
+        Args:
+            repository (IngestionRepository): Repository holding index state.
+            document (ProcessedDocument): Document to compare with stored state.
+            target (str): Index target name.
+            generation (str): Current target incarnation.
+            fingerprint (str): Current index projection fingerprint.
 
-            content_hash            the source's fassung
-            enricher_hash           the processed fassung
-            projection_fingerprint  how that document becomes index entries
-            index_generation        which incarnation of the index holds it
-
-        The generation is what the two hashes cannot say: they describe the
-        document, not the index, so a dropped and recreated index would read as
-        fully populated. The fingerprint is what none of the other three can
-        say: swapping the embedding model, its dimension, the distance metric or
-        the payload schema leaves all of them untouched, so before it existed a
-        model swap reindexed nothing and reported success into a collection
-        holding vectors from the old model.
+        Returns:
+            bool: Whether generation, source and processing revisions, and
+            projection fingerprint all match the stored index state.
         """
         state = await repository.get_index_state(
             document_id=document.document_id, target=target
@@ -360,13 +365,14 @@ class IngestionWriteStep(StepBase):
 
     @staticmethod
     def _chunks_by_document(ctx: WorkflowStepContext) -> dict[str, list[ChunkProjection]]:
-        """The embedded chunks as the index will hold them, grouped per document.
+        """Group embedded chunk projections by document ID.
 
-        One list, carrying the locator with the vector. It used to be two — the
-        vectors as `(chunk_id, vector, content)` tuples and the semantics as a
-        parallel list zipped back on by position — which was correct only while
-        both stayed the same length in the same order, and dropped `position`,
-        `start_offset` and `end_offset` entirely on the way.
+        Args:
+            ctx (WorkflowStepContext): Context containing embedded chunks.
+
+        Returns:
+            dict[str, list[ChunkProjection]]: Locator, vector, and semantics
+            for each chunk, grouped by its document ID.
         """
         grouped: dict[str, list[ChunkProjection]] = {}
         for chunk in ctx.metadata.get("ingestion.embedded") or ():
@@ -385,9 +391,15 @@ class IngestionWriteStep(StepBase):
 
     @staticmethod
     def _embedding_descriptor(ctx: WorkflowStepContext) -> tuple[str, str, int]:
-        """Which embedding produced this run's vectors, or nothing for a
-        lexical-only pipeline — which is a legitimate shape and gets a stable
-        fingerprint of its own."""
+        """Describe the embedding used by this run.
+
+        Args:
+            ctx (WorkflowStepContext): Context containing embedded chunks.
+
+        Returns:
+            tuple[str, str, int]: Provider, model, and dimension from the first
+            chunk, or empty names and zero for a lexical-only run.
+        """
         for chunk in ctx.metadata.get("ingestion.embedded") or ():
             return (chunk.provider, chunk.model, chunk.dimension)
         return ("", "", 0)

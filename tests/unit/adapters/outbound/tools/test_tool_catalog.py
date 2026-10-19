@@ -20,10 +20,6 @@ from nlght.core.errors.errors import AmbiguousToolNameError, ToolActionSemantics
 from nlght.core.runtime.resource import ResourceDef
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 class _GreetTool(ToolBase):
     KIND = "greeter"
@@ -102,11 +98,6 @@ def _make_repo(resources: list[ResourceDef]) -> AsyncMock:
     return repo
 
 
-# ---------------------------------------------------------------------------
-# BoundToolContract
-# ---------------------------------------------------------------------------
-
-
 async def test_bound_tool_contract_execute_async_method() -> None:
     tool = _GreetTool(name="greeter", config={})
     contract = BoundToolContract(
@@ -151,11 +142,6 @@ def test_bound_tool_contract_properties() -> None:
     assert contract.name == "greet"
     assert contract.description == "Grüßt jemanden."
     assert contract.parameters == params
-
-
-# ---------------------------------------------------------------------------
-# AdapterToolCatalog
-# ---------------------------------------------------------------------------
 
 
 def _catalog_with_greet() -> AdapterToolCatalog:
@@ -213,11 +199,6 @@ def test_catalog_bool_false_when_empty() -> None:
 
 def test_catalog_len() -> None:
     assert len(_catalog_with_greet()) == 1
-
-
-# ---------------------------------------------------------------------------
-# ToolCatalogBuilder
-# ---------------------------------------------------------------------------
 
 
 async def test_builder_creates_contract_per_signature() -> None:
@@ -320,15 +301,10 @@ async def test_builder_skips_failing_instantiation_gracefully() -> None:
     repo = _make_repo([_resource("broken")])
     builder = ToolCatalogBuilder(loader=loader, resource_repository=repo)
 
-    # must not raise — broken tools are logged and skipped
+    # A broken tool is logged and skipped so other tools remain available.
     catalog = await builder.build()
 
     assert len(catalog) == 0
-
-
-# ---------------------------------------------------------------------------
-# ToolAccessPolicy — denial paths
-# ---------------------------------------------------------------------------
 
 
 def _caller(cid: str = "cid-1") -> RequestContext:
@@ -394,8 +370,8 @@ async def test_a_failing_resource_policy_denies() -> None:
 
 
 async def test_the_resource_policy_is_consulted_without_a_caller() -> None:
-    # The policy also governs internal invocations without a request context —
-    # a deny must hold even when no caller is supplied.
+    # The policy also governs internal invocations without a request context.
+    # A deny must hold even when no caller is supplied.
     loader = ToolLoader()
     loader.register(_GreetTool)
     repo = _make_repo([_resource("greeter")])
@@ -422,11 +398,6 @@ async def test_the_resource_policy_receives_the_effective_model() -> None:
     await builder.build(model="llama3", caller=_caller())
 
     assert seen == ["llama3"]
-
-
-# ---------------------------------------------------------------------------
-# nothing is built that nothing can reach
-# ---------------------------------------------------------------------------
 
 
 class _CountingTool(ToolBase):
@@ -468,12 +439,12 @@ class _DenyOne:
     def __init__(self, denied: str) -> None:
         self._denied = denied
 
-    async def is_allowed(self, resource, signature_name, caller, model) -> bool:  # noqa: ANN001
+    async def is_allowed(self, resource, signature_name, caller, model) -> bool:
         return signature_name != self._denied
 
 
 class _DenyAllTools:
-    async def is_allowed(self, resource, signature_name, caller, model) -> bool:  # noqa: ANN001
+    async def is_allowed(self, resource, signature_name, caller, model) -> bool:
         return False
 
 
@@ -514,12 +485,7 @@ async def test_a_partly_denied_resource_is_built_once_for_what_survives() -> Non
 
 
 async def test_a_writer_is_never_built_for_the_model_catalog() -> None:
-    """Declaring no signatures is not a security boundary — but it is a catalog one.
-
-    A writer's protection is the resource policy at activation, which is where
-    steps reach it. Here it simply has nothing to offer, so the catalog builds
-    nothing: not a denial, an absence of anything to deny.
-    """
+    """Keep a writer without model-facing signatures out of the tool catalog."""
     _SilentTool.built = 0
     loader = ToolLoader()
     loader.register(_SilentTool)
@@ -551,11 +517,6 @@ async def test_a_denied_resource_is_not_built_either() -> None:
     assert _CountingTool.built == 0
 
 
-# ---------------------------------------------------------------------------
-# two resources cannot answer to one operation name
-# ---------------------------------------------------------------------------
-
-
 class _SecondCountingTool(_CountingTool):
     """A different kind offering the same model-facing operation names."""
 
@@ -564,12 +525,7 @@ class _SecondCountingTool(_CountingTool):
 
 
 async def test_two_visible_resources_offering_one_name_fail_the_build() -> None:
-    """Deterministically, and naming both — no silent precedence.
-
-    A model calls `count_one` by that one name. Keying the catalog by it let the
-    second resource write over the first, so one activation was unreachable and
-    which one depended on the order rows came back in.
-    """
+    """Reject duplicate model tool names from visible resources."""
     loader = ToolLoader()
     loader.register(_CountingTool)
     loader.register(_SecondCountingTool)
@@ -601,7 +557,7 @@ async def test_a_resource_denied_by_policy_does_not_collide() -> None:
     ])
 
     class _OnlyMain:
-        async def is_allowed(self, resource, caller, model) -> bool:  # noqa: ANN001
+        async def is_allowed(self, resource, caller, model) -> bool:
             return resource.address == "counting/main"
 
     builder = ToolCatalogBuilder(
@@ -624,7 +580,7 @@ async def test_a_signature_denied_by_policy_does_not_collide() -> None:
     ])
 
     class _OneEach:
-        async def is_allowed(self, resource, signature_name, caller, model) -> bool:  # noqa: ANN001
+        async def is_allowed(self, resource, signature_name, caller, model) -> bool:
             wanted = "count_one" if resource.kind == "counting" else "count_two"
             return signature_name == wanted
 

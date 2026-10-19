@@ -16,7 +16,7 @@ from nlght.ports.outbound.access_rule_repository import AccessRuleRepository
 logger = logging.getLogger(__name__)
 
 #: Derived from the domain type rather than restated, so a new subject type
-#: cannot be added to `SubjectType` and silently dropped here as malformed —
+#: cannot be added to `SubjectType` and silently dropped here as malformed.
 #: which is exactly what happened when `resource` was introduced: every rule
 #: naming one was discarded with a warning, and the subject read as ungoverned.
 _SUBJECT_TYPES = frozenset(get_args(SubjectType))
@@ -24,14 +24,20 @@ _EFFECTS = {"allow", "deny"}
 
 
 def _to_access_rule(row: AccessPolicyRule) -> AccessRule | None:
-    """Map a DB row to the domain rule; malformed rows are dropped with a warning.
+    """Convert a stored access rule when its fields are valid.
 
-    Dropping (instead of raising) keeps one bad row from disabling the whole
-    policy engine; the affected subject stays governed by the remaining rules.
+    Args:
+        row (AccessPolicyRule): Database row to validate and convert.
+
+    Returns:
+        AccessRule | None: Domain rule, or ``None`` for a malformed row.
+
+    Side Effects:
+        Logs malformed rows. Skipping one row leaves other policy rules active.
     """
     if row.subject_type not in _SUBJECT_TYPES or row.effect not in _EFFECTS:
         logger.warning(
-            "access_rule.malformed | rule_id=%s subject_type=%r effect=%r — ignoring",
+            "access_rule.malformed | rule_id=%s subject_type=%r effect=%r: ignoring",
             row.rule_id, row.subject_type, row.effect,
         )
         return None
@@ -43,7 +49,7 @@ def _to_access_rule(row: AccessPolicyRule) -> AccessRule | None:
             conditions[str(key)] = [str(v) for v in value]
         else:
             logger.warning(
-                "access_rule.malformed_condition | rule_id=%s key=%r — ignoring rule",
+                "access_rule.malformed_condition | rule_id=%s key=%r: ignoring rule",
                 row.rule_id, key,
             )
             return None

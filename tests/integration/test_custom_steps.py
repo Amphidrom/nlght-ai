@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""UC3 — Custom Steps
+"""Exercise custom step registration and request context delivery.
 
-Tests the contracts documented in workflows/custom-steps:
-
-  - Subclass StepBase, register, and the executor calls it.
-  - ctx.messages contains the conversation history from the request, as
-    canonical messages whose authority the request could not choose.
-  - ctx.model contains the model name from the request.
-  - ctx.stream reflects the stream flag from the request.
-  - ctx.metadata persists between steps when passed via dataclasses.replace.
-  - ctx.store_coordinator is None when no session key is present.
-  - Emitting a Signal(kind='result') produces content in the response.
+The tests cover canonical request messages, model and stream settings, step
+metadata, coordinator availability, and emitted result signals.
 """
 
 from __future__ import annotations
@@ -38,10 +30,6 @@ pytestmark = pytest.mark.integration
 _MAPPING = {"chat_completions": "wf"}
 
 
-# ---------------------------------------------------------------------------
-# Inspector step — captures ctx fields for assertion
-# ---------------------------------------------------------------------------
-
 class InspectorStep(StepBase):
     """Captures ctx fields into a shared dict and terminates."""
     TYPE = "test_inspector"
@@ -64,10 +52,6 @@ def _clear_inspector():
     yield
     InspectorStep.captured.clear()
 
-
-# ---------------------------------------------------------------------------
-# Custom step registration and execution
-# ---------------------------------------------------------------------------
 
 async def test_custom_step_is_executed(
     session_factory, workflow_repo, resource_repo,
@@ -193,7 +177,7 @@ async def test_ctx_store_coordinator_is_ephemeral_without_session_key(
         with_session_store=True,
     )
     with TestClient(build_test_app(container)) as client:
-        # No session key header configured → ephemeral coordinator, not None
+    # Without a session key header, the coordinator is ephemeral.
         client.post(
             "/v1/chat/completions",
             json={"model": "test", "messages": [{"role": "user", "content": "x"}]},
@@ -201,10 +185,6 @@ async def test_ctx_store_coordinator_is_ephemeral_without_session_key(
 
     assert InspectorStep.captured["coordinator"] is not None
 
-
-# ---------------------------------------------------------------------------
-# ctx.metadata persists between steps via dataclasses.replace
-# ---------------------------------------------------------------------------
 
 _META_RECEIVED: dict = {}
 
@@ -267,10 +247,6 @@ async def test_metadata_propagates_between_steps(
     assert resp.status_code == 200
     assert _META_RECEIVED.get("key") == "value"
 
-
-# ---------------------------------------------------------------------------
-# Emitting a result signal produces content in the response
-# ---------------------------------------------------------------------------
 
 class EmittingStep(StepBase):
     TYPE = "test_emitter"

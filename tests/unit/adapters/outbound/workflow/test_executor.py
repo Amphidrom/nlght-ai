@@ -1,11 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for StepMachineWorkflowExecutor.
+"""Execute fake workflows through the step machine.
 
-Each test drives the executor with a fake workflow built from WorkflowStepDef
-fixtures. Real step classes are registered on a fresh StepLoader per test —
-no shared global state.
+Each test registers step classes on an isolated loader.
 """
 from __future__ import annotations
 
@@ -13,7 +11,7 @@ import dataclasses
 import uuid
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +20,7 @@ from nlght.adapters.outbound.workflow.executor import StepMachineWorkflowExecuto
 from nlght.adapters.outbound.workflow.loader import StepLoader
 from nlght.core.entry.context import PrincipalRef, RequestContext
 from nlght.core.errors.errors import WorkflowConfigurationError, WorkflowExecutionError
+from nlght.core.model.trust import ContentLedger, ContentTrust
 from nlght.core.protocol.protocol import ProtocolKind
 from nlght.core.session import SessionAccess
 from nlght.core.signals.signal import Signal
@@ -34,10 +33,6 @@ from nlght.core.workflow.workflow import (
     WorkflowVersionDef,
 )
 from nlght.ports.outbound.access_policy import ModelAccessPolicy
-
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
 
 
 def _request_context() -> RequestContext:
@@ -121,11 +116,6 @@ def _make_executor(*step_classes: type[StepBase]) -> StepMachineWorkflowExecutor
     return StepMachineWorkflowExecutor(loader=loader)
 
 
-# ---------------------------------------------------------------------------
-# Step stubs
-# ---------------------------------------------------------------------------
-
-
 class _DoneStep(StepBase):
     TYPE = "emit_done"
 
@@ -151,7 +141,7 @@ class _EmitAndDone(StepBase):
 
 
 class _TerminalStep(StepBase):
-    """is_terminal=True in the step def — any verdict ends the machine."""
+    """A step whose configured terminal status ends the workflow after any verdict."""
 
     TYPE = "terminal_step"
 
@@ -174,7 +164,7 @@ class _StepB(StepBase):
 
 
 class _InfiniteStep(StepBase):
-    """Returns a verdict that loops back to itself — triggers max_hops."""
+    """A step that loops to itself until the workflow reaches its hop limit."""
 
     TYPE = "infinite"
 
@@ -197,11 +187,6 @@ class _RaisingStep(StepBase):
 
     async def run(self, ctx: WorkflowStepContext) -> StepResult:
         raise RuntimeError("step exploded")
-
-
-# ---------------------------------------------------------------------------
-# execute() tests
-# ---------------------------------------------------------------------------
 
 
 async def test_execute_single_done_step_returns_response() -> None:
@@ -350,11 +335,6 @@ async def test_execute_metadata_persists_across_steps() -> None:
     assert captured.get("written") is True
 
 
-# ---------------------------------------------------------------------------
-# stream() tests
-# ---------------------------------------------------------------------------
-
-
 async def test_stream_yields_sse_bytes() -> None:
     executor = _make_executor(_EmitAndDone)
     step = _step_def("emit_and_done", is_start=True)
@@ -374,11 +354,6 @@ async def test_stream_failed_verdict_propagates_exception() -> None:
     with pytest.raises(WorkflowExecutionError):
         async for _ in executor.stream(_invocation([step], stream=True)):
             pass
-
-
-# ---------------------------------------------------------------------------
-# max_hops — boundary cases
-# ---------------------------------------------------------------------------
 
 
 async def test_execute_max_hops_uses_configured_fallback_step() -> None:
@@ -401,13 +376,13 @@ async def test_execute_max_hops_uses_configured_fallback_step() -> None:
     result = await executor.execute(_invocation([step_inf, step_fallback]))
 
     assert "choices" in result
-    # The handler is routed to *and executed*; routing without running it made a
+    # The handler is routed to *and executed*. Routing without running it made a
     # configured max_hops step dead weight.
     assert _MaxHopsFallback.ran is True
 
 
 async def test_execute_max_hops_fallback_step_disabled_hard_stops() -> None:
-    """A registered but disabled "max_hops" step must not be routed to — hard stop instead."""
+    """Stop at the hop limit when the fallback step is disabled."""
     id_inf = uuid.uuid4()
     id_fallback = uuid.uuid4()
 
@@ -451,19 +426,10 @@ async def test_execute_exactly_at_max_hops_boundary_does_not_overrun() -> None:
     assert "choices" in result
 
 
-# ---------------------------------------------------------------------------
-# A step working through its own batches
-# ---------------------------------------------------------------------------
-
-
 class _BatchingStep(StepBase):
-    """Processes one item per invocation and reports `more` while items remain.
+    """A step that processes one item per invocation until its corpus is complete.
 
-    The contract every corpus step follows: a batch size says how much happens in
-    one invocation, never how much a run may finish. How much a run may finish is
-    the workflow's `max_hops`, and a workflow shaped like this has to set one —
-    the runtime default of 20 is for a flow that answers a request, not one that
-    walks a corpus.
+    Batch size limits one invocation; the workflow hop limit bounds the whole run.
     """
 
     TYPE = "batching"
@@ -543,11 +509,6 @@ async def test_routing_between_steps_is_still_bounded() -> None:
         await executor.execute(_invocation(steps))
 
 
-# ---------------------------------------------------------------------------
-# ModelAccessPolicy — denial paths
-# ---------------------------------------------------------------------------
-
-
 class _AllowAllModelPolicy:
     async def is_allowed(self, model_name: str, caller: RequestContext) -> bool:
         return True
@@ -584,7 +545,7 @@ class _StubBackend:
 
 
 class _StubBoundClient:
-    async def call(self, messages: list[dict[str, Any]], *, temperature: float | None = None) -> None:
+    async def call(self, messages: list[dict[str, Any]]) -> None:
         return None
 
 
@@ -623,11 +584,6 @@ async def test_model_access_policy_allows_proceeds_normally() -> None:
     result = await executor.execute(_invocation([step]))
 
     assert "choices" in result
-
-
-# ---------------------------------------------------------------------------
-# Orchestration lifecycle and error isolation
-# ---------------------------------------------------------------------------
 
 
 async def test_execute_rejects_duplicate_correlation_id_and_recovers_after_unregister() -> None:
@@ -740,11 +696,6 @@ async def test_turn_branch_merge_failure_does_not_change_successful_result() -> 
     assert "choices" in result
 
 
-# ---------------------------------------------------------------------------
-# workflow name reaches the access policies
-# ---------------------------------------------------------------------------
-
-
 class _RecordingModelPolicy:
     def __init__(self) -> None:
         self.callers: list[RequestContext] = []
@@ -806,19 +757,14 @@ async def test_the_original_trigger_context_is_not_mutated() -> None:
     invocation = _invocation([_step_def("emit_done", is_start=True)])
     await executor.execute(invocation)
 
-    # The stamp is applied to a copy; the submitted trigger stays untouched.
+    # The stamp is applied to a copy. The submitted trigger stays untouched.
     assert invocation.trigger.context.workflow is None
     assert builder.callers[0].workflow == "test-workflow"
 
 
-# ---------------------------------------------------------------------------
-# The hop budget belongs to the workflow
-# ---------------------------------------------------------------------------
-
-
 async def test_a_workflow_may_raise_its_own_budget() -> None:
     # A pipeline spends a hop per document, so the number that suits a request
-    # does not suit a corpus — and only the workflow knows which it is.
+    # does not suit a corpus, and only the workflow knows which it is.
     id_loop = uuid.uuid4()
     step = _step_def("infinite", is_start=True, transitions={"loop": id_loop}, step_id=id_loop)
     executor = _make_executor(_InfiniteStep)
@@ -829,7 +775,7 @@ async def test_a_workflow_may_raise_its_own_budget() -> None:
 
 async def test_a_workflow_may_switch_the_guard_off_entirely() -> None:
     # Zero means unbounded. Deliberate: a deployment may prefer a run that never
-    # stops to one that stops early. Proved with a step that ends on its own —
+    # stops to one that stops early. Use a step that ends on its own because
     # an actually endless one would hang this test, which is the point.
     id_loop = uuid.uuid4()
     id_done = uuid.uuid4()
@@ -877,18 +823,7 @@ async def test_a_step_repeating_itself_spends_the_budget_like_any_other_move() -
 
 
 async def test_a_workflow_name_already_on_the_context_is_replaced_not_believed() -> None:
-    """A `workflow` condition must authorize against the flow actually running.
-
-    A fan-out child inherits its parent's context, parent workflow name included,
-    and the child then runs something else entirely. If the executor deferred to
-    the value it was handed, a rule saying "this tool only inside ingest-data"
-    would be evaluated against the parent's name while the child ran a different
-    flow — an authorization decision made about the wrong subject.
-
-    The name is the executor's to establish, because it is the one thing here
-    that knows which workflow it is running. What arrives on the context is at
-    best a copy and at worst a stale one.
-    """
+    """Stamp the running workflow name over inherited context metadata."""
     builder = _RecordingToolCatalogBuilder()
     loader = StepLoader()
     loader.register(_DoneStep)
@@ -921,3 +856,41 @@ async def test_the_established_principal_reaches_the_policies_untouched() -> Non
     await executor.execute(dataclasses.replace(invocation, trigger=identified))
 
     assert [c.principal for c in builder.callers] == [PrincipalRef("alice")]
+
+
+class _LedgerCatalog:
+    def __init__(self) -> None:
+        self.ledger = ContentLedger()
+
+
+class _LedgerCatalogBuilder:
+    def __init__(self) -> None:
+        self.catalog = _LedgerCatalog()
+
+    async def build(self, **_: object) -> _LedgerCatalog:
+        return self.catalog
+
+
+class _CaptureLedgerStep(StepBase):
+    TYPE = "capture_ledger"
+    seen: ClassVar[list[ContentLedger]] = []
+
+    async def run(self, ctx: WorkflowStepContext) -> StepResult:
+        type(self).seen.append(ctx.ledger)
+        return StepResult(ctx=ctx, verdict="done")
+
+
+async def test_the_run_ledger_is_the_catalogs_and_starts_with_the_callers_messages() -> None:
+    builder = _LedgerCatalogBuilder()
+    loader = StepLoader()
+    loader.register(_CaptureLedgerStep)
+    executor = StepMachineWorkflowExecutor(loader=loader, tool_catalog_builder=builder)
+    _CaptureLedgerStep.seen.clear()
+
+    await executor.execute(_invocation([_step_def("capture_ledger", is_start=True)]))
+
+    (ledger,) = _CaptureLedgerStep.seen
+    assert ledger is builder.catalog.ledger
+    (ref,) = ledger.exposure.untrusted_sources
+    assert ref.kind == "caller"
+    assert ref.trust is ContentTrust.UNTRUSTED

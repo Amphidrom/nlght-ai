@@ -80,7 +80,7 @@ async def seeded():
 
 @pytest.fixture
 def client(seeded):
-    # The app's own lifespan builds an engine from the environment; the fixture
+    # The app's own lifespan builds an engine from the environment. The fixture
     # has already supplied one, so it is deliberately not run here.
     return TestClient(app_module.app)
 

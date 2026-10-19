@@ -1,23 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Derived semantics for indexed documents.
-
-Ported from ``next-integration/data-indexer/indexing/pipeline.py``. Two
-independent derivations, both purely statistical or structural — no model, no
-heuristics that drift:
-
-* **chunk semantics** — the terms that distinguish one chunk from its siblings,
-  by term frequency against inverse document frequency within the document.
-* **structural semantics** — identity tokens expanded from a path or fully
-  qualified name, so ``billing.service`` is findable as ``billing`` and
-  ``service`` too.
-
-They feed two different searches. Chunk semantics improve content retrieval;
-structural semantics back symbol and identifier lookup, which is why the
-prototype writes them as a *separate* vector per document rather than mixing
-them into the content vectors.
-"""
+"""Derive deterministic textual terms for indexed document chunks."""
 
 from __future__ import annotations
 
@@ -28,10 +12,13 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 def tokenize(text: str) -> list[str]:
-    """Deterministic tokenisation: regex only, no stopwords, no stemming.
+    """Tokenize text consistently for semantic term derivation.
 
-    Single source of truth for both derivations, so a term that survives one
-    survives the other.
+    Args:
+        text (str): Source text.
+
+    Returns:
+        list[str]: Lowercase alphanumeric tokens of at least two characters, plus digits.
     """
     return [
         match.group(0).lower()
@@ -47,12 +34,16 @@ def derive_chunk_semantics(
     min_df: int = 1,
     max_df_ratio: float = 0.80,
 ) -> list[list[str]]:
-    """Terms that distinguish each chunk from the rest of its document.
+    """Rank terms that distinguish chunks within one document.
 
-    Scored as term frequency divided by document frequency: a word appearing in
-    almost every chunk describes the document, not the chunk, so
-    ``max_df_ratio`` drops it. What remains is what makes a chunk findable on
-    its own.
+    Args:
+        chunks (list[str]): Chunk texts from one document.
+        top_k (int): Maximum terms returned for each chunk.
+        min_df (int): Minimum document frequency for an eligible term.
+        max_df_ratio (float): Maximum share of chunks in which a term may appear.
+
+    Returns:
+        list[list[str]]: Distinctive terms for each chunk, in the same order as the input.
     """
     chunk_tokens = [tokenize(chunk) for chunk in chunks]
     if not chunk_tokens:

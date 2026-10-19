@@ -13,18 +13,13 @@ if TYPE_CHECKING:
 class WorkspaceManager(Protocol):
     """Manages the lifecycle of workspaces.
 
-    get_or_create:
-        session_key=None  → ephemeral workspace (temp dir; automatically
-                            deleted after the invocation)
-        session_key=str   → session workspace (persistent, reused for
-                            the same session_key across multiple requests)
-
-    release:
-        Ephemeral → deletes the directory.
-        Session   → removed from the in-memory registry; directory remains.
+    ``get_or_create(None)`` creates an ephemeral directory that is deleted after
+    the invocation. A session key reuses a persistent directory across requests.
+    ``release()`` deletes ephemeral directories and removes session workspaces
+    from the in-memory registry while retaining their directories.
 
     The protocol logic that extracts the session_key lives in the
-    TriggerResolver — the WorkspaceManager only knows the key.
+    ``TriggerResolver``. The workspace manager receives the resolved key.
     """
 
     async def get_or_create(self, session_key: str | None) -> WorkspaceContext: ...

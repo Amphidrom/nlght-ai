@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from nlght.core.config.runtime_context import (
+    ActionAuthorizationRuntime,
     AnthropicModelProviderRuntime,
     DockerOsRuntimeSubsystemRuntime,
     ExecutionRuntime,
@@ -29,6 +31,33 @@ from nlght.core.config.runtime_context import (
     RuntimeContext,
 )
 from nlght.core.config.snapshot import PlatformConfigSnapshot
+
+
+def _provider_temperature(name: str, config: dict[str, Any]) -> float | None:
+    """Parse a provider's configured sampling temperature.
+
+    Args:
+        name (str): Provider name used in validation errors.
+        config (dict[str, Any]): Provider configuration containing an optional temperature.
+
+    Returns:
+        float | None: Numeric temperature or None when unspecified.
+
+    Raises:
+        ValueError: The configured temperature is invalid.
+    """
+    if "temperature" not in config or config["temperature"] is None:
+        return None
+    raw = config["temperature"]
+    if isinstance(raw, bool):
+        raise ValueError(f"model provider '{name}': temperature must be a number, not {raw!r}")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"model provider '{name}': temperature must be a number, not {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"model provider '{name}': temperature must not be negative, got {value}")
+    return value
 
 
 class CompositionService:
@@ -61,6 +90,13 @@ class CompositionService:
             )
         if not stream_config.channel.strip():
             raise ValueError("execution.stream.channel must not be empty")
+        authorization_config = snapshot.action_authorization
+        for key in ("policy_timeout_seconds", "approval_timeout_seconds"):
+            # Finite on purpose: a decision without a deadline can hold a
+            # worker's lease for as long as a policy or a person hangs.
+            seconds = getattr(authorization_config, key)
+            if not (math.isfinite(seconds) and seconds > 0):
+                raise ValueError(f"action_authorization.{key} must be a positive, finite number")
 
         protocol_detector_runtimes = [
             ProtocolDetectorRuntime(
@@ -88,7 +124,6 @@ class CompositionService:
             else None
         )
 
-        # ── OS Runtime (singular) ────────────────────────────────────────────
         os_runtime_cfg = snapshot.os_runtime
         os_runtime: LocalOsRuntimeSubsystemRuntime | DockerOsRuntimeSubsystemRuntime | None = None
         if os_runtime_cfg is not None and os_runtime_cfg.enabled:
@@ -111,7 +146,6 @@ class CompositionService:
                     ),
                 )
 
-        # ── Persistence (from integrations.persistence.workflows) ────────────
         workflows_cfg = snapshot.integrations.persistence.workflows
         persistence: PersistenceSubsystemRuntime | None = None
         if workflows_cfg.url:
@@ -124,7 +158,6 @@ class CompositionService:
                 ),
             )
 
-        # ── Gateways ─────────────────────────────────────────────────────────
         gateways: list[Any] = []
         for gw in snapshot.gateways:
             if not gw.enabled:
@@ -146,7 +179,6 @@ class CompositionService:
                     )
                 )
 
-        # ── Model Providers ──────────────────────────────────────────────────
         model_providers: list[Any] = []
         for provider in snapshot.integrations.model_providers:
             if not provider.enabled:
@@ -156,7 +188,7 @@ class CompositionService:
                 if not isinstance(headers, dict):
                     headers = {}
                 # Cloud kinds ("ollama"/"ollama-cloud") default to the public
-                # Ollama Cloud endpoint so an API key alone is enough; only the
+                # Ollama Cloud endpoint so an API key alone is enough. Only the
                 # local daemon defaults to localhost. Any base_url in config wins.
                 default_base = "http://localhost:11434" if provider.kind == "ollama-local" else "https://ollama.com"
                 kwargs = dict(
@@ -180,6 +212,7 @@ class CompositionService:
                         if "stream_read_timeout_s" in provider.config
                         else None
                     ),
+                    temperature=_provider_temperature(provider.name, provider.config),
                 )
                 runtime_cls = (
                     OllamaLocalModelProviderRuntime
@@ -191,6 +224,11 @@ class CompositionService:
                 # each value above is already correctly coerced (str/float/dict).
                 model_providers.append(runtime_cls(**kwargs))  # type: ignore[arg-type]
             elif provider.kind == "anthropic":
+                if "temperature" in provider.config:
+                    raise ValueError(
+                        f"model provider '{provider.name}' (kind: anthropic) does not support "
+                        f"'temperature': the Anthropic SDK takes no sampling parameters"
+                    )
                 model_providers.append(
                     AnthropicModelProviderRuntime(
                         name=provider.name,
@@ -205,6 +243,7 @@ class CompositionService:
                         api_key=str(provider.config.get("api_key", "")),
                         default_model=str(provider.config.get("default_model", "gpt-4o")),
                         base_url=str(provider.config.get("base_url", "")),
+                        temperature=_provider_temperature(provider.name, provider.config),
                     )
                 )
             elif provider.kind == "google":
@@ -212,7 +251,8 @@ class CompositionService:
                     GoogleModelProviderRuntime(
                         name=provider.name,
                         api_key=str(provider.config.get("api_key", "")),
-                        default_model=str(provider.config.get("default_model", "gemini-3.5-flash")),
+                        default_model=str(provider.config.get("default_model", "gemini-3.6-flash")),
+                        temperature=_provider_temperature(provider.name, provider.config),
                     )
                 )
             else:
@@ -243,6 +283,11 @@ class CompositionService:
                 license_key=snapshot.licensing.license_key,
             ),
             watchers=list(snapshot.watchers),
+            action_authorization=ActionAuthorizationRuntime(
+                enabled=authorization_config.enabled,
+                policy_timeout_seconds=authorization_config.policy_timeout_seconds,
+                approval_timeout_seconds=authorization_config.approval_timeout_seconds,
+            ),
             execution=ExecutionRuntime(
                 role=execution_config.role,
                 instance_name=worker_config.instance_name,

@@ -183,7 +183,7 @@ def test_fetch_builds_license_and_activates_no_machine(monkeypatch: pytest.Monke
     assert license_.tier is Tier.COMMERCIAL
     assert license_.entitlements == frozenset({"playbook-a"})
     assert client_options == [{}]
-    # max_machines population was intentionally dropped in "Update Licensing";
+    # max_machines population was intentionally dropped in "Update Licensing".
     # limits is now always empty until the tier rework lands.
     assert license_.limits == {}
 

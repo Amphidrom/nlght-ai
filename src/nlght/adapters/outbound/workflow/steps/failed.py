@@ -9,7 +9,7 @@ from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
 class FailedStep(StepBase):
     """Terminal step that signals workflow failure.
 
-    Emits nothing — the error path is a structural terminal marker only.
+    Emits nothing because the error path is a structural terminal marker.
     Preceding steps are responsible for emitting any error signals before
     transitioning here.
     """
@@ -17,4 +17,4 @@ class FailedStep(StepBase):
     TYPE = "failed"
 
     async def run(self, ctx: WorkflowStepContext) -> StepResult:
-        return StepResult(ctx=ctx, verdict="failed")
+        return StepResult(ctx=ctx, verdict=self.Verdict.FAILED)

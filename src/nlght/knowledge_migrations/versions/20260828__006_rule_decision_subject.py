@@ -3,8 +3,8 @@
 
 """A short subject and property for rules and decisions.
 
-Both kinds were identified by free text — a rule by its whole sentence, a
-decision by two of them — so two runs over one unchanged page agreed only when
+Both kinds were identified by free text: a rule by its whole sentence and a
+decision by two sentences. Two runs over one unchanged page agreed only when
 the model answered word for word. `pattern` has had the right shape all along:
 a short name beside a mutable description. These two get the same.
 
@@ -15,7 +15,7 @@ to express.
 
 **This is a schema migration, not an identity migration.** Identity still comes
 from content. Re-deriving it from these fields would rewrite what every existing
-assertion is, and it belongs with entity keys, variants and lineage — after the
+assertion is, and it belongs with entity keys, variants and lineage after the
 matcher that carries the continuity exists, not before it.
 
 Revision ID: 0006

@@ -1,18 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What survives a budget, and in which form.
+"""Choose which mental elements survive a token budget.
 
-The reduction is defined by what it refuses to know. A directive, a session
-result and a retrieved passage are different things and stay different things —
-but nothing here may ask which it is holding, because a rule that branches on
-where information came from gives a corpus one policy per store and no way to
-weigh a memory against a passage.
-
-So most of these tests pin an absence: no type in the rule, no invented text, no
-level that went back up, no mandatory element quietly dropped to make a number
-work.
-"""
+Reduction uses a shared element contract without branching on source type."""
 
 from __future__ import annotations
 
@@ -58,13 +49,12 @@ def _element(
     )
 
 
-def _levels(view) -> dict[str, Level]:  # noqa: ANN001
+def _levels(view) -> dict[str, Level]:
     said = {element.element_id: representation.level for element, representation in view.kept}
     return {**{item.element_id: Level.OMIT for item in view.forgotten}, **said}
 
 
-# 1-2. More budget is never less; less budget is never more
-# ---------------------------------------------------------------------------
+# 1-2. More budget is never less. Less budget is never more
 
 def test_more_budget_never_yields_a_less_complete_view() -> None:
     """The guarantee that makes two budgets comparable at all.
@@ -103,7 +93,6 @@ def test_information_only_decreases_as_the_budget_shrinks() -> None:
 
 
 # 3-5. What goes first, what is shortened, what stays
-# ---------------------------------------------------------------------------
 
 def test_the_dispensable_is_forgotten_before_the_important() -> None:
     elements = [
@@ -143,12 +132,7 @@ def test_a_mandatory_element_survives() -> None:
 
 
 def test_a_mandatory_element_too_large_is_reported_not_dropped() -> None:
-    """Over budget is said out loud rather than made to go away.
-
-    Dropping what was declared mandatory to make a number fit would be the
-    reduction overruling the caller about what may be lost — and it would do it
-    silently, which is the part that makes it indefensible.
-    """
+    """Report an oversized mandatory element instead of silently dropping it."""
     elements = [_element("rule", retention=Retention.MANDATORY, full=500)]
 
     view = reduce_to_budget(elements, budget=10)
@@ -159,7 +143,6 @@ def test_a_mandatory_element_too_large_is_reported_not_dropped() -> None:
 
 
 # 6. Provenance outlives the representation
-# ---------------------------------------------------------------------------
 
 def test_provenance_survives_being_compacted() -> None:
     trail = object()
@@ -184,7 +167,6 @@ def test_a_full_representation_is_not_marked_derived() -> None:
 
 
 # 7. The type never decides
-# ---------------------------------------------------------------------------
 
 def test_the_kind_changes_nothing() -> None:
     """The invariant the whole design exists for.
@@ -193,7 +175,7 @@ def test_the_kind_changes_nothing() -> None:
     in what sort of thing they are, must reduce identically. If this ever fails,
     storage types are deciding policy again.
     """
-    def _run(kinds: tuple[str, str]):  # noqa: ANN202
+    def _run(kinds: tuple[str, str]):
         return _levels(reduce_to_budget(
             [
                 _element("x", kind=kinds[0], retention=Retention.USEFUL,
@@ -220,7 +202,6 @@ def test_relevance_orders_within_a_band_and_not_across_one() -> None:
 
 
 # 8-10. Any mixture of inputs, one engine
-# ---------------------------------------------------------------------------
 
 def test_retrieval_only_works_with_no_memory_at_all() -> None:
     passages = [
@@ -248,11 +229,7 @@ def test_memory_only_works_with_no_retrieval_at_all() -> None:
 
 
 def test_both_together_are_decided_in_one_pass() -> None:
-    """Not a retrieval budget beside a memory budget — one decision.
-
-    A passage that matters less than a memory loses to it, and the other way
-    round, because they are being weighed rather than allocated.
-    """
+    """Reduce retrieval passages and memory elements against one budget."""
     mixed = [
         _element("passage-strong", kind="passage", retention=Retention.USEFUL,
                  relevance=0.9, full=10),
@@ -278,7 +255,6 @@ def test_an_empty_model_is_not_an_error() -> None:
 
 
 # The types refuse what they cannot mean
-# ---------------------------------------------------------------------------
 
 def test_an_element_must_offer_something() -> None:
     with pytest.raises(ValueError, match="offers no representation"):
@@ -326,16 +302,7 @@ def test_a_shorter_form_that_costs_more_is_refused() -> None:
 
 
 def test_an_element_need_not_offer_every_level() -> None:
-    """Representation levels are optional, and that is load-bearing.
-
-    Requiring `COMPACT` would force every adapter to invent one — by truncating,
-    or by pulling out a sentence and hoping it carries the claim. The contract is
-    that adapters *produce* representations and the engine only chooses among
-    them; an adapter with nothing honest to offer must be able to offer nothing.
-
-    The cost ordering therefore constrains only the levels an element actually
-    has, and a reduction step for a level it does not offer is skipped.
-    """
+    """Accept elements that do not offer every representation level."""
     only_whole = MentalElement(
         element_id="p", kind="passage",
         representations=(
@@ -352,7 +319,7 @@ def test_an_element_need_not_offer_every_level() -> None:
 
 
 def test_an_element_may_offer_only_one_level() -> None:
-    # Nothing is required to be omittable either — a mandatory element with a
+    # Mandatory elements need not offer an omit form. An element with a
     # single representation is a thing an adapter may legitimately produce.
     fixed = MentalElement(
         element_id="rule", kind="directive",
@@ -367,7 +334,6 @@ def test_an_element_may_offer_only_one_level() -> None:
 
 
 # The competition, which is where the interesting bugs are
-# ---------------------------------------------------------------------------
 
 def _competing() -> list[MentalElement]:
     """One element per retention band, each with a real short form.
@@ -375,6 +341,9 @@ def _competing() -> list[MentalElement]:
     A single element under pressure exercises almost nothing: it is kept or it
     is not. What has to hold is the *ordering* between elements that want the
     same room, which is why every case below runs all four together.
+
+    Returns:
+        list[MentalElement]: Elements spanning the retention bands.
     """
     return [
         _element("mandatory", retention=Retention.MANDATORY, relevance=0.5,
@@ -405,7 +374,7 @@ def _competing() -> list[MentalElement]:
                "useful": Level.COMPACT, "dispensable": Level.OMIT}),
         (200, {"mandatory": Level.FULL, "important": Level.FULL,
                "useful": Level.OMIT, "dispensable": Level.OMIT}),
-        # Only then is the important one shortened — never dropped before the
+        # Only then is the important one shortened, never dropped before the
         # useful one has already gone.
         (150, {"mandatory": Level.FULL, "important": Level.COMPACT,
                "useful": Level.OMIT, "dispensable": Level.OMIT}),
@@ -445,7 +414,7 @@ def test_every_budget_from_full_to_nothing_is_monotone() -> None:
 
 def test_the_view_costs_no_more_than_the_budget_whenever_that_is_possible() -> None:
     # The one exception is a mandatory set that cannot fit, which is reported
-    # rather than forced — asserted separately above.
+    # rather than forced, as checked separately above.
     elements = _competing()
     floor = elements[0].at(Level.COMPACT).cost
 

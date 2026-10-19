@@ -1,24 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Regression — a terminal tool call must close the native /api/chat stream.
+"""Close a native Ollama stream after a terminal tool call.
 
-Reproduces the attack_chain_analyzer "64k hang" without a live model.
-
-The real failure was NOT an infinite generation: the model emitted its
-turn-ending tool call (``chain_analysis_done``) early — the answer was already
-there — but the client kept draining the stream until the model's own ``done``,
-which only arrived ~1h later.  read_timeout is intentionally off, so nothing
-broke the wait.
-
-A tool whose contract is ``terminal`` closes the turn: the model client must
-stop reading and close the connection the moment such a tool call is parsed,
-cancelling the trailing generation instead of waiting for ``done``.
-
-The transport below streams a couple of tokens, then a terminal tool call, then
-an unbounded run of trailing tokens.  A correct client closes at the tool call
-and never drains the trailing tokens.
-"""
+The regression uses a fake model stream to catch continued generation after
+the completed tool call."""
 from __future__ import annotations
 
 import asyncio
@@ -36,7 +22,7 @@ from nlght.core.tools.tool import ToolParameter
 
 
 class _TerminalThenRunawayStream(httpx2.AsyncByteStream):
-    """Tokens → terminal tool call → unbounded trailing tokens."""
+    """A stream that emits a terminal tool call followed by unbounded tokens."""
 
     def __init__(self) -> None:
         self.closed = False
@@ -50,7 +36,7 @@ class _TerminalThenRunawayStream(httpx2.AsyncByteStream):
                 {"function": {"name": "chain_analysis_done", "arguments": {"summary": "no chains"}}}
             ]}}) + "\n"
         ).encode()
-        # The model keeps rambling without ever sending `done` — a correct client
+        # The model keeps emitting tokens without sending `done`. A correct client
         # must never consume any of this.
         while True:
             await asyncio.sleep(0)
@@ -99,10 +85,10 @@ async def test_terminal_tool_call_closes_stream_without_draining_trailing_tokens
     )
 
     async def _consume() -> None:
-        async for _event in bound.stream([{"role": "user", "content": "go"}], temperature=0.1):
+        async for _event in bound.stream([{"role": "user", "content": "go"}]):
             pass
 
-    # Must terminate promptly at the terminal tool call — never drain the runaway.
+    # Must terminate promptly at the terminal tool call, never drain the runaway.
     await asyncio.wait_for(_consume(), timeout=3.0)
 
     assert transport.stream.closed is True          # connection closed at the terminal call

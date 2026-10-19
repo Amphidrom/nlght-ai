@@ -12,8 +12,8 @@ reindex resumable: a document already on the current generation is done.
 
 Existing rows are backfilled with a generation minted here, one per target, so
 an established corpus is not forced through a full reindex. What that cannot
-know is whether an index was already wiped before this migration ran — the
-reconcile path is what finds that.
+know is whether an index was already wiped before this migration ran. The
+reconcile path finds that.
 
 Revision ID: 0004
 Revises: 0003

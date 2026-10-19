@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.core.hive_mind.models — all data types."""
+"""Check mental model data types and their invariants."""
 from __future__ import annotations
 
 import pytest
@@ -24,9 +24,6 @@ from nlght.core.hive_mind.models import (
     WorkingAtom,
 )
 
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
 
 def test_atom_type_values() -> None:
     assert AtomType.RESULT == "RESULT"
@@ -45,10 +42,6 @@ def test_severity_values() -> None:
     assert Severity.error == "error"
     assert Severity.warning == "warning"
 
-
-# ---------------------------------------------------------------------------
-# RelevanceWeights
-# ---------------------------------------------------------------------------
 
 def test_relevance_weights_default_valid() -> None:
     w = RelevanceWeights()
@@ -69,20 +62,12 @@ def test_relevance_weights_validation_rejects_negative_proximity_boost() -> None
         RelevanceWeights(proximity_boost=-0.1).validate()
 
 
-# ---------------------------------------------------------------------------
-# RelevanceScore
-# ---------------------------------------------------------------------------
-
 def test_relevance_score_repr() -> None:
     score = RelevanceScore(recency=0.8, proximity=0.6, volatility=0.2, dependency=0.4, total=0.65)
     r = repr(score)
     assert "r=0.80" in r
     assert "0.65" in r
 
-
-# ---------------------------------------------------------------------------
-# SessionResult
-# ---------------------------------------------------------------------------
 
 def test_session_result_is_file_backed_false_by_default() -> None:
     r = SessionResult(content="hello")
@@ -100,10 +85,6 @@ def test_session_result_peek_file_backed() -> None:
     r = SessionResult(content="", workspace_path="/tmp/x.txt")
     assert "[file:" in r.peek()
 
-
-# ---------------------------------------------------------------------------
-# MentalModel
-# ---------------------------------------------------------------------------
 
 def _make_mental_model(**kwargs) -> MentalModel:
     from datetime import UTC, datetime
@@ -142,10 +123,6 @@ def test_mental_model_repr() -> None:
     assert "valid=True" in r
 
 
-# ---------------------------------------------------------------------------
-# MentalModelCache
-# ---------------------------------------------------------------------------
-
 def test_mental_model_cache_empty_by_default() -> None:
     cache = MentalModelCache()
     assert cache.model is None
@@ -182,10 +159,6 @@ def test_mental_model_cache_repr_valid() -> None:
     assert "valid=True" in repr(cache)
 
 
-# ---------------------------------------------------------------------------
-# ControlSignalDecision
-# ---------------------------------------------------------------------------
-
 def test_control_signal_pass_through() -> None:
     d = ControlSignalDecision(pass_through=True)
     assert "pass_through" in repr(d)
@@ -199,10 +172,6 @@ def test_control_signal_repr_with_stop() -> None:
     r = repr(d)
     assert "stop=" in r
 
-
-# ---------------------------------------------------------------------------
-# Diagnostics
-# ---------------------------------------------------------------------------
 
 def test_diagnostics_summary_auto_populated() -> None:
     item = DiagnosticItem(message="err", severity=Severity.error)

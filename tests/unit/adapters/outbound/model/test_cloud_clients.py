@@ -44,18 +44,11 @@ from nlght.core.model.messages import AssistantMessage, ToolResultMessage, UserM
 from nlght.core.model.model_info import ModelInfo
 from prompt_injection_suite import PROHIBITED_SINK, make_eval_catalog
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 async def _async_iter(items):
     for item in items:
         yield item
 
-
-# ---------------------------------------------------------------------------
-# Anthropic
-# ---------------------------------------------------------------------------
 
 def _anthropic_client(default_model: str = "claude-sonnet-4-6") -> AnthropicModelClient:
     obj = AnthropicModelClient.__new__(AnthropicModelClient)
@@ -186,10 +179,9 @@ async def test_anthropic_stream() -> None:
 
 
 async def test_anthropic_stream_surfaces_tool_use_as_tool_call() -> None:
-    # Regression: AsyncMessageStream.get_final_message() is async and MUST be
-    # awaited. Without the await, `final` is a coroutine, the except swallows the
-    # AttributeError, and tool_use blocks never reach the caller as tool_call
-    # events — the streaming tool loop silently produces no call.
+    # Await get_final_message() so tool_use blocks reach the caller. A missed
+    # await leaves a coroutine, hides the resulting AttributeError, and yields
+    # no tool call from the streaming loop.
     client  = _anthropic_client()
     emitter = BufferingSignalEmitter()
 
@@ -206,7 +198,7 @@ async def test_anthropic_stream_surfaces_tool_use_as_tool_call() -> None:
         @property
         def text_stream(self):
             async def _gen():
-                if False:  # model went straight to a tool call — no text
+                if False:  # The model issued a tool call without emitting text first.
                     yield ""
             return _gen()
         async def get_final_message(self):
@@ -255,10 +247,6 @@ async def test_anthropic_empty_response_handled() -> None:
     assert signals[0].content == ""
 
 
-# ---------------------------------------------------------------------------
-# OpenAI
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("client_type", [OpenAICloudModelClient, DebugOpenAICloudModelClient])
 def test_openai_defaults_to_official_endpoint(monkeypatch, client_type) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
@@ -286,6 +274,7 @@ def test_openai_base_url_override_wins(monkeypatch, client_type) -> None:
 
 def _openai_client(default_model: str = "gpt-4o") -> OpenAICloudModelClient:
     obj = OpenAICloudModelClient.__new__(OpenAICloudModelClient)
+    obj._temperature = None
     obj._client = MagicMock()
     obj._default_model = default_model
     return obj
@@ -401,12 +390,9 @@ async def test_openai_empty_response_handled() -> None:
     assert emitter.collected()[0].content == ""
 
 
-# ---------------------------------------------------------------------------
-# Google
-# ---------------------------------------------------------------------------
-
-def _google_client(default_model: str = "gemini-3.5-flash") -> GoogleModelClient:
+def _google_client(default_model: str = "gemini-3.6-flash") -> GoogleModelClient:
     obj = GoogleModelClient.__new__(GoogleModelClient)
+    obj._temperature = None
     obj._client = MagicMock()
 
     # Stub out genai types so the inline imports inside _complete/_stream work
@@ -433,7 +419,7 @@ def test_google_bind_uses_default_model() -> None:
 def test_google_append_tool_turn_uses_provider_neutral_types() -> None:
     client  = _google_client()
     emitter = BufferingSignalEmitter()
-    bound   = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=False)
+    bound   = client.bind(model="gemini-3.6-flash", emitter=emitter, stream=False)
 
     updated = bound.append_tool_turn(
         [{"role": "user", "content": "weather?"}],
@@ -476,7 +462,7 @@ def test_to_google_contents_lowers_tool_turn_to_function_call_and_response() -> 
 
 def test_to_google_contents_carries_thought_signature_on_function_call() -> None:
     # Gemini 3.x requires the model's thought_signature echoed back on the
-    # function_call part; it rides through the canonical tool-turn as base64 and
+    # function_call part. It rides through the canonical tool-turn as base64 and
     # must be decoded back to bytes on the Google part (else 400 INVALID_ARGUMENT).
     import base64
     sig = b"\x00\x01thought-sig"
@@ -504,7 +490,7 @@ def test_google_append_tool_turn_preserves_thought_signature() -> None:
     # _to_google_contents can re-emit it on the next call.
     client  = _google_client()
     emitter = BufferingSignalEmitter()
-    bound   = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=False)
+    bound   = client.bind(model="gemini-3.6-flash", emitter=emitter, stream=False)
 
     updated = bound.append_tool_turn(
         [{"role": "user", "content": "weather?"}],
@@ -528,13 +514,13 @@ def test_google_append_tool_turn_preserves_thought_signature() -> None:
 def test_google_bind_returns_bound_client() -> None:
     client  = _google_client()
     emitter = BufferingSignalEmitter()
-    bound   = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=False)
+    bound   = client.bind(model="gemini-3.6-flash", emitter=emitter, stream=False)
     assert isinstance(bound, BoundGoogleModelClient)
 
 
 async def test_google_token_budget_known_model() -> None:
     client = _google_client()
-    budget = await client.token_budget("gemini-3.5-flash")
+    budget = await client.token_budget("gemini-3.6-flash")
     assert budget.total == 1_048_576
 
 
@@ -552,7 +538,7 @@ async def test_google_complete_non_stream() -> None:
     fake.text = "hello gemini"
     client._client.aio.models.generate_content = AsyncMock(return_value=fake)
 
-    bound = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=False)
+    bound = client.bind(model="gemini-3.6-flash", emitter=emitter, stream=False)
     await bound.call([{"role": "user", "content": "hi"}])
 
     signals = emitter.collected()
@@ -572,7 +558,7 @@ async def test_google_stream() -> None:
         return_value=_async_iter([_Chunk("tok1"), _Chunk("tok2")])
     )
 
-    bound = client.bind(model="gemini-3.5-flash", emitter=emitter, stream=True)
+    bound = client.bind(model="gemini-3.6-flash", emitter=emitter, stream=True)
     await bound.call([{"role": "user", "content": "hi"}])
 
     signals = emitter.collected()
@@ -581,10 +567,6 @@ async def test_google_stream() -> None:
     assert len(tokens) == 2
     assert len(done) == 1
 
-
-# ---------------------------------------------------------------------------
-# _to_google_contents
-# ---------------------------------------------------------------------------
 
 def test_to_google_contents_extracts_system() -> None:
     system, contents = _to_google_contents([
@@ -623,10 +605,8 @@ def test_to_google_contents_multiple_system_messages_joined() -> None:
     assert "Part2" in system
 
 
-# ---------------------------------------------------------------------------
-# list_models — Anthropic is static-only; OpenAI/Google query live, with a
+    # list_models: Anthropic is static-only. OpenAI/Google query live, with a
 # static fallback on error
-# ---------------------------------------------------------------------------
 
 async def test_anthropic_list_models_returns_static_list() -> None:
     client = _anthropic_client()
@@ -662,26 +642,23 @@ async def test_google_list_models_returns_static_fallback_on_error() -> None:
     models = await client.list_models()
     assert len(models) > 0
     assert all(isinstance(m, ModelInfo) for m in models)
-    assert "gemini-3.5-flash" in [m.name for m in models]
+    assert "gemini-3.6-flash" in [m.name for m in models]
 
 
 async def test_google_list_models_uses_api_when_available() -> None:
     client = _google_client()
     fake_models = [
-        SimpleNamespace(name="publishers/google/models/gemini-3.5-flash"),
+        SimpleNamespace(name="publishers/google/models/gemini-3.6-flash"),
         SimpleNamespace(name="publishers/google/models/gemini-3.5-pro"),
     ]
     client._client.aio.models.list = AsyncMock(return_value=_async_iter(fake_models))
     models = await client.list_models()
-    assert [m.name for m in models] == ["gemini-3.5-flash", "gemini-3.5-pro"]
+    assert [m.name for m in models] == ["gemini-3.6-flash", "gemini-3.5-pro"]
 
-
-# ---------------------------------------------------------------------------
-# Ollama Cloud — provider-specific static budget (no /api/show)
-# ---------------------------------------------------------------------------
 
 def _ollama_cloud_client(default_model: str = "qwen3-coder:480b") -> OllamaCloudClient:
     obj = OllamaCloudClient.__new__(OllamaCloudClient)
+    obj._temperature = None
     obj._http = MagicMock()
     obj._default_model = default_model
     return obj
@@ -714,7 +691,7 @@ async def test_ollama_cloud_token_budget_does_not_query_api_show() -> None:
 
 
 def test_ollama_cloud_defaults_to_public_endpoint() -> None:
-    # A cloud provider needs only an API key — base_url defaults to ollama.com.
+    # An API key is sufficient because the base URL defaults to ollama.com.
     client = OllamaCloudClient(http_client=MagicMock(), default_model="gpt-oss:20b")
     assert client.native_base_url == "https://ollama.com"
 
@@ -784,7 +761,7 @@ async def test_ollama_cloud_pi_eval_proposal_ends_after_one_request() -> None:
         tool_catalog=catalog,
     )
 
-    await bound.call([UserMessage("Evaluate this case.")], temperature=0.0)
+    await bound.call([UserMessage("Evaluate this case.")])
 
     client._http.complete_message.assert_awaited_once()
     assert catalog.proposed_names == [PROHIBITED_SINK]

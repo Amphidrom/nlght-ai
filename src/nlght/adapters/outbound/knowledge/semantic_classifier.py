@@ -3,15 +3,16 @@
 
 """Asking a model whether two wordings say the same thing.
 
-The prompt is deliberately small. The model is not asked to extract, summarise or
-judge quality — only to answer one question with one word, about two sentences it
-is handed. A narrow question is one a small local model can answer reliably, and
+The prompt is deliberately small. The model does not extract, summarise, or
+judge quality. It answers one question about two supplied sentences with one
+word. A narrow question is one a small local model can answer reliably, and
 one whose answer is cheap to validate: anything that is not one of the three
 words is doubt, and doubt is a review.
 
-Pinned at `temperature=0` for the same reason extraction is: an answer that
-varies between runs would make a corpus nobody edited drift, which is the defect
-this whole design removes.
+Run it on a model provider configured with `temperature: 0`, for the same reason
+extraction is: an answer that varies between runs would make a corpus nobody
+edited drift, which is the defect this whole design removes. Sampling is the
+provider's configuration, not this call's.
 """
 
 from __future__ import annotations
@@ -52,13 +53,12 @@ class ModelPropositionClassifier:
         try:
             async for event in self._llm.stream(
                 [{"role": "user", "content": _PROMPT.format(old=old, new=new)}],
-                temperature=0.0,
             ):
                 if event.kind == "token" and event.content:
                     collected.append(event.content)
                 elif event.kind == "done":
                     break
-        except Exception:  # noqa: BLE001 (any backend failure is doubt, not a guess)
+        except Exception:
             # A classifier that cannot reach its backend must not decide that
             # nothing changed. Saying so sends the revision to review, which is
             # the direction a failure should fall in.

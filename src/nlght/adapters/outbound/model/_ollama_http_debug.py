@@ -31,7 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 def _merge_streamed_fragment(existing: str, fragment: str) -> str:
-    """Merge streamed text fragments without duplicating repeated overlap."""
+    """Merge streamed fragments without duplicating their common overlap.
+
+    Args:
+        existing (str): Text assembled so far.
+        fragment (str): New streamed text fragment.
+
+    Returns:
+        str: Combined text with repeated leading overlap removed.
+    """
     if not fragment:
         return existing
     if not existing:
@@ -50,7 +58,7 @@ def _merge_streamed_fragment(existing: str, fragment: str) -> str:
 class _OllamaHttp:
     """HTTP backend shared by OllamaClient and OllamaCloudClient.
 
-    Not part of the public API — composed, not subclassed.
+    This internal component is composed by clients and is not subclassed.
     """
 
     def __init__(
@@ -72,9 +80,6 @@ class _OllamaHttp:
         self._stream_connect_timeout_s = None if stream_connect_timeout_s is None else float(stream_connect_timeout_s)
         self._stream_read_timeout_s = None if stream_read_timeout_s is None else float(stream_read_timeout_s)
 
-    # ------------------------------------------------------------------
-    # Management API
-    # ------------------------------------------------------------------
 
     async def list_models(self) -> list[ModelInfo]:
         target = f"{self.base_url}/api/tags"
@@ -145,9 +150,6 @@ class _OllamaHttp:
             headers=self.request_headers(),
         )
 
-    # ------------------------------------------------------------------
-    # Non-streaming
-    # ------------------------------------------------------------------
 
     async def complete(
         self,
@@ -200,10 +202,21 @@ class _OllamaHttp:
         target: str,
         body: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Return (message_dict, usage_dict) from a non-streaming completion.
+        """Request a complete message and its token usage.
 
-        Unlike complete(), this returns the full message object so callers can
-        inspect tool_calls and implement their own tool-execution loop.
+        Args:
+            target (str): Completion endpoint URL.
+            body (dict[str, Any]): Request payload.
+
+        Returns:
+            tuple[dict[str, Any], dict[str, Any]]: Full message, including any
+            tool calls, and the usage object. Missing fields become empty dicts.
+
+        Raises:
+            httpx2.HTTPStatusError: The endpoint returns an unsuccessful status.
+
+        Side Effects:
+            Sends an HTTP request to the model endpoint.
         """
         response = await self._http.post(
             target,
@@ -219,9 +232,6 @@ class _OllamaHttp:
             msg = {}
         return msg, data.get("usage") or {}
 
-    # ------------------------------------------------------------------
-    # Streaming — OpenAI SSE
-    # ------------------------------------------------------------------
 
     async def stream_events_sse(
         self,
@@ -236,7 +246,6 @@ class _OllamaHttp:
         _finish_reason: str = "unknown"
         _first_token_logged = False
         try:
-            # ── Log input ─────────────────────────────────────────────────────
             _messages: list[dict[str, Any]] = body.get("messages") or []
             _last = _messages[-1] if _messages else {}
             logger.info(
@@ -339,9 +348,6 @@ class _OllamaHttp:
         yield ModelStreamEvent(kind="usage", raw={"input_tokens": input_t, "output_tokens": output_t})
         yield ModelStreamEvent(kind="done")
 
-    # ------------------------------------------------------------------
-    # Streaming — native Ollama NDJSON
-    # ------------------------------------------------------------------
 
     async def stream_events_ndjson(
         self,
@@ -359,7 +365,6 @@ class _OllamaHttp:
         _finish_reason: str = "unknown"
         _first_token_logged = False
         try:
-            # ── Log input ─────────────────────────────────────────────────────
             _messages: list[dict[str, Any]] = body.get("messages") or []
             _last = _messages[-1] if _messages else {}
             logger.info(
@@ -424,13 +429,13 @@ class _OllamaHttp:
                             if terminal_tools and tc_name in terminal_tools:
                                 _terminal_hit = True
                         # A terminal tool call ends the turn: stop reading and let the
-                        # `async with` close the connection — this cancels any trailing
+                        # `async with` close the connection to cancel trailing
                         # generation server-side instead of waiting for the model's own
                         # `done` (the chain-analyzer hang).
                         if _terminal_hit:
                             _finish_reason = "terminal_tool"
                             logger.info(
-                                "ollama.stream_terminal_toolcall | target=%s — closing stream early", target,
+                                "ollama.stream_terminal_toolcall | target=%s: closing stream early", target,
                             )
                             break
                         if chunk.get("done"):
@@ -460,9 +465,6 @@ class _OllamaHttp:
         yield ModelStreamEvent(kind="usage", raw={"input_tokens": 0, "output_tokens": 0})
         yield ModelStreamEvent(kind="done")
 
-    # ------------------------------------------------------------------
-    # Streaming via emitter (for call() streaming path)
-    # ------------------------------------------------------------------
 
     async def stream_via_emitter(
         self,
@@ -482,9 +484,6 @@ class _OllamaHttp:
         if metering is not None:
             await self._record_tokens(metering, body.get("model", ""), {"prompt_tokens": input_t, "completion_tokens": output_t})
 
-    # ------------------------------------------------------------------
-    # Chunked session execution
-    # ------------------------------------------------------------------
 
     async def execute_chunked_call(
         self,
@@ -549,7 +548,7 @@ class _OllamaHttp:
             projected = total_message_tokens(session) + estimate_tokens(chunk_msg["content"])
             if projected + OUTPUT_HEADROOM > context_limit:
                 logger.warning(
-                    "llm.auto_chunk.session_trim | projected=%d limit=%d chunk=%d/%d — resetting ack history",
+                    "llm.auto_chunk.session_trim | projected=%d limit=%d chunk=%d/%d: resetting ack history",
                     projected, context_limit, i + 1, len(content_chunks),
                 )
                 session = list(base_messages)
@@ -562,9 +561,6 @@ class _OllamaHttp:
             )
         return session
 
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
 
     def request_headers(self) -> dict[str, str]:
         headers = dict(self._extra_headers)

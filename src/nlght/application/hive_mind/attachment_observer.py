@@ -1,16 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Attachment observer — detects file attachments in conversation messages.
-
-Recognises the standard ``Attached document(s)`` fenced-code format used by
-clients that inject files into the system context, stores them as workspace
-artifacts on first appearance, and supersedes them on content change.
-
-Change detection is hash-based: the SHA-256 of the file content is stored as
-a tag (``content_hash:<hex>``) on the promoted payload.  A re-upload of the
-same content is a no-op.
-"""
+"""Detect and ingest attached documents from messages."""
 
 from __future__ import annotations
 
@@ -46,12 +37,13 @@ class DetectedAttachment:
 
 
 def _parse_attachments(content: str) -> list[DetectedAttachment]:
-    """Line-by-line state machine — O(n), no regex backtracking.
+    """Parse named attachments from fenced message content.
 
-    Recognises fence openings of the form:
-        ```<anything>"filename"
-    and collects lines until the matching closing ``` .
-    Safe for arbitrarily large file content.
+    Args:
+        content (str): Message text with quoted filenames in fence openings.
+
+    Returns:
+        list[DetectedAttachment]: Detected filename-content pairs.
     """
     result: list[DetectedAttachment] = []
     lines = content.split("\n")
@@ -78,11 +70,13 @@ def _parse_attachments(content: str) -> list[DetectedAttachment]:
 
 
 def scan_attachments(messages: list[dict[str, Any]]) -> list[DetectedAttachment]:
-    """Return all file attachments found in *messages*.
+    """Find named attachments in recognized message wrappers.
 
-    Only processes messages whose content contains a recognised attachment
-    header so we don't false-positive on ordinary fenced code examples.
-    Deduplicates by filename — the last occurrence wins.
+    Args:
+        messages (list[dict[str, Any]]): Raw system and user message mappings.
+
+    Returns:
+        list[DetectedAttachment]: Last content per filename in first-seen filename order.
     """
     by_name: dict[str, DetectedAttachment] = {}
     for msg in messages:
@@ -103,15 +97,19 @@ def ingest_attachments(
     turn_nr: int,
     workspace: WorkspaceContext | None = None,
 ) -> list[str]:
-    """Persist new or changed attachments as session artifacts.
+    """Store attachments whose content changed since the last sighting.
 
-    For each attachment the existing payload (identified by ``[filename]``
-    entity) is checked.  If the content hash matches the stored tag the
-    attachment is skipped.  Otherwise the file is written to the workspace
-    and a ``[memory_artifact]`` compact reference is promoted into the store
-    (superseding any previous version via ``promote_payload``).
+    Args:
+        attachments (list[DetectedAttachment]): Detected attachments in this turn.
+        store (StoreCoordinator): Session coordinator used for remembered payloads.
+        turn_nr (int): Current conversation turn number.
+        workspace (WorkspaceContext | None): Optional workspace for artifact files.
 
-    Returns the filenames that were actually written (new or changed).
+    Returns:
+        list[str]: Filenames of newly stored or updated attachments.
+
+    Side Effects:
+        Writes workspace files and promotes session payloads.
     """
     if workspace is not None:
         store.set_slot("workspace", workspace)
@@ -143,7 +141,19 @@ def _write_artifact(
     artifact_id: str,
     workspace: WorkspaceContext | None,
 ) -> str:
-    """Write the attachment to the workspace and return its compact reference string."""
+    """Create a compact reference for one attachment.
+
+    Args:
+        att (DetectedAttachment): Attachment to store.
+        artifact_id (str): Stable artifact identity.
+        workspace (WorkspaceContext | None): Optional workspace for the file.
+
+    Returns:
+        str: Compact memory-artifact reference string.
+
+    Side Effects:
+        Writes an artifact file when a workspace is available.
+    """
     if workspace is not None:
         artifacts_dir = workspace.root_path / "memory_artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)

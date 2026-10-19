@@ -1,12 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""SessionResult → MentalElement.
+"""Adapt session results into mental elements with the right category.
 
-The adapter carries the one judgement the renderer used to make inline: a result
-tagged `user_fact` is a fact about the person and belongs under a different
-heading, held harder, than a task outcome. That judgement is legitimate here and
-nowhere downstream.
+A user fact receives different presentation and retention from a task result.
 """
 
 from __future__ import annotations
@@ -58,13 +55,7 @@ def test_a_user_fact_and_a_task_result_are_told_apart_by_the_adapter() -> None:
 
 
 def test_a_fact_about_the_person_is_held_harder_than_a_task_outcome() -> None:
-    """Retention is about what losing it costs, and the two differ.
-
-    A fact about the user outlives the task that produced it; a task result is
-    about a moment that has passed. That is a statement about the information,
-    which is why the adapter may make it — and why the reduction, which cannot,
-    is simply told.
-    """
+    """Retain user facts more strongly than transient task outcomes."""
     fact, outcome = result_elements(_model(
         _result("prefers metric units", tags=["user_fact"]),
         _result("the build finished"),

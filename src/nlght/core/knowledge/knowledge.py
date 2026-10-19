@@ -1,17 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Knowledge graph domain types.
-
-Modelled on the validated prototype schema in
-``next-integration/knowledge-indexer/knowledge.sql``: one ``knowledge`` node
-carries the shared lifecycle (kind, type, confidence, review state, product and
-version scope), and one kind-specific payload carries the assertion itself.
-
-``kind`` is an open identifier rather than a closed enum — ``fact``, ``rule``,
-``pattern``, and ``decision`` are the built-in kinds, and a later kind must not
-require changing the lifecycle tables (ADR-0032).
-"""
+"""Define built-in knowledge kinds, payloads, and graph values."""
 
 from __future__ import annotations
 
@@ -43,19 +33,10 @@ class ReviewDecision(StrEnum):
 
 
 class KnowledgeKindConflictError(PermanentError):
-    """A sighting tried to continue an assertion of a different kind.
+    """Reject cross-kind continuation as a permanent identity conflict.
 
-    `kind` is part of the identity namespace, so a `rule` continuing a `fact`
-    would merge two namespaces and lose a claim. The graph refuses the write, and
-    that refusal is *correct* — it means the matcher answered wrongly, which is a
-    fault in the run rather than a condition of the world.
-
-    Permanent, and that is the point of it having its own type. Nothing about a
-    second attempt makes the same input resolve differently, so retrying would
-    repeat the failure until the attempts ran out. Worse, the answer comes from a
-    model: a retry can produce a different extraction, succeed by accident, and
-    leave a matcher fault invisible until it recurs on a corpus somebody cares
-    about.
+    Retrying the same match cannot make a rule and a fact share one identity.
+    The distinct error type keeps this matcher defect visible.
     """
 
 
@@ -67,8 +48,8 @@ class ReviewConflictError(ValueError):
     reject-then-approve leave opposite states behind and the history holds two
     verdicts that contradict each other. Which one wins is decided by timing.
 
-    A ValueError so that a caller written before this existed still catches it;
-    a distinct type so that one written after can tell "this was already
+    This exception remains a ValueError for existing callers. Its distinct type
+    lets newer callers tell "this was already
     judged" from "this input is wrong" and offer the reviewer the choice.
     """
 
@@ -84,14 +65,16 @@ def _require(value: str, name: str) -> str:
 
 
 def canonical_term(value: str) -> str:
-    """Fold a short schema field to one spelling.
+    """Normalize a short identity field without erasing distinct words.
 
-    A model asked for a short field still varies its casing and its spacing, so
-    a raw one would carry exactly the drift it was introduced to remove, only
-    shorter. Folded to lower case with runs of separators collapsed to a single
-    underscore — enough that "Approval Threshold" and "approval-threshold" are
-    one value, and little enough that "approval_threshold" and
-    "prohibition_threshold" stay two.
+    Args:
+        value (str): Short schema field value.
+
+    Returns:
+        str: Lowercase underscore-separated term.
+
+    Side Effects:
+        None. Rejects empty normalized values.
     """
     folded = _TERM_SEPARATORS.sub("_", value.strip().lower()).strip("_")
     if not folded:
@@ -102,15 +85,18 @@ def canonical_term(value: str) -> str:
 def _canonical_pair(
     first: str | None, second: str | None, names: tuple[str, str]
 ) -> tuple[str | None, str | None]:
-    """Both fields or neither, canonically.
+    """Require both identifying fields or neither.
 
-    Half the pair identifies nothing: a subject cannot say which question about
-    it this is, and a property cannot say what it is a property of. Allowing
-    half would let an entity key later be built from something that is not one.
+    Args:
+        first (str | None): First optional identifying field.
+        second (str | None): Second optional identifying field.
+        names (tuple[str, str]): Names used in validation errors.
 
-    Absent is a legitimate state — assertions written before these fields
-    existed have neither, and backfilling by guessing at their wording is the
-    drift all of this is trying to remove.
+    Returns:
+        tuple[str | None, str | None]: Normalized pair or two absent values.
+
+    Raises:
+        ValueError: Only one of the paired fields is supplied.
     """
     if first is None and second is None:
         return None, None
@@ -137,7 +123,7 @@ class FactPayload:
 class RulePayload:
     """A rule: what it is about, which question about it, and how it reads.
 
-    `subject` and `rule_property` are the short, canonical pair; `rule_text` is
+    `subject` and `rule_property` are the short, canonical pair. `rule_text` is
     the body a citation quotes. Both short fields are optional because a corpus
     written before they existed has neither.
     """
@@ -195,7 +181,14 @@ _PAYLOAD_KINDS: dict[type[Any], str] = {
 
 
 def kind_of(payload: KnowledgePayload) -> str:
-    """The built-in kind identifier for a payload type."""
+    """Identify the built-in kind of a payload.
+
+    Args:
+        payload (KnowledgePayload): Built-in payload instance.
+
+    Returns:
+        str: Knowledge kind string.
+    """
     return _PAYLOAD_KINDS[type(payload)]
 
 
@@ -208,11 +201,17 @@ _KIND_PAYLOADS: dict[str, type[Any]] = {
 
 
 def payload_for(kind: str, fields: dict[str, Any]) -> KnowledgePayload:
-    """Build a payload of ``kind`` from named fields, validating as it goes.
+    """Validate fields and construct a built-in payload.
 
-    A reviewer correcting an assertion by hand submits loose strings; this is
-    where they become a checked payload, so an empty predicate is refused at the
-    same boundary that refuses one from an extractor.
+    Args:
+        kind (str): Built-in knowledge kind.
+        fields (dict[str, Any]): Named fields for its payload.
+
+    Returns:
+        KnowledgePayload: Payload of the requested kind.
+
+    Raises:
+        ValueError: The kind or named fields do not match a built-in payload.
     """
     payload_type = _KIND_PAYLOADS.get(kind)
     if payload_type is None:
@@ -234,18 +233,11 @@ def payload_for(kind: str, fields: dict[str, Any]) -> KnowledgePayload:
 
 @dataclass(slots=True, frozen=True)
 class KnowledgeWrite:
-    """One atomic, independently reviewable assertion plus its evidence.
+    """Carry one independently reviewable assertion and its evidence.
 
-    ``identity`` is the caller-computed stable identity used for deduplication
-    and reinforcement, so re-extracting the same assertion from another document
-    strengthens it instead of duplicating it.
-
-    A fact carries its ``proposition``, and that is what it says. The
-    ``payload`` is the legacy row derived from it, present only while the
-    derivation loses nothing — so "Alice transfers CHF 500 to Bob" arrives with a
-    proposition and no payload rather than being cut down to fit three columns or
-    thrown away as malformed. Every other kind still arrives as a payload and is
-    untouched by this.
+    `proposition` holds the complete extracted claim for every kind. `payload`
+    is an optional legacy projection and is absent when that shape would lose
+    claim content. `identity` supports deduplication and reinforcement.
     """
 
     identity: str
@@ -260,10 +252,10 @@ class KnowledgeWrite:
     review_reason: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-    #: What this claim says, structured — for every kind.
+    #: Preserve the complete extracted structure even when no legacy payload fits.
     proposition: Proposition | None = None
     #: Which kind, where the payload cannot say. A projection may be absent, so
-    #: the kind cannot be read off it; `kind` falls back to the payload only for
+    #: the kind cannot be read off it. `kind` falls back to the payload only for
     #: callers that predate this.
     _kind: str = ""
 
@@ -281,13 +273,13 @@ class KnowledgeWrite:
 
     @property
     def kind(self) -> str:
-        """What kind of claim this is — stated, or read off the payload.
+        """Resolve the explicitly stated or payload-derived knowledge kind.
 
-        It used to fall back to `fact` whenever there was no payload, which was
-        true only while facts were the one kind that could lack one. Now every
-        kind's payload is a projection that may legitimately be absent, so a rule
-        carrying four fields its row cannot hold would have been written into the
-        graph as a *fact*. The caller says which kind it has.
+        Returns:
+            str: Built-in kind string.
+
+        Side Effects:
+            None. Rejects writes without a kind or payload.
         """
         if self._kind:
             return self._kind
@@ -301,7 +293,7 @@ class KnowledgeWrite:
 
 @dataclass(slots=True, frozen=True)
 class Observation:
-    """One sighting of an assertion; a retry must not count twice."""
+    """One sighting of an assertion. A retry must not count twice."""
 
     identity: str
     source_id: str
@@ -322,11 +314,10 @@ class Review:
 
 @dataclass(slots=True, frozen=True)
 class KnowledgeStatistics:
-    """What the graph looks like from a reviewer's chair.
+    """Count graph and review states as presented to a reviewer.
 
-    ``pending`` counts the queue as the queue defines it — quarantined and
-    undecided — so it matches what a reviewer is actually shown rather than the
-    raw quarantine flag, which rejection also leaves set.
+    `pending` follows queue membership, including quarantined and undecided
+    claims, rather than the raw quarantine flag retained after rejection.
     """
 
     total: int
@@ -355,22 +346,22 @@ class SupportingEvidence:
     The row's existence says the document carries this state *now*, decided by
     the last complete observation of it. `observed_document_revision` says where
     it was last actually read saying so, which is not the same thing and can be
-    older — see that field.
+    older. See that field.
 
     Deliberately no `source_span`. The column exists on the evidence row and no
     producer sets it, so it is `None` for every sighting the platform has ever
-    written — offering it here would advertise line coordinates the corpus
+    written. Exposing it here would advertise line coordinates the corpus
     cannot supply.
     """
 
     document_id: str
-    #: The document revision this state was last **extracted** at — not
+    #: The document revision where this state was last extracted, not
     #: necessarily the revision the document is at now.
     #:
     #: The two come apart whenever a section the stable-slot guard protected was
     #: not re-extracted: the document moved on, that section did not change, and
     #: nobody read the claim out of the newer revision. Writing the current
-    #: revision here would fabricate a sighting; leaving it is the truthful
+    #: revision here would fabricate a sighting. Leaving it is the truthful
     #: answer to "where was this last seen to be said".
     #:
     #: Named for what it is, because `document_revision` on a table called
@@ -380,9 +371,12 @@ class SupportingEvidence:
     #: As the sighting saw it. A renamed document is the same document, so this
     #: is provenance and never identity.
     document_path: str = ""
-    #: Empty where the section had nothing to be found by — a format with no
-    #: headings — which is a real and common answer, not a missing one.
+    #: Empty when the section has no anchor, as in a format without headings.
     slot_id: str = ""
+    #: The ingestion source the document belongs to, as the operator configured
+    #: it. What a store's `trusted_sources` is matched against (ADR-0074). Empty
+    #: where the document is not in the corpus record.
+    source_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -413,19 +407,18 @@ class KnowledgeObject:
     #: quoted back to a reader. An assembled bag of field values carries none of
     #: that and is not quotable.
     #:
-    #: Empty for a node with no lineage — written before revisions existed, or by
-    #: a path that keeps none — which is why nothing may require it.
+    #: A node written before lineage existed can have no observed text.
     observed_text: str = ""
 
     #: The durable claim behind this node. `identity` is a content address and
-    #: changes when the structure does; this does not, which is what a citation
+    #: changes when the structure does. This does not, which is what a citation
     #: to "the claim" has to name.
     assertion_id: str = ""
     #: The state this node represents (ADR-0051). Named so a reader can say
     #: *which* state was cited, and so `observed_text` and `support` are
     #: verifiably about the same one.
     revision_id: str = ""
-    #: Every sighting that supports **this state** — plural, unordered by
+    #: Every sighting that supports **this state**, unordered by
     #: importance, and with no owner among them.
     #:
     #: Scoped to the revision rather than to the assertion, so a wording the
@@ -438,11 +431,14 @@ class KnowledgeObject:
 
 
 def reinforce_confidence(previous: float, evidence: float) -> float:
-    """Bayesian odds-multiplication merge, as used by the prototype.
+    """Combine two confidence values as independent evidence.
 
-    Independent sightings reinforce one another: two mediocre observations
-    combine into a stronger belief than either alone, while a single weak one
-    cannot by itself push an assertion to certainty.
+    Args:
+        previous (float): Existing confidence.
+        evidence (float): Confidence of independent new evidence.
+
+    Returns:
+        float: Clamped Bayesian odds combination.
     """
     clamped = [min(max(value, 1e-6), 1 - 1e-6) for value in (previous, evidence)]
     odds = (clamped[0] / (1 - clamped[0])) * (clamped[1] / (1 - clamped[1]))

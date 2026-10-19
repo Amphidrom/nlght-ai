@@ -1,19 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""UC5 — Signal Emission and Response Format
+"""Exercise signal collection and HTTP response encoding.
 
-Tests the contracts documented in concepts and custom-steps:
-
-  Non-streaming (stream=false):
-  - Multiple result signals are concatenated into choices[0].message.content.
-  - Token signals are included in the concatenated content.
-  - An empty emitter produces an empty content string.
-
-  Streaming (stream=true):
-  - The response is delivered as SSE (text/event-stream).
-  - Each result/token signal becomes a data: {...} frame.
-  - The stream ends with data: [DONE].
+Non-streaming calls concatenate content. Streaming calls deliver SSE frames
+and a terminal done marker.
 """
 
 from __future__ import annotations
@@ -37,10 +28,6 @@ pytestmark = pytest.mark.integration
 _MAPPING = {"chat_completions": "wf"}
 
 
-# ---------------------------------------------------------------------------
-# Step helpers
-# ---------------------------------------------------------------------------
-
 class MultiSignalStep(StepBase):
     """Emits a mix of token and result signals."""
     TYPE = "test_multi_signal"
@@ -53,7 +40,7 @@ class MultiSignalStep(StepBase):
 
 
 class NoSignalStep(StepBase):
-    """Emits nothing — tests the empty emitter path."""
+    """A step that emits nothing to exercise the empty-signal path."""
     TYPE = "test_no_signal"
 
     async def run(self, ctx: WorkflowStepContext) -> StepResult:
@@ -69,10 +56,6 @@ class SingleResultStep(StepBase):
         await ctx.emitter.emit(Signal(kind="done",   role="assistant", content=""))
         return StepResult(ctx=ctx, verdict="done")
 
-
-# ---------------------------------------------------------------------------
-# Non-streaming tests
-# ---------------------------------------------------------------------------
 
 async def test_non_streaming_concatenates_all_signals(
     session_factory, workflow_repo, resource_repo,
@@ -101,7 +84,7 @@ async def test_non_streaming_concatenates_all_signals(
 async def test_non_streaming_empty_emitter_returns_empty_content(
     session_factory, workflow_repo, resource_repo,
 ):
-    """stream=false with no signals emitted → empty content string, not an error."""
+    """Return empty content when a nonstreaming step emits no signals."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_no_signal", "is_start": True, "is_terminal": True},
     ])
@@ -146,14 +129,10 @@ async def test_non_streaming_response_shape(
     assert body["choices"][0]["message"]["role"] == "assistant"
 
 
-# ---------------------------------------------------------------------------
-# Streaming tests
-# ---------------------------------------------------------------------------
-
 async def test_streaming_response_content_type_is_event_stream(
     session_factory, workflow_repo, resource_repo,
 ):
-    """stream=true → Content-Type is text/event-stream."""
+    """Set the event-stream content type for streaming responses."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_single_result", "is_start": True, "is_terminal": True},
     ])

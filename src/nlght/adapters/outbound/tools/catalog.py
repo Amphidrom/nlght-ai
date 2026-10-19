@@ -19,7 +19,15 @@ from nlght.core.errors.errors import (
     ToolActionSemanticsError,
     ToolArgumentsError,
 )
+from nlght.core.model.trust import (
+    PLATFORM_TEXT,
+    UNANNOTATED,
+    ContentExposure,
+    ContentLedger,
+    ContentOrigin,
+)
 from nlght.core.tools.action import ActionExecutionContext, ExecutionCapabilities
+from nlght.core.tools.tool import ToolOutput
 from nlght.ports.outbound.embedding_client import EmbeddingClient
 from nlght.ports.outbound.os_runtime import OsRuntimeFactory
 from nlght.ports.outbound.resource_repository import ResourceRepository
@@ -52,11 +60,76 @@ def _execution_capabilities(runtime: object | None) -> ExecutionCapabilities:
     )
 
 
-class AdapterToolCatalog(ToolCatalog):
-    """Implements ToolCatalog — request-scoped Tool lookup.
+def _as_output(result: object) -> ToolOutput:
+    """Convert a tool result to content carrying its origin label.
 
-    Request-scoped — built once per workflow invocation by the
-    ``ToolCatalogBuilder`` and never mutated afterward.
+    Args:
+        result (object): Raw result or an already labelled ``ToolOutput``.
+
+    Returns:
+        ToolOutput: Original labelled output, or unannotated text for a raw
+        result.
+    """
+    if isinstance(result, ToolOutput):
+        return result
+    content = getattr(result, "content", None)
+    return ToolOutput(content if isinstance(content, str) else str(result), UNANNOTATED)
+
+
+async def _execute_through_gate(
+    gate: ActionGate,
+    contract: ToolContract,
+    arguments: dict[str, Any],
+    context: ActionExecutionContext,
+    *,
+    log_prefix: str,
+) -> ToolOutput:
+    """Execute one tool call and label the result or failure text.
+
+    Args:
+        gate (ActionGate): Authorization and execution gate.
+        contract (ToolContract): Tool contract to invoke.
+        arguments (dict[str, Any]): Proposed tool arguments.
+        context (ActionExecutionContext): Caller and exposure context.
+        log_prefix (str): Prefix for execution log events.
+
+    Returns:
+        ToolOutput: Labelled result. Platform-authored denial text is trusted.
+        Argument and execution errors are unannotated because they may echo
+        caller input or remote output.
+
+    Side Effects:
+        Runs the tool after authorization and logs failures.
+    """
+    try:
+        prepared = gate.prepare(contract, arguments, context)
+        return _as_output(await gate.execute(prepared))
+    except (ToolActionDeniedError, ToolActionSemanticsError) as exc:
+        logger.info(
+            "%s.execute.denied | tool=%s reason=%s",
+            log_prefix,
+            context.tool_subject,
+            getattr(exc, "reason", type(exc).__name__),
+        )
+        return ToolOutput(str(exc), PLATFORM_TEXT)
+    except ToolArgumentsError as exc:
+        logger.info(
+            "%s.execute.denied | tool=%s reason=%s",
+            log_prefix,
+            context.tool_subject,
+            type(exc).__name__,
+        )
+        return ToolOutput(str(exc), UNANNOTATED)
+    except Exception as exc:
+        logger.warning("%s.execute.error | name=%s error=%s", log_prefix, contract.name, exc)
+        return ToolOutput(f"Tool error: {exc}", UNANNOTATED)
+
+
+class AdapterToolCatalog(ToolCatalog):
+    """Request-scoped implementation of the ToolCatalog port.
+
+    ``ToolCatalogBuilder`` builds one catalog per workflow invocation. Its
+    contracts do not change after construction.
     """
 
     def __init__(
@@ -66,11 +139,17 @@ class AdapterToolCatalog(ToolCatalog):
         action_gate: ActionGate | None = None,
         caller: RequestContext | None = None,
         session_id: str | None = None,
+        ledger: ContentLedger | None = None,
     ) -> None:
         self._contracts = contracts
         self._action_gate = action_gate or ActionGate(policy=DefaultActionPolicy())
         self._caller = caller
         self._session_id = session_id
+        self._ledger = ledger if ledger is not None else ContentLedger()
+
+    @property
+    def ledger(self) -> ContentLedger:
+        return self._ledger
 
     def get(self, name: str) -> ToolContract:
         if name not in self._contracts:
@@ -86,17 +165,27 @@ class AdapterToolCatalog(ToolCatalog):
     def names(self) -> list[str]:
         return list(self._contracts.keys())
 
-    async def execute(
+    async def execute_with_origin(
         self,
         tc: dict[str, Any],
         *,
-        has_external_untrusted_input: bool = True,
-    ) -> str:
-        """Executes a tool call and returns the result as a string.
+        context_origin: ContentOrigin | None = None,
+    ) -> ToolOutput:
+        """Execute a tool call and retain its result's content origin.
 
-        Returns error strings instead of raising exceptions — timeouts
-        must be handled by the caller via ``asyncio.wait_for``.
+        Args:
+            tc (dict[str, Any]): Tool call containing ``name`` and ``input``.
+            context_origin (ContentOrigin | None): Origin of the proposed call.
+                Missing origin is treated as unannotated.
+
+        Returns:
+            ToolOutput: Result or error text with its content origin.
+
+        Side Effects:
+            Records call and result origins in the request ledger and invokes
+            the selected tool. The caller enforces any overall timeout.
         """
+        self._ledger.record(context_origin if context_origin is not None else UNANNOTATED)
         name = tc.get("name", "")
         inp  = tc.get("input") or {}
         if not isinstance(inp, dict):
@@ -104,32 +193,44 @@ class AdapterToolCatalog(ToolCatalog):
         contract = self.get_or_none(name)
         if contract is None:
             logger.warning("tool.catalog.execute.not_found | name=%s", name)
-            return f"Tool '{name}' not available."
-        context = self._execution_context(
-            contract,
-            has_external_untrusted_input=has_external_untrusted_input,
-        )
-        try:
-            prepared = self._action_gate.prepare(contract, inp, context)
-            result = await self._action_gate.execute(prepared)
-            content = getattr(result, "content", None)
-            return content if isinstance(content, str) else str(result)
-        except (ToolActionDeniedError, ToolActionSemanticsError, ToolArgumentsError) as exc:
-            logger.info(
-                "tool.catalog.execute.denied | tool=%s reason=%s",
-                context.tool_subject,
-                getattr(exc, "reason", type(exc).__name__),
+            # Echoes the proposed name, so it is not platform text alone.
+            output = ToolOutput(f"Tool '{name}' not available.", UNANNOTATED)
+        else:
+            output = await _execute_through_gate(
+                self._action_gate,
+                contract,
+                inp,
+                self._execution_context(contract, exposure=self._ledger.exposure),
+                log_prefix="tool.catalog",
             )
-            return str(exc)
-        except Exception as exc:
-            logger.warning("tool.catalog.execute.error | name=%s error=%s", name, exc)
-            return f"Tool error: {exc}"
+        self._ledger.record(output.origin)
+        return output
+
+    async def execute(
+        self,
+        tc: dict[str, Any],
+        *,
+        context_origin: ContentOrigin | None = None,
+    ) -> str:
+        """Execute a tool call and return only its text content.
+
+        Args:
+            tc (dict[str, Any]): Tool call containing ``name`` and ``input``.
+            context_origin (ContentOrigin | None): Origin of the proposed call.
+
+        Returns:
+            str: Result or error text from ``execute_with_origin``.
+
+        Side Effects:
+            Records call and result origins and invokes the selected tool.
+        """
+        return (await self.execute_with_origin(tc, context_origin=context_origin)).content
 
     def _execution_context(
         self,
         contract: ToolContract,
         *,
-        has_external_untrusted_input: bool,
+        exposure: ContentExposure,
     ) -> ActionExecutionContext:
         caller = self._caller
         return ActionExecutionContext(
@@ -140,7 +241,7 @@ class AdapterToolCatalog(ToolCatalog):
             session_id=self._session_id,
             resource_address=contract.resource_address,
             signature_name=contract.name,
-            has_external_untrusted_input=has_external_untrusted_input,
+            exposure=exposure,
         )
 
     def __len__(self) -> int:
@@ -155,7 +256,7 @@ class TemporaryToolCatalog:
 
     Wraps an existing ``ToolCatalog`` and adds extra Contracts without
     mutating the original catalog. Extra contracts override base contracts
-    of the same name. Simply discard after the Step run — no cleanup
+    of the same name. Discard the wrapper after the step run. No cleanup is
     required.
     """
 
@@ -178,6 +279,14 @@ class TemporaryToolCatalog:
             self._action_gate = action_gate or ActionGate(policy=DefaultActionPolicy())
             self._caller = caller
             self._session_id = session_id
+        # One ledger for the run: what a step's own tools return counts for the
+        # base catalog's next decision, and the other way round.
+        base_ledger = getattr(base, "ledger", None)
+        self._ledger = base_ledger if isinstance(base_ledger, ContentLedger) else ContentLedger()
+
+    @property
+    def ledger(self) -> ContentLedger:
+        return self._ledger
 
     def get(self, name: str) -> ToolContract:
         if name in self._extra:
@@ -199,12 +308,13 @@ class TemporaryToolCatalog:
     def names(self) -> list[str]:
         return [c.name for c in self.all()]
 
-    async def execute(
+    async def execute_with_origin(
         self,
         tc: dict[str, Any],
         *,
-        has_external_untrusted_input: bool = True,
-    ) -> str:
+        context_origin: ContentOrigin | None = None,
+    ) -> ToolOutput:
+        self._ledger.record(context_origin if context_origin is not None else UNANNOTATED)
         name = tc.get("name", "")
         inp  = tc.get("input") or {}
         if not isinstance(inp, dict):
@@ -212,46 +322,41 @@ class TemporaryToolCatalog:
         contract = self.get_or_none(name)
         if contract is None:
             logger.warning("tool.temp_catalog.execute.not_found | name=%s", name)
-            return f"Tool '{name}' not available."
-        caller = self._caller
-        context = ActionExecutionContext(
-            request_id=caller.request_id if caller else "internal",
-            correlation_id=caller.correlation_id if caller else "internal",
-            principal=caller.principal if caller else None,
-            workflow=caller.workflow if caller else None,
-            session_id=self._session_id,
-            resource_address=contract.resource_address,
-            signature_name=contract.name,
-            has_external_untrusted_input=has_external_untrusted_input,
-        )
-        try:
-            prepared = self._action_gate.prepare(contract, inp, context)
-            result = await self._action_gate.execute(prepared)
-            content = getattr(result, "content", None)
-            return content if isinstance(content, str) else str(result)
-        except (ToolActionDeniedError, ToolActionSemanticsError, ToolArgumentsError) as exc:
-            logger.info(
-                "tool.temp_catalog.execute.denied | tool=%s reason=%s",
-                context.tool_subject,
-                getattr(exc, "reason", type(exc).__name__),
+            output = ToolOutput(f"Tool '{name}' not available.", UNANNOTATED)
+        else:
+            caller = self._caller
+            context = ActionExecutionContext(
+                request_id=caller.request_id if caller else "internal",
+                correlation_id=caller.correlation_id if caller else "internal",
+                principal=caller.principal if caller else None,
+                workflow=caller.workflow if caller else None,
+                session_id=self._session_id,
+                resource_address=contract.resource_address,
+                signature_name=contract.name,
+                exposure=self._ledger.exposure,
             )
-            return str(exc)
-        except Exception as exc:
-            logger.warning("tool.temp_catalog.execute.error | name=%s error=%s", name, exc)
-            return f"Tool error: {exc}"
+            output = await _execute_through_gate(
+                self._action_gate, contract, inp, context, log_prefix="tool.temp_catalog",
+            )
+        self._ledger.record(output.origin)
+        return output
+
+    async def execute(
+        self,
+        tc: dict[str, Any],
+        *,
+        context_origin: ContentOrigin | None = None,
+    ) -> str:
+        return (await self.execute_with_origin(tc, context_origin=context_origin)).content
 
 
 class ToolCatalogBuilder:
     """Builds a request-scoped ``AdapterToolCatalog`` from DB resources.
 
-    Flow per invocation:
-    1. ``ResourceRepository.list_enabled()`` — all active resources from the DB
-    2. For each resource: is the kind known to the ``ToolLoader``?
-    3. Yes → instantiate, read signatures, create ``BoundToolContract``s
-    4. No → skip (not an error — the resource simply isn't a tool of this kind)
-
-    Resources with no registered kind are silently ignored — the DB may
-    contain resources for other subsystems.
+    The builder reads enabled resources, skips unknown kinds, and checks
+    resource and signature policies before instantiation. It creates bound
+    contracts only for visible signatures. Resources for other subsystems and
+    resources with no visible signatures are not instantiated.
     """
 
     def __init__(
@@ -266,6 +371,9 @@ class ToolCatalogBuilder:
         store_connections: StoreConnections | None = None,
         action_policy: ActionPolicy | None = None,
         action_approval: ActionApprovalPort | None = None,
+        action_authorization_enabled: bool = True,
+        policy_timeout_seconds: float = 30.0,
+        approval_timeout_seconds: float = 300.0,
     ) -> None:
         self._loader = loader
         self._repo = resource_repository
@@ -273,12 +381,15 @@ class ToolCatalogBuilder:
         self._resource_access_policy = resource_access_policy
         self._tool_access_policy = tool_access_policy
         self._embedding_client = embedding_client
-        # A catalog is rebuilt per run; without shared pools every rebuild would
+        # A catalog is rebuilt per run. Without shared pools every rebuild would
         # open a fresh connection per store activation and abandon it.
         self._store_connections = store_connections
         self._action_gate = ActionGate(
             policy=action_policy or DefaultActionPolicy(),
             approval=action_approval,
+            enabled=action_authorization_enabled,
+            policy_timeout_seconds=policy_timeout_seconds,
+            approval_timeout_seconds=approval_timeout_seconds,
         )
 
     async def build(
@@ -310,8 +421,8 @@ class ToolCatalogBuilder:
                 continue
 
             # What this resource *would* offer, without building it. Signatures
-            # are a classmethod, so the whole question — which of its operations
-            # may this caller be offered — is answerable from the class.
+            # are a classmethod, so the whole question, which of its operations
+            # may this caller be offered, is answerable from the class.
             implementation = self._loader.implementation_for(
                 kind=resource.kind, provider=resource.provider
             )
@@ -330,8 +441,8 @@ class ToolCatalogBuilder:
                     )
             if not offered:
                 # Nothing of this resource would reach the model, so there is
-                # nothing to build it for. This is also why a writer — which
-                # declares no signatures at all — is never constructed here: it
+                # nothing to build it for. This is also why a writer, which
+                # declares no signatures at all, is never constructed here: it
                 # is not a model tool, and the catalog is the model's view.
                 logger.debug(
                     "tool.catalog.no_visible_operations | resource=%s", resource.address,
@@ -344,6 +455,7 @@ class ToolCatalogBuilder:
                     provider=resource.provider,
                     name=resource.name,
                     config=resource.config,
+                    resource_id=str(resource.resource_id),
                     os_runtime=effective_runtime,
                     store_coordinator=store_coordinator,
                     workspace=workspace,
@@ -379,8 +491,8 @@ class ToolCatalogBuilder:
                     )
 
             except AmbiguousToolNameError:
-                # Not a resource that failed to build — a catalog that cannot be
-                # built. Skipping one resource here would silently pick the
+                # This catalog cannot be built, even though the resource was found.
+                # Skipping one resource here would silently pick the
                 # other, which is the behaviour this replaces.
                 raise
             except Exception as exc:
@@ -409,18 +521,24 @@ class ToolCatalogBuilder:
         caller: RequestContext | None,
         model: str | None,
     ) -> bool:
-        """Whether this caller may use the resource at all.
+        """Check whether the caller may use a resource.
 
-        A policy that raises denies. Whatever went wrong, the one thing that must
-        not follow from a broken authorization check is authorization.
+        Args:
+            resource (ResourceDef): Resource requested by the catalog.
+            caller (RequestContext | None): Established caller identity.
+            model (str | None): Model requesting the resource.
+
+        Returns:
+            bool: ``True`` if allowed or no policy is configured. Policy errors
+            deny access and are logged.
         """
         if self._resource_access_policy is None:
             return True
         try:
             allowed = await self._resource_access_policy.is_allowed(resource, caller, model)
-        except Exception as exc:  # noqa: BLE001 (a failed check is a denial)
+        except Exception as exc:
             logger.warning(
-                "tool.catalog.policy_error | resource=%s error=%s — denying",
+                "tool.catalog.policy_error | resource=%s error=%s: denying",
                 resource.address, exc,
             )
             return False
@@ -438,16 +556,27 @@ class ToolCatalogBuilder:
         caller: RequestContext | None,
         model: str | None,
     ) -> bool:
-        """Whether this one operation of an allowed resource is offered."""
+        """Check whether a resource operation is offered to the caller.
+
+        Args:
+            resource (ResourceDef): Resource containing the operation.
+            signature_name (str): Operation name to authorize.
+            caller (RequestContext | None): Established caller identity.
+            model (str | None): Model requesting the operation.
+
+        Returns:
+            bool: ``True`` if allowed or no policy is configured. Policy errors
+            deny access and are logged.
+        """
         if self._tool_access_policy is None:
             return True
         try:
             allowed = await self._tool_access_policy.is_allowed(
                 resource, signature_name, caller, model
             )
-        except Exception as exc:  # noqa: BLE001 (a failed check is a denial)
+        except Exception as exc:
             logger.warning(
-                "tool.catalog.policy_error | tool=%s error=%s — denying",
+                "tool.catalog.policy_error | tool=%s error=%s: denying",
                 tool_subject(resource.address, signature_name), exc,
             )
             return False

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -60,6 +61,7 @@ from nlght.adapters.outbound.signals.postgres_execution_stream import (
     PostgresExecutionStreamBroker,
 )
 from nlght.adapters.outbound.stores.connections import StoreConnections
+from nlght.adapters.outbound.tools.action_registry import action_authorization_registry
 from nlght.adapters.outbound.tools.activator import ResourceActivator
 from nlght.adapters.outbound.tools.catalog import ToolCatalogBuilder
 from nlght.adapters.outbound.tools.registry import tool_registry
@@ -72,6 +74,7 @@ from nlght.application.entry.gateway_service import GatewayService
 from nlght.application.execution.dispatch_service import ExecutionDispatchService
 from nlght.application.execution.worker import ExecutionWorker, ExecutionWorkerSettings
 from nlght.core.config.runtime_context import (
+    ActionAuthorizationRuntime,
     AnthropicModelProviderRuntime,
     DockerOsRuntimeSubsystemRuntime,
     GoogleModelProviderRuntime,
@@ -133,16 +136,19 @@ class Container:
 
 
 def _build_metering(runtime_context: RuntimeContext) -> MeteringPort | None:
-    """Instantiate a MeteringPort from the first enabled ``kind: metering`` gateway entry.
+    """Build the first enabled metering gateway.
 
-    Currently supports ``backend: prometheus`` which requires the [metrics] extra.
-    Returns None if no metering gateway is configured or enabled.
+    Args:
+        runtime_context (RuntimeContext): Configured runtime gateways.
+
+    Returns:
+        MeteringPort | None: Metering adapter, or None when no usable gateway is configured.
+
+    Side Effects:
+        May import the Prometheus extra and log an unavailable or unknown backend.
     """
-    import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-    _log = _logging.getLogger(__name__)
-
     from nlght.core.config.runtime_context import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        GenericRuntimeSubsystemRuntime,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+        GenericRuntimeSubsystemRuntime,
     )
 
     for runtime in runtime_context.gateways:
@@ -155,34 +161,40 @@ def _build_metering(runtime_context: RuntimeContext) -> MeteringPort | None:
         if backend == "prometheus":
             try:
                 from nlght.adapters.outbound.metering.prometheus import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                    PrometheusMeteringAdapter,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                    PrometheusMeteringAdapter,
                 )
                 adapter = PrometheusMeteringAdapter(endpoint=endpoint)
-                _log.info("metering.prometheus.configured | endpoint=%s", endpoint)
+                logger.info("metering.prometheus.configured | endpoint=%s", endpoint)
                 return adapter
             except ImportError:
-                _log.warning(
-                    "prometheus-client not installed — metering subsystem disabled. "
+                logger.warning(
+                    "prometheus-client is not installed. Metering subsystem disabled. "
                     "Install with: pip install 'nlght-ai[metrics]'"
                 )
         else:
-            _log.warning("metering.unknown_backend | backend=%s — skipping", backend)
+            logger.warning("metering.unknown_backend | backend=%s: skipping", backend)
     return None
 
 
 def _build_license_service(runtime_context: RuntimeContext) -> LicensingPort:
-    """Build the license service. A configured, valid license is required to start.
+    """Require a configured license service at startup.
 
-    The license is a compliance/activation requirement only — no capability
-    check is derived from it. Feature gating hooks stay available for future
-    enterprise features, but nothing is gated today.
+    Args:
+        runtime_context (RuntimeContext): Runtime license configuration.
+
+    Returns:
+        LicensingPort: Keygen license adapter. The license does not gate individual capabilities.
+
+    Raises:
+        RuntimeError: No license key is configured.
+
+    Side Effects:
+        Logs the selected license adapter.
     """
-    import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-    _log = _logging.getLogger(__name__)
     lic = runtime_context.licensing
     if lic and lic.license_key:
         adapter = KeygenLicenseAdapter(lic.license_key)
-        _log.info("license.keygen | %s", adapter.context_metadata())
+        logger.info("license.keygen | %s", adapter.context_metadata())
         return adapter
     raise RuntimeError(
         "No license configured. Set license_key in your config."
@@ -200,7 +212,7 @@ def _build_os_runtime(
     if isinstance(runtime, DockerOsRuntimeSubsystemRuntime):
         try:
             from nlght.adapters.outbound.os_runtime.docker import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                DockerOsRuntimeFactory,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                DockerOsRuntimeFactory,
             )
 
             factory = DockerOsRuntimeFactory(
@@ -215,7 +227,7 @@ def _build_os_runtime(
             import logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
             logging.getLogger(__name__).warning(
-                "docker package not installed — DockerOsRuntimeFactory unavailable. "
+                "docker package is not installed. DockerOsRuntimeFactory unavailable. "
                 "Install with: pip install 'nlght-ai[docker]'"
             )
             return None, []
@@ -225,12 +237,20 @@ def _build_os_runtime(
 def _build_execution_stream_broker(
     runtime_context: RuntimeContext,
 ) -> tuple[ExecutionStreamBroker, SubsystemLifecycle | None]:
-    """Select the transport for live execution signals.
+    """Select the live execution signal transport.
 
-    The only place that names a concrete broker. Returning the lifecycle
-    separately keeps the choice honest: a transport that owns a connection is
-    started and stopped with the rest of the runtime, one that owns nothing
-    (in-process) returns ``None`` and adds no shutdown work.
+    Args:
+        runtime_context (RuntimeContext): Execution-stream and persistence settings.
+
+    Returns:
+        tuple[ExecutionStreamBroker, SubsystemLifecycle | None]: Broker and its
+            lifecycle, if the transport owns a connection.
+
+    Raises:
+        RuntimeError: PostgreSQL transport has no connection URL.
+
+    Side Effects:
+        Constructs an in-process or PostgreSQL broker.
     """
     stream = runtime_context.execution.stream
     if stream.transport == "in_process":
@@ -260,7 +280,15 @@ def _build_http_adapters(
     runtime_context: RuntimeContext,
     model_clients: dict[str, Any],
 ) -> list[HttpProtocolAdapter]:
-    """Build HTTP protocol adapters in order: specific routes first, catch-all last."""
+    """Build protocol adapters with specific routes before the catch-all route.
+
+    Args:
+        runtime_context (RuntimeContext): Configured protocol runtimes.
+        model_clients (dict[str, Any]): Model clients keyed by provider name.
+
+    Returns:
+        list[HttpProtocolAdapter]: HTTP adapters in route precedence order.
+    """
     adapters: list[HttpProtocolAdapter] = []
     generic_json: GenericJsonHttpProtocolAdapter | None = None
 
@@ -300,8 +328,8 @@ def _build_http_adapters(
         elif runtime.kind == "generic_json":
             # Same `workflows` key as the two protocol adapters above, keyed by
             # request path instead of model name: this is where a workflow that
-            # is not a completion gets an endpoint. Values stay raw here — a
-            # bare workflow name or a {workflow, mode} mapping — because the
+            # is not a completion gets an endpoint. Values stay raw here as a
+            # bare workflow name or a {workflow, mode} mapping because the
             # adapter owns that shape.
             generic_json = GenericJsonHttpProtocolAdapter(
                 session_key_resolver=resolver,
@@ -332,25 +360,13 @@ def _build_protocol_detectors(runtime_context: RuntimeContext) -> list[ProtocolD
 
 
 def _build_single_resolver(cfg: dict[str, Any]) -> SessionKeyResolver | None:
-    """Builds a single SessionKeyResolver from a config dict.
+    """Build one session-key resolver from a protocol configuration.
 
-    Supported variants::
+    Args:
+        cfg (dict[str, Any]): Header, query, body, or composite resolver configuration.
 
-        resolver: header
-        key: x-session-id
-
-        resolver: query
-        parameter: session_id
-
-        resolver: body
-        key: meta.session_id          # dot notation for nested fields
-
-        resolver: composite
-        resolvers:
-          - resolver: header
-            key: x-session-id
-          - resolver: query
-            parameter: session_id
+    Returns:
+        SessionKeyResolver | None: Configured resolver, or None for an invalid or absent variant.
     """
     kind = cfg.get("resolver")
     if kind == "header":
@@ -382,32 +398,17 @@ def _build_single_resolver(cfg: dict[str, Any]) -> SessionKeyResolver | None:
 
 
 def _build_principal_resolver(cfg: dict[str, Any]) -> PrincipalResolver | None:
-    """Builds the configured PrincipalResolver, or None when none is configured.
+    """Build a deployment-wide principal resolver from trusted sources.
 
-    The same shape as `_build_single_resolver` and deliberately **not** the same
-    sources. A session key may be read out of any part of a request, because
-    knowing where something lives grants nothing; a principal may only come from
-    a source whose trust model the deployment stated.
+    Args:
+        cfg (dict[str, Any]): Trusted-gateway or composite resolver configuration and
+            its trust settings.
 
-    Configured once for the platform rather than per protocol runtime: the trust
-    boundary is a property of where this process runs, not of which endpoint a
-    request arrived on.
+    Returns:
+        PrincipalResolver | None: Principal resolver, or None when no type is configured.
 
-    Supported variants::
-
-        type: trusted_gateway
-        header: x-principal-id
-        trusted_hosts: ["10.0.0.*"]        # at least one of these two
-        secret_header: x-gateway-secret    # is required
-        secret: ${GATEWAY_SECRET}
-
-        type: composite
-        resolvers:
-          - type: trusted_gateway
-            ...
-
-    No configuration means no principal is ever established, which is what the
-    platform does today and remains the default.
+    Raises:
+        ConfigurationError: The configured resolver type is unknown or invalid.
     """
     kind = str(cfg.get("type", "")).strip()
     if kind == "trusted_gateway":
@@ -437,17 +438,24 @@ def _build_principal_resolver(cfg: dict[str, Any]) -> PrincipalResolver | None:
 
 
 def _build_embedding_client(snapshot: PlatformConfigSnapshot) -> EmbeddingClient | None:
-    """Build the configured embedding client, or None when none is configured.
+    """Construct one reusable embedding client for the runtime.
 
-    Built once here rather than per tool instantiation: a local embedding model
-    is loaded into memory, and the tool catalog is rebuilt on every request.
+    Args:
+        snapshot (PlatformConfigSnapshot): Platform embedding provider settings.
+
+    Returns:
+        EmbeddingClient | None: Embedding client, or None when the provider is absent or
+            unavailable.
+
+    Side Effects:
+        May load a local model and logs unavailable providers.
     """
     config = snapshot.embedding
     if not config.provider:
         return None
     if config.provider != SENTENCE_TRANSFORMERS_PROVIDER:
         logger.warning(
-            "embedding.provider.unknown | provider=%s — embeddings disabled", config.provider
+            "embedding.provider.unknown | provider=%s: embeddings disabled", config.provider
         )
         return None
     try:
@@ -460,7 +468,7 @@ def _build_embedding_client(snapshot: PlatformConfigSnapshot) -> EmbeddingClient
             offline=config.offline,
         )
     except (ImportError, ValueError) as exc:
-        logger.warning("embedding.provider.unavailable | %s — embeddings disabled", exc)
+        logger.warning("embedding.provider.unavailable | %s: embeddings disabled", exc)
         return None
 
 
@@ -468,13 +476,20 @@ def _build_watchers(
     runtime_context: RuntimeContext,
     dispatcher: ExecutionDispatcher | None,
 ) -> list[InboundAdapter]:
-    """Turn the `watchers` block into running observers.
+    """Create enabled source watchers from the runtime configuration.
 
-    A watcher declared with a broken source stops startup rather than being
-    skipped with a warning. The two are indistinguishable from outside — a
-    watcher that does not exist and a source that never changes both produce
-    silence — and silence is the worst failure for something whose whole job is
-    to notice.
+    Args:
+        runtime_context (RuntimeContext): Configured watcher definitions.
+        dispatcher (ExecutionDispatcher | None): Execution dispatcher used by each watcher.
+
+    Returns:
+        list[InboundAdapter]: Configured inbound watcher adapters.
+
+    Raises:
+        RuntimeError: An enabled watcher has an invalid source or settings.
+
+    Side Effects:
+        Constructs source observers and logs enabled or disabled watchers.
     """
     watchers: list[InboundAdapter] = []
     for configured in runtime_context.watchers:
@@ -522,19 +537,21 @@ def _build_repositories(
 
 
 def _build_coordinator_factory(runtime_context: RuntimeContext) -> StoreCoordinatorFactory:
-    """Instantiate the correct StoreCoordinatorFactory based on hive_mind_provider kind.
+    """Select the configured store coordinator factory.
 
-    "simple" (or no provider configured) → SimpleStoreCoordinatorFactory (in-memory).
-    "filesystem" → HiveMindStoreCoordinatorFactory (file-backed, requires the
-    [hive-mind] extra). The choice depends only on configuration.
+    Args:
+        runtime_context (RuntimeContext): Hive Mind provider configuration.
+
+    Returns:
+        StoreCoordinatorFactory: Filesystem or in-memory coordinator factory.
+
+    Side Effects:
+        May import the filesystem extra and logs the chosen factory.
     """
-    import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-    _log = _logging.getLogger(__name__)
-
     provider = runtime_context.hive_mind_provider
     if provider is None or not isinstance(provider, HiveMindProviderRuntime):
         from nlght.adapters.outbound.hive_mind.simple import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            SimpleStoreCoordinatorFactory,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+            SimpleStoreCoordinatorFactory,
         )
         return SimpleStoreCoordinatorFactory()
 
@@ -544,19 +561,47 @@ def _build_coordinator_factory(runtime_context: RuntimeContext) -> StoreCoordina
                 HiveMindStoreCoordinatorFactory,
             )
             base_dir = str(provider.config.get("base_dir", "./sessions"))
-            _log.info("coordinator_factory.hive_mind | base_dir=%s", base_dir)
+            logger.info("coordinator_factory.hive_mind | base_dir=%s", base_dir)
             return HiveMindStoreCoordinatorFactory(base_dir=base_dir)
         except ImportError:
-            _log.warning(
-                "hive-mind extra not installed — falling back to SimpleStoreCoordinatorFactory. "
+            logger.warning(
+                "hive-mind extra is not installed. Using SimpleStoreCoordinatorFactory. "
                 "Install with: pip install 'nlght-ai[hive-mind]'"
             )
 
     from nlght.adapters.outbound.hive_mind.simple import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        SimpleStoreCoordinatorFactory,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+        SimpleStoreCoordinatorFactory,
     )
-    _log.info("coordinator_factory.simple | ttl=%d", provider.session_ttl_seconds)
+    logger.info("coordinator_factory.simple | ttl=%d", provider.session_ttl_seconds)
     return SimpleStoreCoordinatorFactory(session_ttl_seconds=provider.session_ttl_seconds)
+
+
+def _log_action_authorization(settings: ActionAuthorizationRuntime) -> None:
+    """Log the effective action policy and approval adapter.
+
+    Args:
+        settings (ActionAuthorizationRuntime): Action-authorization enablement and settings.
+
+    Side Effects:
+        Reads registered adapters and emits startup log messages.
+    """
+    policy = action_authorization_registry.policy()
+    approval = action_authorization_registry.approval()
+    if not settings.enabled:
+        ignored = [type(port).__name__ for port in (policy, approval) if port is not None]
+        logger.warning(
+            "action_authorization | disabled: model tool calls execute without policy or "
+            "approval. Argument validation and binding still apply%s",
+            f". Ignored registered extensions: {', '.join(ignored)}" if ignored else "",
+        )
+        return
+    logger.info(
+        "action_authorization | policy=%s approval=%s policy_timeout_s=%s approval_timeout_s=%s",
+        type(policy).__name__ if policy is not None else "DefaultActionPolicy",
+        type(approval).__name__ if approval is not None else "none (confirmation denies)",
+        settings.policy_timeout_seconds,
+        settings.approval_timeout_seconds,
+    )
 
 
 async def build_container(config_path: str) -> Container:
@@ -621,8 +666,8 @@ async def build_container(config_path: str) -> Container:
         else None
     )
 
-    # Rule-based access policies (ADR-0022) — active whenever persistence is
-    # configured; an empty access_policies table restricts nothing.
+    # Rule-based access policies (ADR-0022) are active whenever persistence is
+    # configured. An empty access_policies table restricts nothing.
     access_rule_engine = (
         AccessRuleEngine(access_rule_repository)
         if access_rule_repository is not None
@@ -655,53 +700,53 @@ async def build_container(config_path: str) -> Container:
                 request_timeout_s=_p.request_timeout_s,
                 stream_connect_timeout_s=_p.stream_connect_timeout_s,
                 stream_read_timeout_s=_p.stream_read_timeout_s,
+                temperature=_p.temperature,
             )
         elif isinstance(_p, AnthropicModelProviderRuntime):
             try:
                 from nlght.adapters.outbound.model.anthropic import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                    AnthropicModelClient,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                    AnthropicModelClient,
                 )
                 model_clients[_p.name] = AnthropicModelClient(
                     api_key=_p.api_key,
                     default_model=_p.default_model,
                 )
             except ImportError:
-                import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                _logging.getLogger(__name__).warning(
-                    "anthropic package not installed — provider '%s' skipped. "
+                logger.warning(
+                    "anthropic package is not installed. Provider '%s' skipped. "
                     "Install with: pip install 'nlght-ai[anthropic]'",
                     _p.name,
                 )
         elif isinstance(_p, OpenAICloudModelProviderRuntime):
             try:
                 from nlght.adapters.outbound.model.openai_cloud import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                    OpenAICloudModelClient,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                    OpenAICloudModelClient,
                 )
                 model_clients[_p.name] = OpenAICloudModelClient(
                     api_key=_p.api_key,
                     default_model=_p.default_model,
                     base_url=_p.base_url,
+                    temperature=_p.temperature,
                 )
             except ImportError:
-                import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                _logging.getLogger(__name__).warning(
-                    "openai package not installed — provider '%s' skipped. "
+                logger.warning(
+                    "openai package is not installed. Provider '%s' skipped. "
                     "Install with: pip install 'nlght-ai[openai]'",
                     _p.name,
                 )
         elif isinstance(_p, GoogleModelProviderRuntime):
             try:
                 from nlght.adapters.outbound.model.google import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                    GoogleModelClient,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                    GoogleModelClient,
                 )
                 model_clients[_p.name] = GoogleModelClient(
                     api_key=_p.api_key,
                     default_model=_p.default_model,
+                    temperature=_p.temperature,
                 )
             except ImportError:
-                import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                _logging.getLogger(__name__).warning(
-                    "google-genai package not installed — provider '%s' skipped. "
+                logger.warning(
+                    "google-genai package is not installed. Provider '%s' skipped. "
                     "Install with: pip install 'nlght-ai[google]'",
                     _p.name,
                 )
@@ -715,7 +760,7 @@ async def build_container(config_path: str) -> Container:
     embedding_client = _build_embedding_client(snapshot)
 
     # One set of store connection pools for this container. Store activations are
-    # constructed per catalog build and per step hop; without this each of those
+    # constructed per catalog build and per step hop. Without this each of those
     # would open its own pool and abandon it. Registered as a subsystem so the
     # pools are disposed on shutdown.
     store_connections = StoreConnections()
@@ -734,22 +779,27 @@ async def build_container(config_path: str) -> Container:
             ),
             embedding_client=embedding_client,
             store_connections=store_connections,
+            action_policy=action_authorization_registry.policy(),
+            action_approval=action_authorization_registry.approval(),
+            action_authorization_enabled=runtime_context.action_authorization.enabled,
+            policy_timeout_seconds=runtime_context.action_authorization.policy_timeout_seconds,
+            approval_timeout_seconds=runtime_context.action_authorization.approval_timeout_seconds,
         )
         if resource_repository is not None
         else None
     )
+    if tool_catalog_builder is not None:
+        _log_action_authorization(runtime_context.action_authorization)
 
     playbook_catalog_builder: PlaybookCatalogBuilder | None = None
     playbooks_path = snapshot.catalogs.playbooks.definitions_path
     if playbooks_path:
-        import logging as _logging  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        from pathlib import Path as _Path  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        _playbook_defs = load_playbook_definitions(_Path(playbooks_path))
+        _playbook_defs = load_playbook_definitions(Path(playbooks_path))
         playbook_catalog_builder = PlaybookCatalogBuilder(
             _playbook_defs,
             access_policy=access_rule_engine.for_playbooks() if access_rule_engine else None,
         )
-        _logging.getLogger(__name__).info(
+        logger.info(
             "playbook.catalog.configured | path=%s definitions=%d",
             playbooks_path, len(_playbook_defs),
         )
@@ -771,7 +821,7 @@ async def build_container(config_path: str) -> Container:
             tool_loader=tool_registry,
             # Every step-internal resource activation goes through this, so a
             # step cannot reach a resource the caller may not use. Absent only
-            # where there is no resource repository at all — a deployment with
+            # where there is no resource repository at all. A deployment with
             # no persistence has no resources to activate, and a step that names
             # one then fails with a configuration error rather than reaching a
             # resource nothing could have authorized.
@@ -799,13 +849,13 @@ async def build_container(config_path: str) -> Container:
         session_access=session_access,
         os_runtime=os_runtime,
         metering_port=metering,
-        # Present only where a durable queue is configured; without one a step
+        # Present only where a durable queue is configured. Without one a step
         # has nothing to fan work out to, and says so instead of degrading.
         dispatcher=execution_dispatcher,
     )
 
     # One broker shared by the worker (publisher) and the gateway (subscriber):
-    # a streaming execution's signals flow worker → broker → gateway → caller.
+    # streaming execution signals pass through the broker to the gateway and caller.
     # Which transport carries them is configuration, not code (see
     # _build_execution_stream_broker).
     execution_stream_broker, execution_stream_subsystem = _build_execution_stream_broker(

@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The entity key describes an assertion; it does not identify one.
+"""The entity key describes an assertion. It does not identify one.
 
 `uq_knowledge_assertion_entity` said the opposite. While it stood, the model's
 choice of `subject` and `rule_property` *was* the identity, enforced by the
-database — and a run over an unedited sentence proved what that costs: the model
+database. A run over an unedited sentence showed the cost: the model
 described one rule two ways across two passes, so the corpus gained an assertion
 nobody wrote, and the approval stayed with the one nobody would read again.
 

@@ -7,26 +7,48 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from typing import Any
 
-from nlght.core.model.messages import CallerInstructionMessage, UntrustedContextMessage
+from nlght.core.model.messages import CallerInstructionMessage, ContextRecord, UntrustedContextMessage
 
 
 def serialize_untrusted_context(message: UntrustedContextMessage) -> str:
-    """Escape structured records as an inert JSON data payload."""
+    """Serialize external records as data without provider authority.
+
+    Args:
+        message (UntrustedContextMessage): Records to include as context.
+
+    Returns:
+        str: Compact JSON payload without internal trust labels.
+    """
 
     return json.dumps(
         {
             "type": "external_context",
             "authority": "untrusted_data",
-            "records": [asdict(record) for record in message.records],
+            "records": [_wire_record(record) for record in message.records],
         },
         ensure_ascii=False,
         separators=(",", ":"),
     )
 
 
+def _wire_record(record: ContextRecord) -> dict[str, Any]:
+    # Keep trust labels out of prompts: they belong to action decisions (ADR-0074).
+    data = asdict(record)
+    data["provenance"].pop("origin", None)
+    return data
+
+
 def serialize_caller_instruction(message: CallerInstructionMessage) -> str:
-    """Preserve a caller's claimed role as data, never as provider authority."""
+    """Serialize a caller's claimed role as data.
+
+    Args:
+        message (CallerInstructionMessage): Caller content and claimed role.
+
+    Returns:
+        str: Compact JSON payload that grants no provider authority.
+    """
 
     payload = {
         "type": "caller_instruction",

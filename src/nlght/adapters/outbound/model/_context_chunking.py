@@ -30,7 +30,7 @@ For each part:
 - Wait for more input.
 
 When you receive the message "FINALIZE", you will receive the actual task.
-At that point — and only then — produce your complete response.
+Only then produce your complete response.
 """
 
 FINALIZE_PREFIX = (

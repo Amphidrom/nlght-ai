@@ -48,13 +48,16 @@ def _utcnow() -> datetime:
 
 
 def _as_utc(moment: datetime) -> datetime:
-    """Restore the offset a backend without one dropped on the way out.
+    """Restore UTC awareness to a timestamp returned without an offset.
 
-    The columns are timezone-aware and Postgres hands them back that way.
-    SQLite has nowhere to keep the offset, so the same value returns naive —
-    and comparing that against an aware ``now`` raises TypeError rather than
-    being quietly wrong. Everything written here is UTC, so saying so is a
-    restoration and not a guess.
+    Args:
+        moment (datetime): Timestamp read from persistence.
+
+    Returns:
+        datetime: Original aware timestamp, or the same clock time marked UTC.
+
+    Notes:
+        SQLite drops offsets on read. This repository writes UTC timestamps.
     """
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
@@ -70,7 +73,7 @@ def _serialize_trigger(trigger: Trigger) -> dict[str, Any]:
     difference is the whole security semantics of a durable execution.
 
     `principal_id` **is** written. The principal was established at a trusted
-    entry, by a `PrincipalResolver`, from a source the worker no longer has — the
+    entry, by a `PrincipalResolver`, from a source the worker no longer has. The
     gateway's headers are gone by the time work is claimed. So the established
     identity is delegated through the queue, and a worker adopts it rather than
     re-authenticating a request that has long since returned. What travels is a
@@ -85,8 +88,8 @@ def _serialize_trigger(trigger: Trigger) -> dict[str, Any]:
     `workflow` is **not** written, and must not be. The executor knows which
     workflow it is actually running and stamps `invocation.workflow.name` onto
     the context before any policy reads it. A serialized copy would be a second
-    answer to a question the runtime can answer authoritatively — and for a
-    fan-out child it would be the *parent's* name.
+    answer to a question the runtime can answer authoritatively. For a fan-out
+    child it would be the *parent's* name.
     """
     return {
         "kind": trigger.kind.value,
@@ -137,7 +140,7 @@ def _deserialize_trigger(value: dict[str, Any]) -> Trigger:
                 else None
             ),
             # A row enqueued before principals existed has no key here, and gets
-            # `None` — no principal was established for it, which is the truth.
+            # `None` because no principal was established for it.
             # Under enforcement that is a refusal rather than a session opened
             # for nobody, which is the direction this has to fail in.
             principal=(
@@ -163,15 +166,15 @@ _TERMINAL_STATUSES = frozenset(
 )
 
 
-class _epoch_seconds(FunctionElement[float]):  # noqa: N801 (a SQL function, named as one)
+class _epoch_seconds(FunctionElement[float]):
     """Seconds between two timestamps, as a number the database can sum.
 
     There is no portable spelling for this. Postgres subtracts timestamps into
-    an interval and pulls seconds out of it; SQLite has no interval type at all
+    an interval and pulls seconds out of it. SQLite has no interval type at all
     and goes the long way round through Julian days. Both spellings live here
     rather than as a dialect check in the middle of a query.
 
-    NULL in either argument yields NULL, which sums to nothing — so a child that
+    NULL in either argument yields NULL, which sums to nothing. A child that
     has not finished contributes no time, which is the truth about it.
     """
 
@@ -206,7 +209,12 @@ def _epoch_seconds_sqlite(
 
 
 def _fan_out_timing() -> tuple[Any, Any, Any]:
-    """The three timing aggregates, so both fan-out queries ask for the same ones."""
+    """Build shared timing aggregates for fan-out queries.
+
+    Returns:
+        tuple[Any, Any, Any]: SQL expressions for earliest start, latest
+        completion, and total child duration.
+    """
     return (
         func.min(WorkflowExecution.started_at),
         func.max(WorkflowExecution.completed_at),
@@ -219,11 +227,18 @@ def _fan_out_timing() -> tuple[Any, Any, Any]:
 def _summarize_fan_out(
     parent_id: uuid.UUID, rows: list[tuple[str, int, Any, Any, Any]]
 ) -> FanOutSummary:
-    """Fold one parent's per-status rows into a single summary.
+    """Combine grouped child counts and timing for one parent run.
 
-    The counts are grouped by status because that is what the status breakdown
-    needs; the timing is not, so it is combined back across the groups here
-    rather than asked for in a second query.
+    Args:
+        parent_id (uuid.UUID): Parent execution identifier.
+        rows (list[tuple[str, int, Any, Any, Any]]): Status, count, start,
+            completion, and child-duration aggregates.
+
+    Returns:
+        FanOutSummary: Child status counts and combined timing.
+
+    Notes:
+        Grouped timing is merged here to avoid a second database query.
     """
     counts = {status: count for status, count, _, _, _ in rows}
     started = [row[2] for row in rows if row[2] is not None]
@@ -418,14 +433,23 @@ class SqlAlchemyExecutionRepository(ExecutionRepository):
                 capabilities = await self._capabilities(session, execution_id)
             return _record(row, capabilities)
 
-    # ------------------------------------------------------------------
-    # Observation — read-only, never on the dispatch path
-    # ------------------------------------------------------------------
 
     async def _capabilities_of(
         self, session: AsyncSession, execution_ids: list[uuid.UUID]
     ) -> dict[uuid.UUID, tuple[str, ...]]:
-        """Capabilities for a whole page in one query rather than one per row."""
+        """Fetch capability requirements for a page of executions.
+
+        Args:
+            session (AsyncSession): Open database session.
+            execution_ids (list[uuid.UUID]): Execution IDs in the page.
+
+        Returns:
+            dict[uuid.UUID, tuple[str, ...]]: Sorted capabilities by execution
+            ID. Empty input produces an empty mapping without a query.
+
+        Side Effects:
+            Performs one batched database query for nonempty input.
+        """
         if not execution_ids:
             return {}
         result = await session.execute(
@@ -726,8 +750,8 @@ class SqlAlchemyExecutionRepository(ExecutionRepository):
     ) -> ExecutionClaim | None:
         # Capability matching. A worker that advertises capabilities may only
         # claim an execution whose every requirement it satisfies. A worker with
-        # *no* declared capabilities is a wildcard — a single-node
-        # gateway+worker has to run every workflow out of the box — so no
+        # *no* declared capabilities is a wildcard. A single-node
+        # gateway+worker has to run every workflow out of the box, so no
         # requirement excludes it, and capabilities become an opt-in for
         # heterogeneous worker pools.
         capability_clauses: list[Any] = []
@@ -742,7 +766,7 @@ class SqlAlchemyExecutionRepository(ExecutionRepository):
         # claimable when no *other* execution of the same workflow is already
         # LEASED or RUNNING. A sibling whose lease has expired still counts as
         # active, so recovery of the crashed run is preferred over starting a
-        # queued one — the two never run at once. Non-exclusive executions are
+        # queued one. The two never run at once. Non-exclusive executions are
         # unconstrained here.
         sibling = aliased(WorkflowExecution)
         active_sibling = select(sibling.execution_id).where(

@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Integration: access-policy rules flow from the DB through the rule engine
-into tool/playbook catalogs and the model policy — the full SQLAlchemy stack
-on a real (in-memory) database.
+"""Exercise stored access rules through catalogs and model policy.
+
+The tests use SQLAlchemy persistence, rule evaluation, and the resource and
+playbook catalog builders together.
 """
 from __future__ import annotations
 

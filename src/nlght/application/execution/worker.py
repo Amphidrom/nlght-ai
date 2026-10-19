@@ -204,7 +204,7 @@ class ExecutionWorker:
         )
         jittered = min(
             self._settings.retry_max_seconds,
-            random.uniform(base * 0.8, base * 1.2),  # noqa: S311 (retry jitter, not security)
+            random.uniform(base * 0.8, base * 1.2),
         )
         return self._now() + timedelta(seconds=jittered)
 
@@ -268,13 +268,19 @@ class ExecutionWorker:
     async def _run_streaming(
         self, claim: ExecutionClaim, invocation: WorkflowInvocation
     ) -> dict[str, Any]:
-        """Run a streaming execution, publishing each signal to the broker.
+        """Run a workflow while relaying and collecting its signals.
 
-        The gateway relays those signals to the caller as they arrive; the
-        worker also collects them so the durable record keeps the assembled
-        terminal result once the run completes.
+        Args:
+            claim (ExecutionClaim): Execution claim to run.
+            invocation (WorkflowInvocation): Workflow invocation for the claimed run.
+
+        Returns:
+            dict[str, Any]: Assembled assistant result for the durable record.
+
+        Side Effects:
+            Executes the workflow, publishes signals, and closes the stream.
         """
-        assert self._stream_broker is not None  # noqa: S101 (guarded by the caller)
+        assert self._stream_broker is not None
         execution_id = claim.execution.execution_id
         collected: list[Signal] = []
         try:
@@ -287,11 +293,13 @@ class ExecutionWorker:
 
 
 def _assemble_streamed_result(signals: list[Signal]) -> dict[str, Any]:
-    """The terminal result stored for a streamed run: its assistant content.
+    """Assemble the durable assistant result from streamed signals.
 
-    Mirrors the executor's buffered assembly, kept here rather than imported
-    across the layer boundary — the live stream was the delivery; this is the
-    durable copy the status endpoint can return after the fact.
+    Args:
+        signals (list[Signal]): Collected execution signals.
+
+    Returns:
+        dict[str, Any]: Choice response containing assistant token and result text.
     """
     content = "".join(
         s.content

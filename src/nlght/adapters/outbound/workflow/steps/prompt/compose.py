@@ -1,27 +1,12 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Trusted instructions and untrusted knowledge composed without flattening.
+"""Compose trusted instructions with budgeted, untrusted model context.
 
-This is the step the whole orient chain was written for and never had: a
-`MentalModel` is assembled, the `RelevanceEngine` decides what survives the
-budget, and `SystemPromptBuilder` renders the result. Until now every one of
-those was implemented, exported, and called by nothing.
-
-**One decision path for every source.** Retrieved passages arrive as elements
-(ADR-0054) and are weighed against the session's own memory by the same rules —
-there is no branch anywhere below asking whether something came from a corpus or
-from a conversation, and a passage that matters less than a remembered fact loses
-to it.
-
-**Session memory is optional and so is retrieval.** Four shapes are valid and all
-four are tested: passages alone, memory alone, both, neither. A simple retrieval
-answer must not require the `[hive-mind]` extra merely because the generic
-machinery happens to live in that package today.
-
-The step ends at `ctx.messages`. Calling the model is `passthrough`'s job and
-stays there, which keeps the seam between preparing a prompt and executing one
-where it can be seen.
+Retrieved passages and optional session memory enter the same element reduction.
+``ModelContextBuilder`` renders selected knowledge as untrusted records, while
+``SystemPromptBuilder`` supplies deployment-authored instructions. The step
+writes the composed messages to ``ctx.messages`` for a later model call.
 """
 
 from __future__ import annotations
@@ -132,28 +117,32 @@ class PromptComposeStep(StepBase):
             "yes" if model.recent_turns or model.known_results else "no",
             len(trusted_instructions), len(context),
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     @staticmethod
     def _authority(ctx: WorkflowStepContext) -> TokenBudget | None:
-        """The budget of the client that will actually make the call.
+        """Read the bound model's authoritative token budget.
 
-        Not a number this step derives, and not the workflow's configuration.
-        The same client enforces `apply_budget_to_messages` afterwards, so
-        composing against anything else would build a prompt to one limit and
-        check it against another — two truths that agree until they do not.
+        Args:
+            ctx (WorkflowStepContext): Context containing the bound model.
+
+        Returns:
+            TokenBudget | None: Model budget, or ``None`` without a bound model.
         """
         return ctx.llm.token_budget if ctx.llm is not None else None
 
     def _configured_budget(self, ctx: WorkflowStepContext) -> int | None:
-        """The configured limit, which applies only when the client cannot say.
+        """Read the configured prompt limit when the model has no known budget.
 
-        Deliberately a fallback and never an override. A workflow author can set
-        a budget for a client that has none — a provider with no known context
-        window, or a run with no model bound yet — and cannot quietly widen or
-        narrow one the model itself declared. Where both exist the client wins
-        and the difference is logged, because a configuration that is being
-        ignored should not be silent.
+        Args:
+            ctx (WorkflowStepContext): Context containing the bound model.
+
+        Returns:
+            int | None: Configured token limit, or ``None`` when the model
+            supplies the authoritative budget or no limit is configured.
+
+        Side Effects:
+            Logs a configured limit that the bound model supersedes.
         """
         raw = self.config.get("max_system_prompt_tokens")
         configured = int(raw) if raw not in (None, "") else None
@@ -168,10 +157,13 @@ class PromptComposeStep(StepBase):
         return configured
 
     def _passages(self, ctx: WorkflowStepContext) -> list[Any]:
-        """What retrieval found, selected down to a stated cap.
+        """Select retrieved passages within the configured character limit.
 
-        Absent hits are not an error: a workflow may compose a prompt from memory
-        alone, or from neither, and still have something worth sending.
+        Args:
+            ctx (WorkflowStepContext): Context holding retrieval hits.
+
+        Returns:
+            list[Any]: Selected passages, or an empty list without hits.
         """
         hits = ctx.metadata.get("retrieval.hits")
         if not hits:
@@ -185,12 +177,17 @@ class PromptComposeStep(StepBase):
         return list(selection.passages)
 
     def _mental_model(self, ctx: WorkflowStepContext) -> MentalModel:
-        """What the session remembers, where there is a session at all.
+        """Build a mental model from recent conversation turns.
 
-        Built through `MentalModelBuilder`, which scores and filters exactly as it
-        was written to — this is its first caller in production. Without a
-        coordinator the model is empty, which is a valid model and not a
-        degraded one: a single retrieval question has no conversation behind it.
+        Args:
+            ctx (WorkflowStepContext): Context with an optional store coordinator.
+
+        Returns:
+            MentalModel: Scored recent turns, or an empty model when memory is
+            disabled, unavailable, or unbound.
+
+        Side Effects:
+            Reads recent turns and logs failures to read session memory.
         """
         coordinator = ctx.store_coordinator
         wanted = str(self.config.get("include_memory", "true")).lower() != "false"
@@ -201,9 +198,9 @@ class PromptComposeStep(StepBase):
             snapshot = ContextSnapshot(
                 recent_turns=list(coordinator.get_recent_turns(5)),
             )
-        except Exception:  # noqa: BLE001 (memory is an enhancement; a prompt without it is still a prompt)
+        except Exception:
             logger.warning(
-                "[%s] prompt.compose.memory_unavailable — composing without it",
+                "[%s] prompt.compose.memory_unavailable: composing without it",
                 ctx.correlation_id, exc_info=True,
             )
             return MentalModel(turn_id=ctx.correlation_id, built_at=datetime.now(UTC))

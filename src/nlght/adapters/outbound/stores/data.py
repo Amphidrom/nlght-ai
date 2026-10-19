@@ -1,21 +1,12 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Data store retrieval tool.
+"""Search indexed data and resolve current answer text from the corpus.
 
-One resource activation spanning Qdrant, OpenSearch and the corpus in
-PostgreSQL. Keyword and semantic discovery are two capabilities of one store
-over one corpus rather than a store each (ADR-0063), a caller asks a question in
-text, and the store decides per operation which backend answers it.
-
-The indexes say *which* documents match; PostgreSQL says which revision is
-published and what it says (ADR-0062). Nothing leaves here on a revision that is
-no longer published, and nothing leaves here quoting an index payload where the
-corpus can be read.
-
-The text-to-vector step uses the embedding port, which is what makes this
-usable at all — the previous ``vector-search`` signature asked the model itself
-for a ``query_vector`` array.
+OpenSearch finds documents. Qdrant finds chunks. PostgreSQL supplies the
+published revision and its text, so a stale index hit cannot influence ranking.
+When an older revision has no stored text, the answer path logs its fallback to
+the index payload.
 """
 
 from __future__ import annotations
@@ -31,7 +22,13 @@ from nlght.adapters.outbound.persistence.ingestion_repository import (
     SqlAlchemyIngestionRepository,
 )
 from nlght.adapters.outbound.stores.connections import StoreConnections
+from nlght.adapters.outbound.stores.source_trust import (
+    TRUSTED_SOURCES_OPTION,
+    SourceLabeller,
+    trusted_sources,
+)
 from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
+from nlght.core.model.trust import SOURCE_DATA
 from nlght.core.retrieval import (
     CHUNK,
     DOCUMENT,
@@ -43,7 +40,7 @@ from nlght.core.retrieval import (
     fuse,
     rank_within_sources,
 )
-from nlght.core.tools.tool import ToolBase, ToolOption, ToolParameter, ToolSignature
+from nlght.core.tools.tool import ToolBase, ToolOption, ToolOutput, ToolParameter, ToolSignature
 from nlght.ports.outbound.embedding_client import EmbeddingClient
 from nlght.ports.outbound.ingestion_repository import IngestionRepository
 
@@ -69,7 +66,15 @@ _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
 
 
 def _number(payload: Mapping[str, Any], name: str) -> int:
-    """One locator number from a payload, or zero where the store has none."""
+    """Parse an optional locator number without rejecting an incomplete index payload.
+
+    Args:
+        payload (Mapping[str, Any]): Index payload containing optional locator fields.
+        name (str): Locator field to read.
+
+    Returns:
+        int: Integer field value, or zero for missing and invalid values.
+    """
     try:
         return int(payload.get(name) or 0)
     except (TypeError, ValueError):
@@ -114,7 +119,7 @@ class ResolvedText:
     """What a finding actually says, read from the authority.
 
     ``text`` came out of PostgreSQL, not out of a payload. For a chunk it is the
-    span its locator names; for a document it is the whole revision, because a
+    span its locator names. For a document it is the whole revision, because a
     document names no span and inventing one would answer with text the finding
     never identified (ADR-0062).
     """
@@ -182,6 +187,11 @@ class DataStoreTool(ToolBase):
         self._opensearch_url = config["opensearch_url"]
         self._opensearch_username = config.get("opensearch_username")
         self._opensearch_password = config.get("opensearch_password")
+        self._labeller = SourceLabeller(
+            kind=SOURCE_DATA,
+            resource_id=self.resource_id or f"{self.KIND}/{name}",
+            trusted=trusted_sources(config, where=f"data store '{name}'"),
+        )
 
     # -- clients -------------------------------------------------------------
 
@@ -229,6 +239,7 @@ class DataStoreTool(ToolBase):
             ToolOption("opensearch_username", "string", "OpenSearch user"),
             ToolOption("opensearch_password", "string", "OpenSearch password", secret=True),
             ToolOption("timeout", "integer", "Request timeout in seconds", default=30),
+            TRUSTED_SOURCES_OPTION,
         ]
 
     @classmethod
@@ -264,12 +275,18 @@ class DataStoreTool(ToolBase):
     async def search_keyword_candidates(
         self, *, query: str, limit: int = 10
     ) -> list[RetrievalHit]:
-        """What the text index found, minus everything no longer published.
+        """Find current keyword candidates for ranking, retaining index text only as
+        candidate material.
 
-        Candidates, not answers: a caller ranks them, and the store's promise is
-        that nothing stale reaches that ranking (ADR-0062). `content` on them is
-        still the payload's copy — it is what a ranking reads, and it is not what
-        a reader answers with.
+        Args:
+            query (str): Text to match in the keyword index.
+            limit (int): Maximum number of index findings.
+
+        Returns:
+            list[RetrievalHit]: Published lexical retrieval hits. No answer text is resolved here.
+
+        Side Effects:
+            Queries OpenSearch and reads current revision IDs from PostgreSQL.
         """
         hits, _ = await self._candidates(self._search_lexical(query, limit), LEXICAL)
         return hits
@@ -277,23 +294,36 @@ class DataStoreTool(ToolBase):
     async def search_semantic_candidates(
         self, *, query: str, limit: int = 10
     ) -> list[RetrievalHit]:
-        """The same, from the vector index. Empty where no embedding is configured."""
+        """Find current vector candidates for ranking when embeddings are available.
+
+        Args:
+            query (str): Text to embed and search.
+            limit (int): Maximum number of vector findings.
+
+        Returns:
+            list[RetrievalHit]: Published vector retrieval hits, or an empty list when
+                dense search is unavailable.
+
+        Side Effects:
+            May embed the query, query Qdrant, and read current revision IDs from PostgreSQL.
+        """
         dense = await self._search_dense(query, limit)
         hits, _ = await self._candidates(dense or [], VECTOR)
         return hits
 
     async def resolve(self, hits: Sequence[RetrievalHit]) -> dict[str, ResolvedText]:
-        """What these findings actually say, read from PostgreSQL.
+        """Read authoritative text for selected findings from the published corpus revision.
 
-        Called with what a ranking selected rather than with every candidate:
-        currency needs identity only, and this reads whole documents.
+        Args:
+            hits (Sequence[RetrievalHit]): Selected findings with document and
+                processing revision IDs.
 
-        A chunk is answered with the span its locator names; a document with the
-        whole revision, because a document names no span and inventing one would
-        answer with text the finding never identified. A finding whose revision
-        has no stored text is absent from the result — the caller then has a hit
-        it cannot answer with, which is honest, where falling back to the payload
-        would return a projection as though it were the source.
+        Returns:
+            dict[str, ResolvedText]: Resolved text by carrier ID. Omit hits whose
+                revision has no stored text. Chunk hits use their recorded span.
+
+        Side Effects:
+            Reads revision content from PostgreSQL.
         """
         keys = [
             (hit.provenance.document_id, hit.provenance.processing_revision_id)
@@ -324,27 +354,18 @@ class DataStoreTool(ToolBase):
     # -- programmatic API ----------------------------------------------------
 
     async def search(self, *, query: str, limit: int = 10) -> list[DataHit]:
-        """Hybrid, over the one fusion this platform has.
+        """Fuse current lexical and vector findings, then resolve answer text from the corpus.
 
-        Candidates from both capabilities, each already reduced to the published
-        fassung, ranked by `core/retrieval` — the same reciprocal-rank fusion
-        `retrieval.search` uses — and then resolved against PostgreSQL, so what
-        comes back is the corpus rather than a payload.
+        Args:
+            query (str): Text to search across both indexes.
+            limit (int): Maximum number of fused findings.
 
-        The local RRF this used to carry keyed lexical hits by document id and
-        vector hits by the Qdrant *point* id — a UUID derived from the chunk
-        hash, and not an identity anything else uses. Two incompatible id spaces
-        with no stated reason for being incompatible.
+        Returns:
+            list[DataHit]: Ranked data hits. Document and chunk carriers retain separate identities.
 
-        Replacing it with the platform's fusion does not make the two backends
-        reinforce each other, and nothing here should imply that it does: they
-        answer at different granularities on purpose (`core/retrieval/hit.py`).
-        OpenSearch holds a document, Qdrant holds chunks of it, and a document
-        and a chunk of it are two findings — relatedness is not identity. What
-        changes is that this is now true for the stated reason rather than by
-        accident of key shapes, that the ranking is the one the platform
-        defines, and that a chunk's `id` is its own hash instead of a UUID
-        derived from it.
+        Side Effects:
+            May embed the query, query both indexes, and read published revisions and
+                text from PostgreSQL.
         """
         limit = max(1, int(limit))
         lexical, lexical_meta = await self._candidates(
@@ -379,32 +400,48 @@ class DataStoreTool(ToolBase):
 
     # -- LLM-facing wrappers -------------------------------------------------
 
-    async def search_tool(self, *, query: str, limit: int = 10) -> str:
-        return _serialize(await self.search(query=query, limit=limit))
+    async def search_tool(self, *, query: str, limit: int = 10) -> ToolOutput:
+        return self._output(await self.search(query=query, limit=limit))
 
-    async def search_symbols_tool(self, *, query: str, limit: int = 10) -> str:
-        return _serialize(await self.search_symbols(query=query, limit=limit))
+    async def search_symbols_tool(self, *, query: str, limit: int = 10) -> ToolOutput:
+        return self._output(await self.search_symbols(query=query, limit=limit))
 
-    async def search_keyword_tool(self, *, query: str, limit: int = 10) -> str:
-        return _serialize(await self.search_keyword(query=query, limit=limit))
+    async def search_keyword_tool(self, *, query: str, limit: int = 10) -> ToolOutput:
+        return self._output(await self.search_keyword(query=query, limit=limit))
+
+    def _output(self, hits: list[DataHit]) -> ToolOutput:
+        """Serialize findings and label their source origin for the tool response.
+
+        Args:
+            hits (list[DataHit]): Data hits to serialize and label.
+
+        Returns:
+            ToolOutput: Tool output containing serialized hits and a source-origin label.
+        """
+        return ToolOutput(
+            _serialize(hits),
+            self._labeller.result_origin(
+                [str(hit.metadata.get("source") or "")] for hit in hits
+            ),
+        )
 
     # -- internals -----------------------------------------------------------
 
     async def _candidates(
         self, raw: list[DataHit], source: str
     ) -> tuple[list[RetrievalHit], dict[str, dict[str, Any]]]:
-        """Backend results as findings, with everything stale already gone.
+        """Discard stale index findings before ranking can be affected by them.
 
-        This is the currency boundary, and it sits here rather than after the
-        ranking on purpose. A stale hit that reaches a fusion has already
-        distorted it — it took a rank, it displaced something current, and the
-        scores of everything around it moved. Dropping it afterwards would leave
-        a ranking that had been computed with it in.
+        Args:
+            raw (list[DataHit]): Findings returned by one index.
+            source (str): LEXICAL or VECTOR source label.
 
-        Qdrant is where this actually bites: `write_document` upserts before it
-        prunes, deliberately, so that a document is never briefly absent — which
-        means chunks of two processing revisions are findable during a rewrite.
-        OpenSearch replaces a document under one id and cannot hold two.
+        Returns:
+            tuple[list[RetrievalHit], dict[str, dict[str, Any]]]: Published retrieval
+                hits and their metadata keyed by carrier ID.
+
+        Side Effects:
+            Reads current processing revision IDs from PostgreSQL. Logs stale hits.
         """
         hits: list[RetrievalHit] = []
         metadata: dict[str, dict[str, Any]] = {}
@@ -440,6 +477,7 @@ class DataStoreTool(ToolBase):
                             path=str(payload.get("path") or ""),
                             source_name=str(payload.get("source") or ""),
                             external_id=str(payload.get("external_id") or ""),
+                            origin=self._labeller.origin([str(payload.get("source") or "")]),
                         ),
                         fields=as_fields(payload),
                     ),
@@ -470,18 +508,24 @@ class DataStoreTool(ToolBase):
     def _answer(
         carrier_id: str, hit: RetrievalHit, resolved: dict[str, ResolvedText]
     ) -> str:
-        """The authoritative text, or the payload where the corpus has none.
+        """Select corpus text, with an explicit degraded fallback for legacy unstored revisions.
 
-        A revision written before the corpus stored its content has no
-        authoritative text, and the payload is then all there is. It is a
-        degraded answer and it is logged as one, rather than being silently
-        indistinguishable from a resolved hit.
+        Args:
+            carrier_id (str): Identity of the document or chunk carrier.
+            hit (RetrievalHit): Finding whose text needs an answer.
+            resolved (dict[str, ResolvedText]): Authoritative corpus text keyed by carrier ID.
+
+        Returns:
+            str: Authoritative text when stored. Otherwise the index payload text.
+
+        Side Effects:
+            Logs a warning when the corpus has no stored text for the revision.
         """
         found = resolved.get(carrier_id)
         if found is not None:
             return found.text
         logger.warning(
-            "data.resolve.unstored | document=%s revision=%s — answering from the "
+            "data.resolve.unstored | document=%s revision=%s: answering from the "
             "index payload because the corpus has no stored content for this "
             "revision; reindex to make it authoritative",
             hit.provenance.document_id,
@@ -492,7 +536,18 @@ class DataStoreTool(ToolBase):
     async def _answered(
         self, hits: list[RetrievalHit], metadata: dict[str, dict[str, Any]]
     ) -> list[DataHit]:
-        """A single-capability result, resolved and in the model-facing shape."""
+        """Convert one capability's current findings into model-facing data hits.
+
+        Args:
+            hits (list[RetrievalHit]): Current findings from one search capability.
+            metadata (dict[str, dict[str, Any]]): Index metadata keyed by carrier ID.
+
+        Returns:
+            list[DataHit]: Data hits with resolved text or an explicitly logged legacy fallback.
+
+        Side Effects:
+            Reads PostgreSQL through resolve. May log fallback warnings.
+        """
         resolved = await self.resolve(hits)
         return [
             DataHit(
@@ -506,11 +561,17 @@ class DataStoreTool(ToolBase):
         ]
 
     async def _search_dense(self, query: str, limit: int) -> list[DataHit] | None:
-        """None when no embedding capability is configured or reachable.
+        """Run vector discovery when an embedding client is configured and reachable.
 
-        A missing embedding provider degrades hybrid search to keyword-only
-        rather than failing: partial results beat no results, and the caller can
-        still see which backends contributed.
+        Args:
+            query (str): Text to embed and search.
+            limit (int): Maximum number of vector findings.
+
+        Returns:
+            list[DataHit] | None: Vector data hits, or None when dense discovery is unavailable.
+
+        Side Effects:
+            May embed text and query Qdrant. Logs an unavailable or failed capability.
         """
         if self._embedding is None:
             logger.debug("data.search.dense_skipped | no embedding client configured")

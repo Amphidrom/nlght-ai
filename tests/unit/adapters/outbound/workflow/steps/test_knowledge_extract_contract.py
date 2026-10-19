@@ -1,14 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The contract reaches the model, and moving it re-extracts the corpus.
+"""Include the extraction contract in model input and versioning.
 
-Two wirings, and the second is the one that would fail quietly. The extraction
-version is a hash of everything that decides what an extraction produces, and a
-document already extracted under that version is skipped. So a contract that
-arrived in the formatted prompt but not in the hashed one would change what the
-model is asked while every document went on being skipped — old classifications
-standing beside new ones, with nothing saying which run produced which.
+A changed contract must produce a different extraction version so documents
+are processed under the new instructions.
 """
 
 from __future__ import annotations
@@ -26,7 +22,7 @@ from nlght.core.knowledge.classification import (
 
 def _version(prompt: str) -> str:
     return extraction_version(
-        workflow="w", model="p/m", prompt=prompt, settings={"temperature": 0.0}
+        workflow="w", model="p/m", prompt=prompt, settings={"min_confidence": 0.0}
     )
 
 
@@ -43,12 +39,7 @@ def test_the_prompt_carries_the_whole_contract() -> None:
 
 
 def test_the_contract_is_in_the_text_the_version_hashes() -> None:
-    """The wiring that decides whether a contract change re-extracts anything.
-
-    `_PROMPT` is what `_version` hashes. Substituting the contract at call time
-    instead would leave this template — and therefore the version — unchanged
-    while the model was asked something different.
-    """
+    """Include the extraction contract in the prompt text used for versioning."""
     for item in DEFINITIONS:
         assert item.definition in _PROMPT
     assert GATE_MATRIX[0].sentence in _PROMPT
@@ -75,7 +66,7 @@ def test_the_prompt_still_substitutes_its_own_fields() -> None:
 
 
 def test_only_the_four_defined_kinds_are_accepted() -> None:
-    # The contract defines what the extractor is allowed to return; a kind
+    # The contract defines what the extractor is allowed to return. A kind
     # defined in one place and accepted in the other is a gap either way.
     assert {item.kind for item in DEFINITIONS} == set(BUILTIN_KINDS)
 

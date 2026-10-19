@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Local E2E — the ollama-local model client against a live `ollama serve`.
+"""Run the shared model-client contract against a local Ollama daemon.
 
 Runs the exact same shared :mod:`model_client_suite` as the cloud clients
 (``tests/e2e``), but against a locally running Ollama daemon. This lives in its
 own package and carries the ``local_e2e`` marker because it can only run where
-Ollama is reachable — CI tests cloud clients only. It is deselected by default
-(``-m "not local_e2e"`` in ``pyproject.toml``); run it explicitly with:
+Ollama is reachable. CI tests cloud clients only. It is deselected by default
+(``-m "not local_e2e"`` in ``pyproject.toml``). Run it explicitly with:
 
     pytest tests/local_e2e -m local_e2e
 
@@ -25,7 +25,7 @@ import os
 import httpx2
 import pytest
 
-# Imported so pytest collects them as this module's tests; parametrized by the
+# Imported so pytest collects them as this module's tests. Parametrized by the
 # `backend` fixture defined below.
 from model_client_suite import (  # noqa: F401
     test_call_returns_assistant_result,
@@ -51,7 +51,11 @@ def _reachable() -> bool:
 
 
 def _pick_model() -> str | None:
-    """Prefer OLLAMA_MODEL, else the first locally-pulled (non-remote) model."""
+    """Select the preferred local model or the first available local model.
+
+    Returns:
+        str | None: Selected model name, or None if no local model is available.
+    """
     try:
         resp = httpx2.get(f"{OLLAMA_HOST}/api/tags", timeout=5.0)
         if resp.status_code != 200:
@@ -68,12 +72,12 @@ def _pick_model() -> str | None:
 def _ollama_local_backend():
     if not _reachable():
         pytest.skip(
-            f"Ollama not reachable at {OLLAMA_HOST} — start it with `ollama serve` "
+            f"Ollama not reachable at {OLLAMA_HOST}. Start it with `ollama serve` "
             "or set OLLAMA_HOST."
         )
     model = _pick_model()
     if model is None:
-        pytest.skip(f"No usable model in Ollama at {OLLAMA_HOST} — pull one, e.g. `ollama pull {PREFER_MODEL}`.")
+        pytest.skip(f"No usable model in Ollama at {OLLAMA_HOST}. Pull one, e.g. `ollama pull {PREFER_MODEL}`.")
 
     from nlght.adapters.outbound.model import OllamaClient
 
@@ -81,6 +85,9 @@ def _ollama_local_backend():
         http_client=httpx2.AsyncClient(),
         base_url=OLLAMA_HOST,
         default_model=model,
+        # Pin provider sampling so corpus observations
+        # stay comparable between runs.
+        temperature=0.0,
     )
 
 

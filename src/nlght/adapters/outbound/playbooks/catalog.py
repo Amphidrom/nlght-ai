@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 class AdapterPlaybookCatalog(PlaybookCatalog):
-    """Request-scoped PlaybookCatalog — implements the PlaybookCatalog port.
+    """Request-scoped implementation of the PlaybookCatalog port.
 
-    Immutable after construction. Steps read ``to_markdown()`` and integrate
-    the result into the system prompt.
+    Immutable after construction. Steps disclose selected playbooks as
+    untrusted model context, never as deployment instructions.
     """
 
     def __init__(
@@ -54,14 +54,19 @@ class AdapterPlaybookCatalog(PlaybookCatalog):
         return "\n".join(parts)
 
     def to_contract(self) -> str:
-        """Compact contract listing — one entry per playbook with activation criteria."""
+        """Describe available playbooks and their activation criteria.
+
+        Returns:
+            str: Prompt contract with one entry per playbook, or an empty
+            string when no playbooks are available.
+        """
         if not self._playbooks:
             return ""
         lines = [
             "## Playbooks",
             "",
             "If the user's request matches one of these playbooks, call `activate_playbook` to select it.",
-            "A request can match a playbook even when it also involves generation or writing — activate the playbook first.",
+            "A request can match a playbook even when it also involves generation or writing. Activate the playbook first.",
             "",
             "Available playbooks:",
         ]
@@ -98,10 +103,10 @@ class PlaybookCatalogBuilder:
     here. Per request, ``build()`` filters by:
 
     1. Tool availability (``PlaybookDefinition.is_available``)
-    2. Access (optional ``PlaybookAccessPolicy`` — model- and caller-based)
+    2. Access (optional ``PlaybookAccessPolicy`` for model and caller)
 
-    The markdown is generated deterministically from the definition —
-    no LLM call during catalog construction.
+    Markdown is generated deterministically from the definition without an
+    LLM call during catalog construction.
     """
 
     def __init__(
@@ -137,7 +142,7 @@ class PlaybookCatalogBuilder:
                         continue
                 except Exception as exc:
                     logger.warning(
-                        "playbook.catalog.policy_error | playbook=%s error=%s — denying",
+                        "playbook.catalog.policy_error | playbook=%s error=%s: denying",
                         defn.name, exc,
                     )
                     continue
@@ -160,11 +165,6 @@ class PlaybookCatalogBuilder:
             len(self._definitions), len(playbooks),
         )
         return AdapterPlaybookCatalog(playbooks, self._definitions)
-
-
-# ---------------------------------------------------------------------------
-# Deterministic markdown generation
-# ---------------------------------------------------------------------------
 
 
 def _build_playbook_markdown(

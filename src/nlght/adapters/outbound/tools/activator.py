@@ -1,33 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The one place a resource becomes an instance.
+"""Resolve, authorize, then instantiate resources requested by workflow steps.
 
-There were seven, all the same twenty lines copied: find the resources of a
-kind, filter by name, take the first, hand it to the loader. None of them asked
-a policy. So a workflow step could activate any resource in the database by
-naming it in its own configuration, and the access rules that governed the model
-tool catalog governed nothing here.
-
-That mattered most where it was least visible. `data_index_writer` and
-`knowledge_index_writer` declare no signatures, which was treated as their
-protection: a model can never call them because they never enter a catalog. But
-the thing that actually uses a writer is a step, and a step reached it without
-passing anything at all.
-
-So the resolution and the authorization become one operation, and the guard is
-before the instantiation rather than after it:
-
-    resolve the address  →  check the policy  →  instantiate
-
-Not "instantiate, then check": constructing a store opens engines and clients,
-and a denied caller should not cause connections to be made on their behalf.
-
-**A denial here raises.** The tool catalog *filters* — a model is simply not
-told about what it may not use — but a step that names a resource has stated a
-requirement, and quietly continuing without it would run a workflow that is not
-the workflow that was configured. A forbidden access is not a missing optional
-capability.
+Authorization precedes construction because constructors can open connections.
+Denied access raises instead of silently omitting a required resource.
 """
 
 from __future__ import annotations
@@ -66,12 +43,18 @@ class ResourceActivator:
         self._connections = store_connections
 
     async def resolve(self, *, kind: str, name: str) -> ResourceDef:
-        """The one enabled resource at this address.
+        """Find the single enabled resource at an address.
 
-        The address is unique (migration `0007`), so "the first row wins" is no
-        longer a decision anybody is making by accident. A second row here would
-        mean the constraint is missing, and that is worth an error rather than a
-        silent pick.
+        Args:
+            kind (str): Resource kind in the address.
+            name (str): Resource name in the address.
+
+        Returns:
+            ResourceDef: Resource at the requested address.
+
+        Raises:
+            WorkflowConfigurationError: No resource exists or multiple rows
+                violate the unique-address constraint from migration 0007.
         """
         found = [
             resource
@@ -98,7 +81,25 @@ class ResourceActivator:
         caller: RequestContext | None,
         **runtime_deps: Any,  # noqa: ANN401 (forwarded into the tool constructor)
     ) -> ToolBase:
-        """The authorized instance, or an error explaining which half refused."""
+        """Authorize a resource and instantiate its runtime tool.
+
+        Args:
+            kind (str): Kind of the requested resource.
+            name (str): Name of the requested resource.
+            caller (RequestContext | None): Principal requesting access.
+            **runtime_deps (Any): Dependencies forwarded to the tool loader.
+
+        Returns:
+            ToolBase: Authorized resource instance.
+
+        Raises:
+            WorkflowConfigurationError: The resource address is missing or
+                ambiguous.
+            ResourceAccessDeniedError: The policy denies the caller.
+
+        Side Effects:
+            Instantiates the resource after its access check.
+        """
         resource = await self.resolve(kind=kind, name=name)
         await self.authorize(resource, caller)
         return self._loader.instantiate(
@@ -106,6 +107,7 @@ class ResourceActivator:
             provider=resource.provider,
             name=resource.name,
             config=resource.config,
+            resource_id=str(resource.resource_id),
             store_connections=self._connections,
             **runtime_deps,
         )
@@ -113,24 +115,26 @@ class ResourceActivator:
     async def authorize(
         self, resource: ResourceDef, caller: RequestContext | None
     ) -> None:
-        """Raises unless this caller may use this resource.
+        """Check access to a resource using the resolved workflow context.
 
-        The policy sees the caller the executor established — including the
-        workflow it actually resolved and is running, which is what a
-        ``workflow`` condition compares against. A caller outside any workflow
-        has none, and a workflow-scoped rule therefore denies it; that is
-        deliberate, so that running outside a flow is not a way past a rule.
+        Args:
+            resource (ResourceDef): Resource to authorize.
+            caller (RequestContext | None): Caller and resolved workflow scope.
 
-        A policy that raises denies. Whatever went wrong, the one thing that
-        must not follow from a broken authorization check is authorization.
+        Raises:
+            ResourceAccessDeniedError: The policy denies access or fails.
+
+        Notes:
+            A caller without a workflow does not match a workflow-scoped rule.
+            Policy errors deny access rather than granting it.
         """
         if self._access_policy is None:
             return
         try:
             allowed = await self._access_policy.is_allowed(resource, caller, None)
-        except Exception as exc:  # noqa: BLE001 (a failed check is a denial)
+        except Exception as exc:
             logger.warning(
-                "resource.activation.policy_error | resource=%s error=%s — denying",
+                "resource.activation.policy_error | resource=%s error=%s: denying",
                 resource.address, exc,
             )
             raise ResourceAccessDeniedError(

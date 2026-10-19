@@ -1,34 +1,13 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Shared model-client e2e scenario suite.
+"""Share live model-client scenarios across cloud and local backends.
 
-One suite, every ModelClient. The seven scenarios below are provider-agnostic —
-they drive whatever backend a `backend` fixture supplies, so the cloud clients
-(``tests/e2e``) and the local Ollama client (``tests/local-e2e``) run byte-for-byte
-the same behavioural contract:
-
-  1. non-streaming call() → a result signal with content
-  2. streaming stream()   → token events and a final done event
-  3. native tool loop, non-streaming — call() with a ToolCatalog: the tool
-     is really executed and its result reaches the final answer
-  4. native tool loop, streaming — stream() with a ToolCatalog
-  5. step-driven tool loop — stream(tools=...) without a catalog, executing
-     the tool_call events manually and continuing via append_tool_turn()
-  6. canonical message authority — a TrustedInstructionMessage reaches the
-     provider's system channel and an UntrustedContextMessage is readable as
-     data, on the real API
-  7. the PI-4 adversarial corpus — independent proposal, containment,
-     exact-disclosure, and task-completion observations through the real client
-
-Scenarios 1, 6 and 7 drive canonical messages, which is what a workflow step now
-holds; the rest keep raw dicts, which remain the direct-inference compatibility
-shape. Both paths cross the adapter, and only a real provider can say whether
-either is a shape it accepts.
-
-This module is imported, never collected directly (its filename does not match
-the ``test_*`` pattern). The importing module supplies a ``backend`` fixture and
-sets the appropriate markers (``e2e`` for cloud, ``e2e`` + ``local_e2e`` locally).
+The importing test module supplies a ``backend`` fixture and test markers.
+This module is not collected directly. Its scenarios cover non-streaming and
+streaming calls, native and step-driven tool loops, message authority, and the
+PI-4 adversarial corpus. Canonical messages exercise workflow-facing paths.
+raw dictionaries exercise the direct-inference compatibility path.
 """
 from __future__ import annotations
 
@@ -63,11 +42,6 @@ from prompt_injection_suite import (
 MAGIC_NUMBER = "473529"
 
 
-# ---------------------------------------------------------------------------
-# Test doubles: signal collector + a real tool the model must call
-# ---------------------------------------------------------------------------
-
-
 class _CollectingEmitter:
     def __init__(self) -> None:
         self.signals: list[Signal] = []
@@ -91,7 +65,7 @@ class _MagicNumberTool(ToolBase):
                 name="get_magic_number",
                 description=(
                     "Returns the current secret magic number. The number changes "
-                    "constantly — it can only be obtained through this tool."
+                    "constantly. It can only be obtained through this tool."
                 ),
                 method_name="get_magic_number",
                 action=READ_REQUEST,
@@ -125,11 +99,6 @@ TOOL_PROMPT = (
 )
 
 
-# ---------------------------------------------------------------------------
-# 1. Plain non-streaming call
-# ---------------------------------------------------------------------------
-
-
 async def test_call_returns_assistant_result(backend) -> None:
     emitter = _CollectingEmitter()
     bound = backend.bind(model=None, emitter=emitter, stream=False)
@@ -143,11 +112,6 @@ async def test_call_returns_assistant_result(backend) -> None:
     assert results, f"no result signal, got kinds={[s.kind for s in emitter.signals]}"
     assert results[-1].role == "assistant"
     assert results[-1].content.strip()
-
-
-# ---------------------------------------------------------------------------
-# 2. Streaming tokens
-# ---------------------------------------------------------------------------
 
 
 async def test_stream_yields_tokens_and_done(backend) -> None:
@@ -168,11 +132,6 @@ async def test_stream_yields_tokens_and_done(backend) -> None:
     assert "".join(parts).strip()
 
 
-# ---------------------------------------------------------------------------
-# 3. Native tool loop — non-streaming call() with a catalog
-# ---------------------------------------------------------------------------
-
-
 async def test_native_tool_loop_call_executes_tool(backend) -> None:
     catalog, tool = _make_catalog()
     emitter = _CollectingEmitter()
@@ -183,11 +142,6 @@ async def test_native_tool_loop_call_executes_tool(backend) -> None:
     assert tool.executions, "the model never invoked get_magic_number"
     final = emitter.text()
     assert MAGIC_NUMBER in final, f"tool result did not reach the answer: {final!r}"
-
-
-# ---------------------------------------------------------------------------
-# 4. Native tool loop — streaming stream() with a catalog
-# ---------------------------------------------------------------------------
 
 
 async def test_native_tool_loop_stream_executes_tool(backend) -> None:
@@ -205,11 +159,6 @@ async def test_native_tool_loop_stream_executes_tool(backend) -> None:
     assert tool.executions, "the model never invoked get_magic_number"
     assert kinds[-1] == "done"
     assert MAGIC_NUMBER in "".join(parts), f"tool result missing from stream: {''.join(parts)!r}"
-
-
-# ---------------------------------------------------------------------------
-# 5. Step-driven tool loop — manual execution + append_tool_turn
-# ---------------------------------------------------------------------------
 
 
 async def test_step_driven_tool_loop_round_trip(backend) -> None:
@@ -254,20 +203,12 @@ async def test_step_driven_tool_loop_round_trip(backend) -> None:
     assert MAGIC_NUMBER in "".join(parts), f"final answer missing tool result: {''.join(parts)!r}"
 
 
-# ---------------------------------------------------------------------------
-# 6. Canonical message authority — against the real API
-# ---------------------------------------------------------------------------
-
-
 async def test_untrusted_context_is_readable_without_being_an_instruction(backend) -> None:
-    """The degraded JSON mapping has to be *usable*, not merely safe.
+    """Verify the model reads a fact supplied only as untrusted context.
 
-    Every adapter currently lowers an `UntrustedContextMessage` to escaped
-    user-level JSON, because no provider offers a native untrusted-data block.
-    Safety is settled by the unit tests; what only a real model can answer is
-    whether a record wrapped that way is still legible to it. If it is not, the
-    boundary would have been bought by making retrieval useless — so this asserts
-    the model can read a fact that appears *nowhere except* inside the record.
+    Adapters lower the record to escaped user-level JSON because providers
+    expose no native untrusted-data block. Unit tests cover the authority
+    boundary. This live test checks that the wrapped fact remains legible.
     """
     emitter = _CollectingEmitter()
     bound = backend.bind(model=None, emitter=emitter, stream=False)
@@ -291,11 +232,6 @@ async def test_untrusted_context_is_readable_without_being_an_instruction(backen
     )
 
 
-# ---------------------------------------------------------------------------
-# 7. PI-4 adversarial corpus — against the same real provider fixture
-# ---------------------------------------------------------------------------
-
-
 async def test_prompt_injection_corpus_is_observational(backend, provider_name: str) -> None:
     """Measure model behaviour while asserting only deterministic containment."""
 
@@ -316,7 +252,7 @@ async def test_prompt_injection_corpus_is_observational(backend, provider_name: 
             flush=True,
         )
         try:
-            await bound.call(build_messages(case), temperature=0.0)
+            await bound.call(build_messages(case))
         except Exception as exc:
             # The corpus is a loop, so a transport failure otherwise arrives as a
             # bare stack trace with no way to tell which case, how far in, or how

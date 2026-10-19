@@ -1,32 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Holding what was extracted, whole, without deciding what it means.
+"""Preserve extracted proposition fields without assigning field semantics.
 
-The one question this answers:
-
-    can we keep, completely, what the extraction produced?
-
-Not what a proposition is made of, not which field names a claim of a kind
-should have, not which of them carry identity, not whether two differently shaped
-claims say the same thing. Each of those is a later question, and answering one
-here by accident is how the last three abstractions in this area went wrong:
-
-    the entity key was the model's word choice           (ADR-0043)
-    `predicate + roles` would have been its label choice
-    `as_triple` made the legacy payload the privileged form
-
-So the rule the tests below enforce:
-
-    **Representation may preserve meaning. It may not invent any.**
-
-Unstable field names are not a defect here. A model that says `recipient` on one
-pass and `target` on the next has described one claim two ways, and noticing that
-is equivalence — a separate question, on two complete structures, which is only
-askable once both can be held completely.
-
-`predicate` gets no privilege. It is a field the current extraction happens to
-produce, not a distinguished part of a proposition.
+Unknown field names and nested values survive a round trip. Equivalence and
+identity decisions belong to later stages.
 """
 
 from __future__ import annotations
@@ -43,12 +21,7 @@ def test_the_shape_the_corpus_is_full_of_survives_a_round_trip() -> None:
 
 
 def test_a_claim_with_roles_the_payload_cannot_hold_survives() -> None:
-    """The claim this slice exists for.
-
-    "Alice transfers CHF 500 to Bob" has four parts, a well-formed entity key and
-    nowhere to be stored — a model that read the sentence correctly had its
-    answer discarded as malformed.
-    """
+    """Preserve a four-role proposition that the legacy payload cannot represent."""
     fields = {
         "subject": "Alice",
         "predicate": "transfers",
@@ -114,11 +87,7 @@ def test_the_order_inside_a_list_does_carry_meaning() -> None:
 
 
 def test_predicate_is_not_privileged() -> None:
-    """It is a field the current extraction happens to produce.
-
-    Treating it as a distinguished part would be the field form deciding the
-    model — the same move as `predicate + roles`, arriving one layer down.
-    """
+    """Keep predicate as an ordinary proposition field."""
     with_predicate = Proposition({"predicate": "transfers", "subject": "Alice"})
     without = Proposition({"action": "transfers", "actor": "Alice"})
 
@@ -143,7 +112,7 @@ def test_two_namings_of_one_claim_are_not_merged_here() -> None:
 def test_an_empty_proposition_is_refused() -> None:
     # A claim that says nothing is not a claim. This is the one judgement
     # representation is allowed: that there is something to hold.
-    import pytest  # noqa: PLC0415
+    import pytest
 
     with pytest.raises(ValueError, match="at least one field"):
         Proposition({})

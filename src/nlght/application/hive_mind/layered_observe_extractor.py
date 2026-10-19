@@ -1,28 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""
-nlght/application/hive_mind/layered_observe_extractor.py
----------------------------------------------------------
-Layered observe stage — drop-in replacement for SpacyMemoryExtractor.
-
-Implements the MemoryExtractor protocol and can be passed directly to
-MemoryIngestionPipeline:
-
-    pipeline = MemoryIngestionPipeline(
-        extractor=LayeredObserveExtractor()
-    )
-
-Stages:
-    1. Structural pre-filter — isolates code blocks, extracts labels
-                               purely via regex/structure, < 1ms
-    2. Intent classifier     — rule-based on reference_text, < 1ms
-                               optional: FastText model injectable
-    3. NER (selective)       — spaCy only on reference_text (without code),
-                               lazy-loaded, skipped when there is no prose text
-    4. Dedup guard           — hash-based, eliminates duplicate candidates
-                               before they reach the pipeline
-"""
+"""Extract memory candidates through structural, intent, and NER stages."""
 
 from __future__ import annotations
 
@@ -42,10 +21,6 @@ from nlght.core.hive_mind.extraction import (
     MemoryCandidateConfidence,
     MemoryCandidateKind,
 )
-
-# ---------------------------------------------------------------------------
-# Stage 1 — Structural pre-filter
-# ---------------------------------------------------------------------------
 
 # Recognized label markers (DE + EN), order: most specific first
 _LABEL_MARKERS = (
@@ -114,13 +89,13 @@ def _is_request_label(label: str) -> bool:
 
 
 def _extract_label_from_prefix(prefix: str) -> str:
-    """Extracts a label from the text preceding a fenced block.
+    """Derive a clean artifact label before a fenced block.
 
-    Strategy (in this order):
-    1. Last non-empty sentence / last line
-    2. Marker strip (e.g. "Hier hast du Code 1:" → "Code 1")
-    3. Colon split (last part before ":")
-    4. Fallback: empty → no artifact stored
+    Args:
+        prefix (str): Text preceding the code fence.
+
+    Returns:
+        str: Last useful line after prefix cleanup, or empty text.
     """
     if not prefix.strip():
         return ""
@@ -138,7 +113,7 @@ def _extract_label_from_prefix(prefix: str) -> str:
             line = line[len(marker):].strip(" :")
             break
 
-    # Colon split: "Hier hast du meinen Service A:" → "meinen Service A"
+    # Remove the trailing colon from labels such as "Hier hast du meinen Service A:".
     if ":" in line:
         line = line.rsplit(":", 1)[0].strip()
 
@@ -180,16 +155,19 @@ def _extract_fenced_blocks(text: str) -> list[_FencedBlock]:
     return blocks
 
 
-def _reference_text(text: str, blocks: list[_FencedBlock]) -> str:
-    """Text without fenced blocks and without inline code — remaining prose."""
+def _reference_text(text: str) -> str:
+    """Isolate prose for intent and entity analysis.
+
+    Args:
+        text (str): Message text.
+
+    Returns:
+        str: Text without fenced or inline code, with whitespace collapsed.
+    """
     result = _FENCED_BLOCK_RE.sub(" ", text)
     result = _INLINE_CODE_RE.sub(" ", result)
     return _WHITESPACE_RE.sub(" ", result).strip()
 
-
-# ---------------------------------------------------------------------------
-# Stage 2 — Intent classifier (rule-based, injectable)
-# ---------------------------------------------------------------------------
 
 _COMPARE_KEYWORDS = frozenset({
     "vergleiche", "vergleich", "gemeinsamkeiten", "unterschiede",
@@ -237,10 +215,6 @@ class RuleBasedIntentClassifier:
         return bool(tokens & _UNCERTAINTY_WORDS)
 
 
-# ---------------------------------------------------------------------------
-# Stage 3 — NER (selective, only on reference_text)
-# ---------------------------------------------------------------------------
-
 _SPACY_MODELS = ("de_core_news_sm", "en_core_web_sm")
 
 # POS tags considered entities (spaCy universal POS)
@@ -278,7 +252,18 @@ def _ner_entities_from_text(
     text: str,
     nlp: Callable[[str], Any],
 ) -> list[ExtractedEntity]:
-    """NER only on cleaned prose text, with a code-stopword filter."""
+    """Extract distinct named entities from cleaned prose.
+
+    Args:
+        text (str): Clean prose to inspect.
+        nlp (Callable[[str], Any]): Named-entity recognizer.
+
+    Returns:
+        list[ExtractedEntity]: Unique entities excluding code stopwords.
+
+    Side Effects:
+        Invokes the supplied NLP callable.
+    """
     if not text.strip():
         return []
     doc = nlp(text)
@@ -299,10 +284,6 @@ def _ner_entities_from_text(
     return entities
 
 
-# ---------------------------------------------------------------------------
-# Stufe 4 — Dedup-Guard
-# ---------------------------------------------------------------------------
-
 def _candidate_hash(content: str) -> str:
     return hashlib.sha1(content.encode("utf-8", errors="replace")).hexdigest()[:12]
 
@@ -322,20 +303,12 @@ class _Deduplicator:
         return [c for c in candidates if not self.is_duplicate(c)]
 
 
-# ---------------------------------------------------------------------------
-# Haupt-Extraktor
-# ---------------------------------------------------------------------------
-
 @dataclass
 class LayeredObserveExtractor:
-    """Layered observe stage — drop-in for SpacyMemoryExtractor.
+    """Extract memory candidates through structural, intent, and NER stages.
 
-    Args:
-        intent_classifier:  Overridable with a FastText/LLM classifier.
-        spacy_models:       Order of spaCy models (lazy-loaded).
-        use_ner:            Enable the NER stage (default: True).
-                            False = pure rule-based mode, maximum speed.
-        min_label_length:   Minimum length for artifact labels.
+    The intent classifier and spaCy model order are configurable. The NER
+    stage loads lazily and can be disabled for rule-based extraction.
     """
 
     intent_classifier: IntentClassifier = field(
@@ -350,7 +323,7 @@ class LayeredObserveExtractor:
     async def extract(self, text: str) -> ExtractionResult:
         # --- Stufe 1: Struktur ---
         blocks = _extract_fenced_blocks(text)
-        ref_text = _reference_text(text, blocks)
+        ref_text = _reference_text(text)
 
         # --- Stufe 2: Intent ---
         intent = self.intent_classifier.classify(ref_text or text)
@@ -368,7 +341,7 @@ class LayeredObserveExtractor:
                     self._nlp = _load_spacy(self.spacy_models)
                 ner_entities = _ner_entities_from_text(ref_text, self._nlp)
             except ImportError:
-                pass  # No spaCy → rule-based extraction only
+                pass  # Keep rule-based extraction available without spaCy.
 
         # --- Artifacts from blocks ---
         artifacts = self._artifacts_from_blocks(blocks)
@@ -421,9 +394,6 @@ class LayeredObserveExtractor:
             referenced_labels=referenced_labels,
         )
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _artifacts_from_blocks(
         self, blocks: list[_FencedBlock]
@@ -485,13 +455,20 @@ class LayeredObserveExtractor:
         ref_text: str,
         artifact_labels: set[str],
     ) -> list[str]:
-        """Finds references to known labels in the prose text."""
-        found: list[str] = []
+        """Match known artifact labels in first-mention order.
+
+        Args:
+            ref_text (str): Reference prose to scan.
+            artifact_labels (set[str]): Known labels to match.
+
+        Returns:
+            list[str]: Matching labels ordered by text position and label tie-breaker.
+        """
         lo_text = ref_text.lower()
-        for label in artifact_labels:
-            if label.lower() in lo_text:
-                found.append(label)
-        return found
+        return sorted(
+            (label for label in artifact_labels if label.lower() in lo_text),
+            key=lambda label: (lo_text.index(label.lower()), label.casefold(), label),
+        )
 
     @staticmethod
     def _artifact_candidate(artifact: ExtractedArtifact) -> MemoryCandidate:
@@ -564,10 +541,6 @@ class LayeredObserveExtractor:
             confidence=MemoryCandidateConfidence.TRANSIENT,
         )
 
-
-# ---------------------------------------------------------------------------
-# Smoke test (python -m layered_observe_extractor)
-# ---------------------------------------------------------------------------
 
 async def _smoke_test() -> None:
     extractor = LayeredObserveExtractor(use_ner=False)

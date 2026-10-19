@@ -1,35 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What the corpus looks like, so a second run can be held against the first.
-
-The acceptance metric of the incremental design is a comparison, not a number:
-two runs over an unchanged source must not change the corpus — no retracted
-assertion, no new assertion, no lost approval. That can only be checked by
-taking a picture before the second run and holding the second picture against
-it.
-
-One distinction runs through everything here. **Evidence is expected to grow**:
-a second run is a second sighting, and recording that document D still asserts
-something is exactly what licenses not retracting it later. Everything else is
-expected to stand still. A report that treated the two alike would either raise
-a false alarm on every run or miss the drift it exists to catch.
-
-`state_digest` is the single number that answers the metric. It folds every
-assertion's key, case and state into one value, so an unchanged digest means
-literally nothing moved — and a changed one means something did.
-
-**A changed corpus is not the same as a drifting one**, and for a long time this
-could not tell them apart. It reported "a variant gained a revision over an
-unchanged source" on runs where the source had very much been edited, which made
-every deliberate change look like a failure and trained the eye to skip the line.
-
-So each assertion is now recorded with where it stands, and each document with
-the revision it was last seen at. A document whose revision moved is a document
-somebody edited — nothing has to be told which ones those were — and movement
-inside it is expected. Movement anywhere else is drift, which is the only thing
-worth an alarm.
-"""
+"""Represent corpus state and compare a later run with a baseline."""
 
 from __future__ import annotations
 
@@ -55,7 +27,7 @@ class AssertionState:
     #: in a document nobody edited" is a fact about the pipeline.
     document_id: str = ""
     #: Every document this state was sighted in. A claim two documents carry is
-    #: one claim, and `document_id` keeps only the latest sighting — so a report
+    #: one claim, and `document_id` keeps only the latest sighting, so a report
     #: filtered by it showed such a claim under one document and hid it from the
     #: other, which is exactly the case a reinforcement expectation is about.
     document_ids: tuple[str, ...] = ()
@@ -63,7 +35,7 @@ class AssertionState:
     retired: bool = False
     #: Which kind of claim this is. Part of the identity namespace, so a claim
     #: the model called a `rule` on one pass and a `decision` on the next is two
-    #: assertions however identical its wording — which is a distinct failure
+    #: assertions however identical its wording, which is a distinct failure
     #: from the wording drift the surrogate id removed, and needs to be visible
     #: as one.
     kind: str = ""
@@ -71,7 +43,7 @@ class AssertionState:
     #: snapshot because counts cannot answer the question anyone actually asks
     #: after a run: *did the value change the way it was supposed to*. "Two
     #: revisions" is compatible with the threshold moving to 60 and with it
-    #: moving to 6000; only the wording tells them apart.
+    #: moving to 6000. Only the wording tells them apart.
     text: str = ""
 
     def as_dict(self) -> dict[str, Any]:
@@ -124,7 +96,7 @@ class LineageReport:
     deepest_revision: int = 0
 
     #: Assertions in the graph with no lineage beside them. Every one is a
-    #: candidate that could not name a business question — a rule extracted
+    #: candidate that could not name a business question, such as a rule extracted
     #: before `subject` and `rule_property` were asked for, or one the model
     #: left them out of, or evidence with no document. Broken down by kind,
     #: because which kinds fail says whether the prompt or the schema is at
@@ -133,8 +105,8 @@ class LineageReport:
     graph_without_lineage: int = 0
     graph_without_lineage_by_kind: Mapping[str, int] = field(default_factory=dict)
     #: Nodes migration `0018` could not point at a revision, though lineage does
-    #: describe them. They are deliberately **not** canonical — withheld rather
-    #: than guessed at — so without a number here nothing says whether that is
+    #: describe them. They are deliberately withheld from canonical reads rather
+    #: than guessed at, so without a number here nothing says whether that is
     #: three rows or thirty thousand, and an operator cannot tell a migrated
     #: corpus that is fine from one that is silently missing a third of itself.
     #:
@@ -143,10 +115,9 @@ class LineageReport:
     #: nodes have no lineage at all, which is a different and permanent condition.
     graph_with_unresolved_revision: int = 0
     #: Canonical claims no document currently supports (ADR-0053). They resolve
-    #: without a citable source, which is the honest state after migration `0019`
-    #: — which of the recorded sightings were current was never written down, so
-    #: nothing was backfilled — and after any document that was only ever read in
-    #: part.
+    #: without a citable source after migration `0019`, because current
+    #: sightings were not recorded and nothing was backfilled. The same applies
+    #: to a document that has only been read in part.
     #:
     #: It falls as documents are observed in full again. A number that stays put
     #: says a source is never being re-ingested, not that the claims are wrong.
@@ -162,7 +133,7 @@ class LineageReport:
 
     #: Revisions carrying no proposition.
     #:
-    #: **Historical technical debt, not a contract breach** — the two must not be
+    #: **Historical technical debt, not a contract breach**. The two must not be
     #: confused, which is why this is a count and never an equality. Rows written
     #: before every kind had a proposition keep their `NULL` deliberately: a
     #: backfill from the payload would be a guess wearing the clothes of an
@@ -170,7 +141,7 @@ class LineageReport:
     #:
     #: So a correct run does not drive this to zero. What a correct run does is
     #: leave it exactly where it was, and `compare` treats any *growth* as the
-    #: violation — that is a new revision written without a proposition, which
+    #: violation: a new revision written without a proposition, which
     #: the repository refuses, so growth means the refusal was bypassed.
     revisions_without_proposition: int = 0
     #: The same, for sightings. An observation with no proposition is judged
@@ -178,7 +149,7 @@ class LineageReport:
     observations: int = 0
     observations_without_proposition: int = 0
     #: Propositions no revision and no observation points at. Content-addressed
-    #: and never deleted, so this grows with abandoned extractions; it is a
+    #: and never deleted, so this grows with abandoned extractions. It is a
     #: retention question and deliberately not a violation.
     propositions: int = 0
     unreferenced_propositions: int = 0
@@ -193,10 +164,10 @@ class LineageReport:
     #: something moved and not only that something did.
     states: tuple[AssertionState, ...] = ()
     #: Each document at the revision it was last seen. A document whose revision
-    #: moved between two pictures is one somebody edited — which is how movement
+    #: moved between two pictures is one somebody edited, which is how movement
     #: gets classified without anybody having to say what was changed.
     documents: Mapping[str, str] = field(default_factory=dict)
-    #: Each document by the name its source knows it under — a path, a page
+    #: Each document by the name its source knows it under: a path, a page
     #: title, a URL. `document_id` is a hash, so without this an expectation
     #: cannot name the file it is about and a failure cannot say which one moved.
     document_paths: Mapping[str, str] = field(default_factory=dict)
@@ -210,13 +181,13 @@ class LineageReport:
     #: absence is not evidence: a comparison falls back to the document there
     #: rather than calling an unobserved slot drift.
     slot_inputs: Mapping[str, str] = field(default_factory=dict)
-    #: The document revision each slot was last read at. Presence, not content —
-    #: and it has to be asked first, because equal fingerprints mean "the section
+    #: The document revision each slot was last read at. Check presence before
+    #: content, because equal fingerprints mean "the section
     #: did not move" only where the section was read on both sides.
     #:
     #: A deleted section is never read again and keeps its last reading forever,
     #: so it compares equal to itself and reads as an untouched section whose
-    #: claim vanished anyway — a live run reported exactly that as the corpus
+    #: claim vanished anyway. A live run reported exactly that as the corpus
     #: drifting, when a section had simply been removed. Comparing this against
     #: the document's own revision says whether the slot was still there.
     slot_observed_at: Mapping[str, str] = field(default_factory=dict)
@@ -252,12 +223,10 @@ class LineageReport:
         }
 
     def as_summary(self) -> dict[str, Any]:
-        """The picture without the per-claim detail, for reading.
+        """Expose aggregate report values without per-claim detail.
 
-        `states` carries one row per revision, which is what a comparison needs
-        and what nobody wants printed: a corpus of any size would bury the counts
-        under its own inventory. The file keeps everything; the screen keeps the
-        numbers.
+        Returns:
+            dict[str, Any]: Serializable summary mapping.
         """
         summary = self.as_dict()
         summary.pop("states", None)
@@ -316,10 +285,13 @@ class LineageReport:
 
 
 def state_digest(states: Iterable[tuple[str, str, int, str]]) -> str:
-    """Fold every assertion's key, case, state and review into one value.
+    """Hash all reported assertion states into one comparison value.
 
-    Sorted first, so the digest describes the corpus rather than the order a
-    query happened to return it in.
+    Args:
+        states (Iterable[tuple[str, str, int, str]]): Iterable of assertion states.
+
+    Returns:
+        str: Stable state digest.
     """
     parts = sorted(
         f"{entity_key}|{variant_id}|{revision}|{review_state}"
@@ -335,7 +307,7 @@ CHANGED_SOURCE = "changed-source"
 #:
 #:     slot                the section's own parser input was read on both sides
 #:     document_fallback   it was not, so the verdict rests on "this file was
-#:                         edited somewhere" — the coarse answer, named so a
+    #:                         edited somewhere", the coarse answer named so a
 #:                         transitional run does not read like a real comparison
 #:     none                the claim has no document, so nothing can excuse it
 SLOT_GATE = "slot"
@@ -358,21 +330,21 @@ class Movement:
     detail: str = ""
     #: What made this expected, or what leaves it unexplained. A bare
     #: `expected=true` only ever meant "somebody edited this file somewhere",
-    #: which waves through a claim that moved in a section nobody touched — and
+    #: which waves through a claim that moved in a section nobody touched, and
     #: the reader could not tell those apart, so the flag was worth less than it
     #: looked.
     because: str = ""
     #: Which gate answered, printed beside the answer because the two are not
     #: equally strong. `document_fallback` means no reading of this slot existed
-    #: on either side, so the verdict rests on "this file was edited somewhere" —
-    #: a transitional run right after the migration that introduced the readings
-    #: would otherwise look exactly as trustworthy as a real slot comparison.
+    #: on either side, so the verdict rests on "this file was edited somewhere".
+    #: A transitional run right after the migration that introduced readings
+    #: would otherwise look as trustworthy as a real slot comparison.
     gate: str = ""
     #: The parser input this claim's slot was read with, before and after. Empty
     #: where the slot was never observed, which is not the same as unchanged.
     slot_input: tuple[str, str] = ("", "")
-    #: What kind of claim moved — `fact`, `rule`, `pattern`, `decision`. Not the
-    #: same as `kind`, which names the *movement*; the two sat under one word and
+    #: What kind of claim moved: `fact`, `rule`, `pattern`, or `decision`. This differs
+    #: from `kind`, which names the *movement*. The two sat under one word and
     #: the collision hid the whole classification-drift channel.
     claim_kind: str = ""
 
@@ -406,10 +378,10 @@ class ReportComparison:
     declared. No document revision moved means nothing was edited, and then
     *nothing* may move but the evidence. A document revision that did move means
     somebody edited it, and movement inside that document is the point of the
-    run — while movement anywhere else is still drift.
+    run. Movement anywhere else is still drift.
     """
 
-    #: Whether the run is **acceptable** — that is, nothing moved that should
+    #: Whether the run is **acceptable**: nothing moved that should
     #: have stood still. Not "nothing moved": in `changed-source` mode a run is
     #: supposed to produce revisions, retirements and additions, and those are
     #: expected rather than violations. The exit code reads this field.
@@ -427,7 +399,7 @@ class ReportComparison:
     #: kind*. Its own channel, because it is its own failure: `kind` is part of
     #: the identity namespace, so the model calling one sentence a `rule` on one
     #: pass and a `decision` on the next retires and recreates the claim whether
-    #: or not anything about it moved — and the slot gate cannot catch it, since
+    #: or not anything about it moved, and the slot gate cannot catch it, since
     #: the section may genuinely have been edited at the same time.
     #:
     #: Reported and never acted on. What a kind change should *mean* is undecided,
@@ -438,7 +410,7 @@ class ReportComparison:
         # "unchanged" is reserved for a comparison where nothing actually moved.
         # It used to head every acceptable run, so a report listing a retirement,
         # an addition and two new revisions announced "corpus unchanged" above
-        # them — inviting exactly the misreading that `expected_change` and
+        # them. That invites the misreading that `expected_change` and
         # `gate` exist to prevent.
         if not self.unchanged:
             headline = "CORPUS DRIFTED"
@@ -456,7 +428,14 @@ class ReportComparison:
 
 
 def _by_variant(report: LineageReport) -> dict[str, AssertionState]:
-    """The deepest state of each variant, which is the one that is current."""
+    """Select the deepest current state for each variant.
+
+    Args:
+        report (LineageReport): Knowledge report.
+
+    Returns:
+        dict[str, AssertionState]: Variant-to-state mapping.
+    """
     latest: dict[str, AssertionState] = {}
     for state in report.states:
         seen = latest.get(state.variant_id)
@@ -466,17 +445,14 @@ def _by_variant(report: LineageReport) -> dict[str, AssertionState]:
 
 
 def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison:
-    """Hold a second picture against the first.
+    """Compare baseline and current corpus reports.
 
-    Evidence growing is the run happening; anything else growing is the run
-    changing something — and whether that was allowed depends on where it
-    happened. A document whose revision moved was edited, and a claim moving
-    inside it is the result being looked for. The same movement in a document
-    nobody touched is the drift this design exists to remove.
+    Args:
+        baseline (LineageReport): Corpus report before the run.
+        current (LineageReport): Corpus report after the run.
 
-    Nothing has to be told which documents were edited. Two pictures and the
-    revision each document was last seen at say it, which is what makes this
-    usable on a corpus nobody can enumerate by hand.
+    Returns:
+        ReportComparison: ReportComparison with state movements.
     """
     changed_documents = {
         document
@@ -485,48 +461,40 @@ def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison
     }
 
     def _slot_input(slot_id: str) -> tuple[str, str]:
-        """What the claim's section was read with, before and after.
+        """Read a slot input on both sides of a comparison.
 
-        Two empty strings mean the slot was never observed on either side, which
-        is a different statement from "unchanged" — nothing was backfilled, so
-        every slot read before these were recorded looks exactly like that.
+        Args:
+            slot_id (str): Slot ID to look up in the compared reports.
+
+        Returns:
+            tuple[str, str]: Baseline and current slot input hashes.
         """
         if not slot_id:
             return "", ""
         return baseline.slot_inputs.get(slot_id, ""), current.slot_inputs.get(slot_id, "")
 
     def _observed(report: LineageReport, slot_id: str, document_id: str) -> bool:
-        """Whether that section was still there when the document was last read.
+        """Check whether a document still recorded a section.
 
-        Presence, asked before content. A slot is read once per run it appears
-        in, so a reading taken at the document's current revision means the
-        section was among its sections then; a reading left at an older revision
-        means the document has been read since without it.
+        Args:
+            report (LineageReport): Corpus report to inspect.
+            slot_id (str): Section slot identity.
+            document_id (str): Document that may contain the section.
 
-        Absence of the record entirely is a third thing and not a "no": slots
-        read before these were recorded have none, and that is the legacy case
-        the document fallback exists for.
+        Returns:
+            bool: Whether the section was observed.
         """
         seen_at = report.slot_observed_at.get(slot_id)
         return bool(seen_at) and seen_at == report.documents.get(document_id)
 
     def _verdict(state: AssertionState) -> tuple[bool, str, str]:
-        """Whether this movement was allowed, and what decides it.
+        """Evaluate whether a state movement met its criteria.
 
-        The document is the coarse gate and was the only one: edit one paragraph
-        and every claim in the file becomes expected, including the ones in
-        sections nobody touched. The corpus already knows better — each slot
-        records the parser input it was read with — so the document is used only
-        where the finer answer is unavailable.
+        Args:
+            state (AssertionState): Assertion state to compare.
 
-            slot input changed      → expected, and it says so
-            slot input unchanged    → drift, however busy the file was
-            slot never observed     → fall back to the document
-
-        The fallback is the honest direction for the third case. Absence of a
-        reading is not evidence that a section is unchanged, and treating it as
-        drift would report the migration that introduced the readings rather than
-        anything about the corpus.
+        Returns:
+            tuple[bool, str, str]: Allowed flag, reason, and deciding condition.
         """
         if not state.document_id:
             # A claim with no document cannot be attributed, and calling it
@@ -597,7 +565,7 @@ def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison
             )
         if was.review_state == APPROVED and state.review_state != APPROVED:
             # Losing an approval is never merely expected. On an edited document
-            # it is the design working — a changed rule must be looked at again —
+            # it is the design working because a changed rule must be reviewed,
             # but it is always worth naming, because somebody has to act on it.
             movements.append(
                 _move("approval spent", state, f"{was.review_state} -> {state.review_state}")
@@ -607,7 +575,7 @@ def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison
 
     for variant_id, was in before.items():
         if variant_id not in after:
-            # Rows do not vanish here; they are retired. One that is simply gone
+            # Rows do not vanish here. They are retired. One that is simply gone
             # was deleted, and nothing in this design deletes.
             movements.append(
                 Movement(
@@ -635,7 +603,7 @@ def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison
     if current.revisions_without_proposition > baseline.revisions_without_proposition:
         # Growth, never the count. Rows written before every kind had a
         # proposition keep their `NULL` on purpose, so a correct run leaves this
-        # number exactly where it was — measuring equality would fail a perfect
+        # number exactly where it was. Measuring equality would fail a perfect
         # run for debt it is deliberately preserving. Growth is different: a new
         # revision without a proposition is refused, so more of them means the
         # refusal was bypassed.
@@ -668,25 +636,13 @@ def compare(baseline: LineageReport, current: LineageReport) -> ReportComparison
 
 
 def _classification_drift(movements: Sequence[Movement]) -> tuple[str, ...]:
-    """Slots where a claim left and another arrived under a different kind.
+    """Identify slots where a replacement changed knowledge kind.
 
-    Its own channel, and deliberately not folded into the expected/violation
-    split. `kind` is part of the identity namespace, so a model calling one
-    sentence a `rule` on one pass and a `decision` on the next retires the claim
-    and creates a new one whether or not anything about it moved — and the slot
-    gate cannot catch that, because the section may have been genuinely edited at
-    the same moment. It was, in the run this was written for: three rules left
-    and one decision and two facts arrived in a slot whose text really had
-    changed, so every one of the six read as expected.
+    Args:
+        movements (Sequence[Movement]): Recorded corpus movements.
 
-    Structural, and it does not claim the claims are the same. Whether they are
-    is an equivalence judgement over whole propositions, and this has neither the
-    propositions nor a judge. It says only: here is a slot where kinds were
-    exchanged, which is worth a person's attention.
-
-    Reported and never acted on. What a kind change *should* mean — a new claim, a
-    reclassification of the same one, something to quarantine — is undecided, and
-    joining them quietly would move review and schema semantics with it.
+    Returns:
+        tuple[str, ...]: Slot IDs with classification drift.
     """
     left: dict[str, set[str]] = {}
     arrived: dict[str, set[str]] = {}

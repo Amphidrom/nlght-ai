@@ -17,7 +17,7 @@ class DefaultTriggerResolver(TriggerResolver):
     """Resolves incoming requests into triggers.
 
     The ``session_key`` is resolved by the caller (inbound adapter) and
-    passed in directly — this resolver does not manage its own resolver instances.
+    passed in directly. This resolver does not manage session-key resolvers.
     """
 
     async def resolve(

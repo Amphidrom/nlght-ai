@@ -61,7 +61,7 @@ def _command_digest(command: SnapshotCommit) -> str:
                 "artifact_ref": item.artifact_ref,
                 # `content` is deliberately absent. A revision id already hashes
                 # the source bytes it was derived from, so two snapshots cannot
-                # differ in content while agreeing on every revision id — and
+                # differ in content while agreeing on every revision id, and
                 # hashing whole documents here would make the digest of a
                 # replay check cost a pass over the entire corpus.
                 "metadata": item.metadata,
@@ -76,7 +76,7 @@ def _command_digest(command: SnapshotCommit) -> str:
 
 
 class SqlAlchemyIngestionRepository(IngestionRepository):
-    """Short PostgreSQL transactions; no external backend call occurs here."""
+    """Short PostgreSQL transactions. No external backend call occurs here."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
@@ -242,12 +242,19 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
     async def current_processing_revisions(
         self, document_ids: Sequence[str]
     ) -> dict[str, str]:
-        """One indexed lookup for the whole candidate set.
+        """Read published revisions for candidate documents in one query.
 
-        Per-candidate queries would put a round trip on every hit a search
-        returns; this is asked once per discovery call. Tombstoned documents are
-        excluded rather than returned with their last revision — a deleted
-        document has no published fassung, and a candidate naming one is stale.
+        Args:
+            document_ids (Sequence[str]): Candidate document identities.
+
+        Returns:
+            dict[str, str]: Published processing revision by live document ID.
+
+        Side Effects:
+            Reads PostgreSQL.
+
+        Notes:
+            Tombstoned documents are omitted, making their index hits stale.
         """
         wanted = [identity for identity in dict.fromkeys(document_ids) if identity]
         if not wanted:
@@ -270,12 +277,19 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
     async def read_revision_contents(
         self, keys: Sequence[tuple[str, str]]
     ) -> dict[tuple[str, str], str]:
-        """The stored text for these revisions, in one query.
+        """Read authoritative text for exact document-revision pairs.
 
-        Keyed by the pair rather than by the revision alone: a revision id
-        already implies its document, but a caller holding a locator has both,
-        and matching on both means a mismatched pair returns nothing instead of
-        content from a document nobody asked about.
+        Args:
+            keys (Sequence[tuple[str, str]]): Document ID and processing revision ID pairs.
+
+        Returns:
+            dict[tuple[str, str], str]: Stored text keyed by each exact pair.
+
+        Side Effects:
+            Reads PostgreSQL.
+
+        Notes:
+            A mismatched pair returns no text from another document.
         """
         wanted = [pair for pair in dict.fromkeys(keys) if pair[0] and pair[1]]
         if not wanted:
@@ -315,10 +329,16 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
             return self._to_index_state(row) if row is not None else None
 
     async def record_indexed(self, write: IndexStateWrite) -> IndexState:
-        """Upsert one document's state for one target.
+        """Record one document as indexed for one target.
 
-        Kept to a short transaction with no external call inside it: the write
-        to the store itself already happened before this is called.
+        Args:
+            write (IndexStateWrite): Completed index-state write.
+
+        Returns:
+            IndexState: Persisted index state.
+
+        Side Effects:
+            Writes PostgreSQL in a short transaction after the store write.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             row = await session.get(
@@ -358,10 +378,16 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
     # -- index generation ----------------------------------------------------
 
     async def current_generation(self, *, target: str) -> str:
-        """The generation of the target's indexes, minting one if none exists.
+        """Read or establish the current generation of an index target.
 
-        Read rather than held: two workers must agree on it, and one of them may
-        have rotated it a moment ago.
+        Args:
+            target (str): Index target identity.
+
+        Returns:
+            str: Generation shared by workers for this target.
+
+        Side Effects:
+            Reads PostgreSQL and may create an initial generation.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             row = await session.get(IngestionIndexGeneration, target)
@@ -374,13 +400,16 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
             return row.generation
 
     async def rotate_generation(self, *, target: str) -> str:
-        """Declare the target's indexes a new incarnation, and return it.
+        """Declare that an index target has a new generation.
 
-        Called when the bootstrap had to *create* a collection or index: what is
-        there now is not what the recorded state describes, so every document
-        must be written again. Returns the generation in force afterwards — if
-        another worker rotated concurrently, that is its value and not ours,
-        which is exactly what both of them should then be writing.
+        Args:
+            target (str): Index target whose collection or index was recreated.
+
+        Returns:
+            str: Generation in force after rotation, including any concurrent rotation.
+
+        Side Effects:
+            Updates target generation in PostgreSQL.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             row = await session.get(IngestionIndexGeneration, target, with_for_update=True)
@@ -399,13 +428,19 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
         return generation
 
     async def index_state_summary(self, *, target: str) -> IndexStateSummary:
-        """What the database expects of one target, for reconciliation.
+        """Summarize recorded index state for reconciliation.
 
-        ``live_documents`` counts documents this source still has; ``indexed``
-        and ``current_generation_count`` count what the state claims. A gap
-        between them is work outstanding; a gap between ``indexed`` and what the
-        index actually holds is divergence, which only the caller can see
-        because only it can ask the stores.
+        Args:
+            target (str): Index target to inspect.
+
+        Returns:
+            IndexStateSummary: Live, indexed, and current-generation document counts.
+
+        Side Effects:
+            Reads PostgreSQL.
+
+        Notes:
+            The caller compares these counts with the actual index backends.
         """
         generation = await self.current_generation(target=target)
         async with AsyncSession(self._engine) as session:
@@ -442,10 +477,17 @@ class SqlAlchemyIngestionRepository(IngestionRepository):
         )
 
     async def stale_document_ids(self, *, target: str, limit: int = 100) -> tuple[str, ...]:
-        """Documents recorded against an older generation of this target.
+        """Find work left by an interrupted generation change.
 
-        The work an interrupted reindex still owes, by name rather than by
-        count, so a report can point at something.
+        Args:
+            target (str): Index target to inspect.
+            limit (int): Maximum number of document IDs to return.
+
+        Returns:
+            tuple[str, ...]: Document IDs recorded under an older generation.
+
+        Side Effects:
+            Reads PostgreSQL.
         """
         generation = await self.current_generation(target=target)
         async with AsyncSession(self._engine) as session:

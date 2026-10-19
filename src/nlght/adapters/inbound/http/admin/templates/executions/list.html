@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Executions — nlght Admin{% endblock %}
+{% block title %}Executions | nlght Admin{% endblock %}
 {% block content %}
 <h2>Executions</h2>
 
@@ -75,7 +75,7 @@
         {% if run.fan_out.failed %}<br><span class="badge badge-failed">{{ run.fan_out.failed }} failed</span>{% endif %}
         {% if run.fan_out.pending %}<br><span class="muted">{{ run.fan_out.pending }} in flight</span>{% endif %}
       {% else %}
-        <span class="muted">—</span>
+        <span class="muted">N/A</span>
       {% endif %}
     </td>
     {# Both columns describe the *run*. For a fan-out that means its last child,
@@ -100,13 +100,13 @@
 
 {% if total > limit %}
 <nav style="display:flex;gap:1rem;align-items:center;margin-top:1rem">
-  {% if offset > 0 %}<a href="/admin/executions?{{ query }}&offset={{ [offset - limit, 0] | max }}">← Newer</a>{% endif %}
-  <span class="muted">{{ offset + 1 }}–{{ [offset + limit, total] | min }} of {{ total }}</span>
-  {% if offset + limit < total %}<a href="/admin/executions?{{ query }}&offset={{ offset + limit }}">Older →</a>{% endif %}
+  {% if offset > 0 %}<a href="/admin/executions?{{ query }}&offset={{ [offset - limit, 0] | max }}">Newer</a>{% endif %}
+  <span class="muted">{{ offset + 1 }} to {{ [offset + limit, total] | min }} of {{ total }}</span>
+  {% if offset + limit < total %}<a href="/admin/executions?{{ query }}&offset={{ offset + limit }}">Older</a>{% endif %}
 </nav>
 {% endif %}
 
 {% else %}
-<p class="muted">No runs match. Executions appear here once a workflow is submitted to the durable queue — an inline gateway request never becomes one.</p>
+<p class="muted">No runs match. Executions appear here when a workflow enters the durable queue. Inline gateway requests do not create execution records.</p>
 {% endif %}
 {% endblock %}

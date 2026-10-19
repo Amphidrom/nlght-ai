@@ -1,30 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Turning what the session remembers into elements a budget can weigh.
-
-This is where domain knowledge is allowed to live, and it is the only place. An
-adapter knows that a session result tagged `user_fact` is a fact about the person
-rather than a task outcome, that a `SPEC` atom is planning rather than context,
-and that a turn summary is three fields that read as one line. It says so once,
-as a `Presentation`, and the renderer downstream never asks again.
-
-That division is the whole point (ADR-0054). Before this, the prompt builder made
-those judgements inline:
-
-    "user_fact" in sr.result.tags        →  a different heading
-    atom.atom_type in _READABLE_ATOM_TYPES  →  a different heading
-    known_results                        →  the only thing a budget could drop
-
-so both the format and the budget policy were decided by which store a thing came
-out of. Two elements identical in what they say and where they belong now produce
-the same prompt whatever they were made of, and that is asserted directly.
-
-**Everything that changes content, count or meaning happens here**, before an
-element exists — reference resolution included. Once an element has a cost, that
-cost has to be the truth about what rendering it will produce, or the budget
-guarantee is a fiction.
-"""
+"""Convert remembered state into budgetable mental elements."""
 
 from __future__ import annotations
 
@@ -41,6 +18,7 @@ from nlght.core.hive_mind.models import (
     Retention,
     estimate_tokens,
 )
+from nlght.core.model.trust import UNANNOTATED, ContentOrigin
 
 #: The headings, and the order they appear in. Taken verbatim from what the
 #: builder produced before, because this slice removes a coupling and must not
@@ -66,27 +44,15 @@ USER_FACT_TAG = "user_fact"
 def _atom_representations(
     text: str, *, key: str, kind: str
 ) -> tuple[Representation, ...]:
-    """What an atom can be said as, fullest first.
+    """Offer full and derived compact forms for an atom.
 
-    The first honest `COMPACT` in the platform, and honest is the whole
-    difficulty. It is not a truncation of the full text — that ends mid-claim and
-    would read as a quotation of something the source never finished saying. It
-    is built from fields the atom *has*: the stable short name of what it is
-    about, and what sort of thing it is.
+    Args:
+        text (str): Full atom text.
+        key (str): Stable key used in compact form.
+        kind (str): Kind label for the atom.
 
-        FULL     [SPEC] candidate:ssl-keystore-path | the keystore lives at …
-        COMPACT  [SPEC] [fact] candidate:ssl-keystore-path
-        OMIT
-
-    So it is the same information at a lower resolution — the subject without the
-    substance — rather than a new interpretation of it. It is marked `derived`,
-    because it is not a wording any source produced.
-
-    **No compact form where there is nothing to build one from**, and none where
-    it would not actually be cheaper: an atom whose content is already shorter
-    than its own name offers `FULL` and `OMIT` only, and the reduction copes
-    because levels are optional. Inventing one to keep the shapes uniform is how
-    a compact representation stops being trustworthy.
+    Returns:
+        tuple[Representation, ...]: Full and compact representations, ordered by completeness.
     """
     full = Representation(level=Level.FULL, text=text, cost=estimate_tokens(text))
     omit = Representation(level=Level.OMIT, text="", cost=0)
@@ -100,7 +66,7 @@ def _atom_representations(
     )
     if short.cost >= full.cost:
         # Not a shortening. Offering it would let a reduction step spend a move
-        # and save nothing — and `MentalElement` would refuse the element
+        # and save nothing, and `MentalElement` would refuse the element
         # outright, which is the guarantee working as intended.
         return (full, omit)
     return (full, short, omit)
@@ -117,13 +83,20 @@ def _spoken(
     payload: object = None,
     provenance: object = None,
 ) -> MentalElement:
-    """One element that can be said in full or not at all.
+    """Wrap text that supports full display or omission.
 
-    No `COMPACT` level: none of these sorts has a shorter form anybody has
-    written. Offering one would mean inventing text, which is the one thing the
-    reduction is not allowed to do and an adapter should not do on its behalf
-    either. A sort that gains a genuine short form gains a level here, and the
-    reduction starts using it without changing.
+    Args:
+        element_id (str): Stable element identity.
+        kind (str): Kind of spoken element.
+        text (str): Text available for full display.
+        presentation (Presentation): Display policy for the element.
+        retention (Retention): Retention policy for budget reduction.
+        relevance (float): Current relevance score.
+        payload (object): Original content behind the element.
+        provenance (object): Source information for the content.
+
+    Returns:
+        MentalElement: Mental element with full display and omission options.
     """
     return MentalElement(
         element_id=element_id,
@@ -140,12 +113,32 @@ def _spoken(
     )
 
 
-def turn_elements(mental_model: MentalModel) -> list[MentalElement]:
-    """The recent conversation, as the prompt has always shown it.
+def remembered_origin(mental_model: MentalModel) -> ContentOrigin:
+    """Combine origins carried by remembered model content.
 
-    The last three turns, and the slice is kept: it is what the corpus has been
-    saying, and changing how much conversation a model sees is a prompt decision,
-    not a consequence of removing a coupling.
+    Args:
+        mental_model (MentalModel): MentalModel with turns, atoms, and results.
+
+    Returns:
+        ContentOrigin: Combined ContentOrigin.
+    """
+    stamped = [
+        *(turn.origin for turn in mental_model.recent_turns),
+        *(scored.result.origin for scored in mental_model.known_results),
+        *(scored.atom.origin for scored in mental_model.active_atoms),
+    ]
+    origins = [origin if origin is not None else UNANNOTATED for origin in stamped]
+    return ContentOrigin.combine(*origins) if origins else ContentOrigin()
+
+
+def turn_elements(mental_model: MentalModel) -> list[MentalElement]:
+    """Convert recent conversation turns to mental elements.
+
+    Args:
+        mental_model (MentalModel): MentalModel conversation state.
+
+    Returns:
+        list[MentalElement]: Turn elements with origin and cost.
     """
     elements: list[MentalElement] = []
     for turn in mental_model.recent_turns[-3:]:
@@ -153,13 +146,13 @@ def turn_elements(mental_model: MentalModel) -> list[MentalElement]:
         if turn.user_input:
             entry += f" user: {turn.user_input}"
         if turn.result_summary:
-            entry += f" → {turn.result_summary}"
+            entry += f" -> {turn.result_summary}"
         elements.append(_spoken(
             f"turn:{turn.turn_nr}",
             "turn",
             entry,
             presentation=SECTION_CONVERSATION,
-            # A conversation is the frame a question is asked in; losing the
+            # A conversation is the frame a question is asked in. Losing the
             # middle of it silently is worse than saying less about the corpus.
             retention=Retention.IMPORTANT,
             relevance=float(turn.turn_nr),
@@ -178,7 +171,20 @@ def _atom_element(
     relevance: float,
     payload: object,
 ) -> MentalElement:
-    """One atom, offering every form it honestly has."""
+    """Convert one working atom to a budgetable element.
+
+    Args:
+        element_id (str): Stable element identity.
+        text (str): Text of the working atom.
+        key (str): Atom key for compact display.
+        kind (str): Kind label for the atom.
+        presentation (Presentation): Display policy for the element.
+        relevance (float): Current relevance score.
+        payload (object): Original atom content.
+
+    Returns:
+        MentalElement: Mental element offering atom representations.
+    """
     return MentalElement(
         element_id=element_id,
         kind="atom",
@@ -196,18 +202,16 @@ def context_atom_elements(
     tags: Sequence[str] | None = None,
     resolve_references: Callable[[list[str]], list[str]] | None = None,
 ) -> list[MentalElement]:
-    """Working memory, split into what reads as context and what reads as planning.
+    """Select working atoms that read as context.
 
-    The split is a judgement about the atoms and is made here. The renderer sees
-    two sections and no reason for them.
+    Args:
+        mental_model (MentalModel): Working memory to select from.
+        tags (Sequence[str] | None): Optional tag filter.
+        resolve_references (Callable[[list[str]], list[str]] | None): Optional resolver
+            for referenced labels.
 
-    `resolve_references` runs **before** any element exists, and that placement is
-    the point rather than a convenience: it may return a different number of
-    entries with different text, so applying it afterwards would make every cost
-    already computed a lie and the budget guarantee with it. Where it changes the
-    count, entries beyond the pool inherit the last score — a positional rule,
-    stated because it is a rule and not a derivation. Nothing supplies a resolver
-    today.
+    Returns:
+        list[MentalElement]: Working atoms selected for context display.
     """
     pool = mental_model.active_atoms if tags else mental_model.top_atoms(10)
     readable = [
@@ -244,12 +248,13 @@ def context_atom_elements(
 
 
 def planning_atom_elements(mental_model: MentalModel) -> list[MentalElement]:
-    """Working memory that reads as planning rather than as context.
+    """Select working atoms that read as planning.
 
-    The complement of the readable types, and the same judgement seen from the
-    other side. Its own adapter because the policy offers the two separately —
-    `include_working_memory` and `include_delta` — and a caller may want one
-    without the other.
+    Args:
+        mental_model (MentalModel): MentalModel working memory.
+
+    Returns:
+        list[MentalElement]: Planning atom elements.
     """
     planning = [
         scored for scored in mental_model.top_atoms(10)
@@ -272,12 +277,13 @@ def planning_atom_elements(mental_model: MentalModel) -> list[MentalElement]:
 
 
 def result_elements(mental_model: MentalModel) -> list[MentalElement]:
-    """Session results, separated into facts about the person and task outcomes.
+    """Convert session results into budgetable elements.
 
-    A fact about the person outlives the task that produced it, so it is held
-    harder — a statement about the information, not about the store it came from.
-    The old prompt drew the same line and drew it by reading a tag in the
-    renderer.
+    Args:
+        mental_model (MentalModel): MentalModel session results.
+
+    Returns:
+        list[MentalElement]: Result elements with origin and retention.
     """
     elements: list[MentalElement] = []
     for position, scored in enumerate(mental_model.known_results):
@@ -308,12 +314,15 @@ def result_elements(mental_model: MentalModel) -> list[MentalElement]:
 
 
 def render_atom(atom_type: str, content: str, tags: list[str]) -> str:
-    """One working atom as a line, with its kind tag kept visible exactly once.
+    """Render an atom line with its kind tag once.
 
-    The content may already carry a `[kind:…]` prefix from whoever wrote it, so
-    it is stripped and re-added rather than duplicated. Presentation embedded in
-    stored content is not something this slice fixes; it is something this slice
-    must not lose.
+    Args:
+        atom_type (str): Kind label for the atom.
+        content (str): Atom text to show.
+        tags (list[str]): Tags attached to the atom.
+
+    Returns:
+        str: Visible atom text with its kind tag once.
     """
     prefix = f"[{atom_type}]"
     kind_tag = next(

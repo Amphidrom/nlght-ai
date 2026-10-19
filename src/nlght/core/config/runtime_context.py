@@ -22,7 +22,7 @@ class ProtocolAdapterRegistry:
 
 @dataclass(slots=True)
 class GatewayRegistry:
-    """Registry of configured gateways (HTTP, gRPC, …)."""
+    """Registry of configured gateways, including HTTP and gRPC."""
     items: list[Any] = field(default_factory=list)
 
     def all(self) -> list[Any]:
@@ -68,7 +68,8 @@ class HttpGatewaySubsystemRuntime:
 
 @dataclass(slots=True)
 class PersistenceSubsystemRuntime:
-    """Resolved persistence configuration — built from ``integrations.persistence.workflows``."""
+    """Persistence configuration resolved from ``integrations.persistence.workflows``."""
+
     name: str
     backend: str
     url: str
@@ -111,11 +112,13 @@ class OllamaModelProviderRuntime:
     request_timeout_s: float | None = None
     stream_connect_timeout_s: float | None = None
     stream_read_timeout_s: float | None = None
+    temperature: float | None = None  # None uses the model's default temperature.
 
 
 @dataclass(slots=True)
 class OllamaLocalModelProviderRuntime:
-    """Native local Ollama provider — tool calls via /api/chat NDJSON."""
+    """Native local Ollama provider using /api/chat NDJSON for tool calls."""
+
     name: str
     base_url: str
     default_model: str
@@ -124,28 +127,31 @@ class OllamaLocalModelProviderRuntime:
     request_timeout_s: float | None = None
     stream_connect_timeout_s: float | None = None
     stream_read_timeout_s: float | None = None
+    temperature: float | None = None  # None uses the model's default temperature.
 
 
 @dataclass(slots=True)
 class AnthropicModelProviderRuntime:
     name: str
-    api_key: str  # empty string → SDK reads ANTHROPIC_API_KEY env var
+    api_key: str  # An empty string lets the SDK read ANTHROPIC_API_KEY.
     default_model: str
 
 
 @dataclass(slots=True)
 class OpenAICloudModelProviderRuntime:
     name: str
-    api_key: str  # empty string → SDK reads OPENAI_API_KEY env var
+    api_key: str  # An empty string lets the SDK read OPENAI_API_KEY.
     default_model: str
-    base_url: str  # empty string → use default OpenAI API endpoint
+    base_url: str  # An empty string uses the default OpenAI API endpoint.
+    temperature: float | None = None  # None uses the model's default temperature.
 
 
 @dataclass(slots=True)
 class GoogleModelProviderRuntime:
     name: str
-    api_key: str  # empty string → SDK reads GOOGLE_API_KEY / GEMINI_API_KEY env var
+    api_key: str  # An empty string lets the SDK read GOOGLE_API_KEY or GEMINI_API_KEY.
     default_model: str
+    temperature: float | None = None  # None uses the model's default temperature.
 
 
 @dataclass(slots=True)
@@ -162,7 +168,8 @@ class LicensingRuntime:
 
 @dataclass(slots=True, frozen=True)
 class ExecutionStreamRuntime:
-    """Resolved transport for live execution signals — see ``ExecutionStreamConfig``."""
+    """Resolved live-signal transport configured by ``ExecutionStreamConfig``."""
+
     transport: str = "in_process"
     url: str = ""
     channel: str = "nlght_execution_stream"
@@ -180,6 +187,17 @@ class ExecutionRuntime:
     retry_base_seconds: float = 1.0
     retry_max_seconds: float = 60.0
     stream: ExecutionStreamRuntime = field(default_factory=ExecutionStreamRuntime)
+
+
+@dataclass(slots=True, frozen=True)
+class ActionAuthorizationRuntime:
+    """Validated action authorization configuration from ``ActionAuthorizationConfig``."""
+
+
+
+    enabled: bool = True
+    policy_timeout_seconds: float = 30.0
+    approval_timeout_seconds: float = 300.0
 
 
 @dataclass(slots=True)
@@ -205,7 +223,10 @@ class RuntimeContext:
     hive_mind_provider: HiveMindProviderRuntime | None
     licensing: LicensingRuntime = field(default_factory=LicensingRuntime)
     execution: ExecutionRuntime = field(default_factory=ExecutionRuntime)
+    action_authorization: ActionAuthorizationRuntime = field(
+        default_factory=ActionAuthorizationRuntime
+    )
     #: Configured watchers, passed through unchanged. Each names a source to
-    #: observe and a workflow to run; the runtime builds them at startup and a
+    #: observe and a workflow to run. The runtime builds them at startup and a
     #: broken one stops it.
     watchers: list[WatcherConfig] = field(default_factory=list)

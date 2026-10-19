@@ -41,17 +41,14 @@ NOTHING_PERSISTED = "empty"
 
 
 def _assertion_text(item: ExtractedItem) -> str:
-    """The wording a citation quotes: what the source said, and nothing else.
+    """Read only observed source wording for an assertion citation.
 
-    `observed_text` and no fallback to the fields. This used to pick the first
-    non-empty of `rule_text`/`decision`/`description`/`object` and otherwise join
-    every value — so a fact's citation text was "requires spring_boot java_17",
-    a string assembled here that appears in no document. Structure may enrich a
-    claim; it may never restate it.
+    Args:
+        item (ExtractedItem): Assertion with source-observed wording.
 
-    Empty is possible and is left empty. A candidate extracted before the wording
-    was asked for has none, and inventing one from its fields is precisely what
-    this stopped doing.
+    Returns:
+        str: Stripped observed text, possibly empty. Structured fields never
+        substitute for source wording.
     """
     return item.observed_text.strip()
 
@@ -70,13 +67,18 @@ class KnowledgePersistStep(StepBase):
     Step config:
         writer: resource name of the knowledge_index_writer activation
 
-    Reads ``knowledge.classified``; falls back to ``knowledge.extracted`` only
-    when no classification step ran, in which case everything is quarantined —
-    persisting unreviewed assertions as immediately retrievable would defeat the
-    review boundary.
+    Reads ``knowledge.classified``. Falls back to ``knowledge.extracted`` only
+    when no classification step ran, in which case everything is quarantined.
+    Persisting unreviewed assertions as immediately retrievable would defeat
+    the review boundary.
     """
 
     TYPE = "knowledge.persist"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_PERSISTED = NOTHING_PERSISTED
 
     def __init__(
         self,
@@ -92,7 +94,7 @@ class KnowledgePersistStep(StepBase):
         self._resources = resource_repository
         self._activator = resource_activator
         self._tools = tool_loader
-        # A step is loaded per hop, so its writer is activated per hop too — the
+        # A step is loaded per hop, so its writer is activated per hop too. The
         # runtime's shared pools are what keep that from opening connections.
         self._connections = store_connections
 
@@ -100,8 +102,9 @@ class KnowledgePersistStep(StepBase):
     def options(cls) -> list[StepOption]:
         return [
             StepOption("writer", "string",
-                       "Resource name of the knowledge_index_writer activation; "
-                       "without it assertions are stored but not searchable",
+                       "Resource name of the knowledge_index_writer activation "
+                       "that provides the knowledge database and search index",
+                       required=True,
                        placeholder="knowledge-index"),
         ]
 
@@ -143,9 +146,9 @@ class KnowledgePersistStep(StepBase):
         run_id = ctx.correlation_id
 
         # Two different faults, counted apart. One says the extraction could not
-        # name a business question — a prompt or schema problem. The other says
-        # the evidence has no document, so the claim could never be diffed —
-        # a pipeline problem. A single number for both says which run had
+        # name a business question because of a prompt or schema problem. The
+        # other says the evidence has no document, so the claim cannot be diffed.
+        # That is a pipeline problem. A single number for both says which run had
         # trouble and nothing about what to fix.
         without_entity = 0
         without_document = 0
@@ -176,7 +179,7 @@ class KnowledgePersistStep(StepBase):
                 # A proposition lives on the revision a sighting produces, so a
                 # candidate with no lineage has no revision to keep it on. That
                 # is survivable while the *legacy payload* can hold the whole
-                # claim — the payload row then carries everything, which is the
+                # claim. The payload row then carries everything, which is the
                 # case for an older `rule` that never had its canonical pair.
                 #
                 # It is not survivable when both are missing: the graph row then
@@ -197,14 +200,14 @@ class KnowledgePersistStep(StepBase):
                 continue
             graph = KnowledgeWrite(
                 identity=item.fingerprint,
-                # The claim, and the old row derived from it — never two
+                # The claim, and the old row derived from it, never two
                 # independent writes. Two can disagree and nothing afterwards
-                # says which is right; a derivation cannot disagree with itself.
+                # says which is right. A derivation cannot disagree with itself.
                 proposition=item.proposition,
                 payload=item.payload(),
-                # Stated, because the payload is a projection and may be absent
-                # for any kind now — read off it, a rule whose row cannot hold
-                # its claim would enter the graph as a fact.
+                # Set kind explicitly because the payload is an optional
+                # projection. Inferring from it could classify a rule without a
+                # payload row as a fact.
                 _kind=item.kind,
                 type=item.type,
                 confidence=item.confidence,
@@ -232,8 +235,8 @@ class KnowledgePersistStep(StepBase):
                 # With its lineage, where it has one. This dropped the pair and
                 # kept only the graph write, so a candidate whose evidence named
                 # its document but not its section lost a lineage row that had
-                # already been built successfully — and with it the revision its
-                # structure lives on. A slot is optional on a lineage row; a
+                # already been built successfully, and with it the revision its
+                # structure lives on. A slot is optional on a lineage row. A
                 # document is not.
                 loose.append((graph, lineage))
             # Only what may be read reaches the index, and a quarantined
@@ -247,7 +250,7 @@ class KnowledgePersistStep(StepBase):
         # Which units this run actually put to the model, and which units each
         # document has. A document may be compared only when every one of its
         # units was looked at: an unchanged document is skipped whole and yields
-        # nothing, and one truncated by `max_units` is half read — either would
+        # nothing, and one truncated by `max_units` is half read. Either would
         # otherwise look like a source that dropped everything.
         observed = {
             (str(document), str(unit))
@@ -264,7 +267,7 @@ class KnowledgePersistStep(StepBase):
 
         # What each section of each document can be found by. The unit carries
         # it as fields, so a candidate is placed by where its section stands
-        # rather than by the number the parser gave that section — which
+        # rather than by the number the parser gave that section, which
         # renumbers whenever a paragraph is inserted above it.
         observed_sections: dict[str, ObservedSection] = {}
         for unit in ctx.metadata.get("knowledge.units", ()):
@@ -282,7 +285,7 @@ class KnowledgePersistStep(StepBase):
         # Grouped by document, because that is the container retraction is
         # decided in. Comparing per slot retired each unchanged claim from the
         # slot it used to occupy and re-created it in the one it had moved to, on
-        # an edit that touched none of them. The slot matches a claim; the
+        # an edit that touched none of them. The slot matches a claim. The
         # document decides one is gone.
         by_document: dict[str, dict[str, list[tuple[KnowledgeWrite, LineageWrite | None]]]] = {}
         for (document, section), slot_writes in grouped.items():
@@ -292,7 +295,7 @@ class KnowledgePersistStep(StepBase):
 
         # The one judgement about meaning this pipeline delegates: whether a
         # changed body is the same rule said differently or a different rule.
-        # Nothing here can settle it — `must` becoming `must not` changed the
+        # Nothing here can settle it. `must` becoming `must not` changed the
         # rule and `must` becoming `shall` did not, and no rule over characters
         # separates those. Without a model the deterministic answer stands.
         classify = (
@@ -301,7 +304,7 @@ class KnowledgePersistStep(StepBase):
         # And the second, asked far more rarely: whether a claim standing in this
         # slot is this claim said differently. Only where the matching ladder
         # found nothing, only against candidates in the same slot, and only for
-        # the band structure cannot settle — so a corpus whose sources are stable
+        # the band structure cannot settle, so a corpus whose sources are stable
         # never asks it at all. Without a model every pair is `unjudged`, which
         # leaves the claims apart and says so.
         assess = ModelPropositionEquivalence(ctx.llm) if ctx.llm is not None else None
@@ -314,7 +317,7 @@ class KnowledgePersistStep(StepBase):
                 # Written, but not compared: this run did not see all of it.
                 #
                 # Indexed all the same. Not being comparable is a statement about
-                # *retraction* — nothing here may decide a claim is gone — and it
+                # *retraction*: nothing here may decide a claim is gone, and it
                 # was quietly being read as a statement about retrieval too, so
                 # every claim from a partially observed document was stored and
                 # unsearchable. Only the review boundary decides what is readable,
@@ -376,21 +379,24 @@ class KnowledgePersistStep(StepBase):
             len(complete), len(by_document), len(observed),
             without_entity, without_document, without_wording, unplaceable,
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT" if persisted else NOTHING_PERSISTED)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if persisted else self.Verdict.NOTHING_PERSISTED)
 
     @staticmethod
     def _lineage(
         item: ExtractedItem, run_id: str, extraction_version: str
     ) -> tuple[LineageWrite | None, str | None]:
-        """The lineage for one candidate, or nothing when it cannot say what it is.
+        """Build lineage for an extracted assertion with sufficient evidence.
 
-        An assertion whose kind carries no identifying fields — a rule extracted
-        before `subject` and `rule_property` were asked for, or one the model
-        left them out of — has no entity key. It gets no lineage row and no
-        substitute: a key derived from its wording is one a later run cannot
-        reproduce, so every run would open a new assertion for the same claim.
-        That is the drift this design removes, arriving through the migration
-        meant to end it.
+        Args:
+            item (ExtractedItem): Candidate assertion and its source evidence.
+            run_id (str): Extraction run identifier.
+            extraction_version (str): Version of the extraction process.
+
+        Returns:
+            tuple[LineageWrite | None, str | None]: Lineage and no reason when
+            identity, observed wording, and document revision are present.
+            Otherwise, no lineage and a reason code. Missing identity never
+            falls back to a wording-derived key, which would drift across runs.
         """
         entity = entity_key_or_none(item.kind, **item.content)
         if entity is None:
@@ -400,7 +406,7 @@ class KnowledgePersistStep(StepBase):
             # No observed wording, so nothing a citation could quote. A gap like
             # the others rather than an exception: the wording is asked for at
             # extraction and verified there, so reaching here without one means a
-            # producer that predates the field — which is a candidate to count,
+            # producer that predates the field, which is a candidate to count,
             # not a run to crash.
             #
             # And emphatically not a licence to rebuild one from the fields. That
@@ -418,7 +424,7 @@ class KnowledgePersistStep(StepBase):
             entity=entity,
             kind=item.kind,
             text=text,
-            # Identity is still content-derived; it serves as the fingerprint
+            # Identity is still content-derived. It serves as the fingerprint
             # until the matcher that replaces it is wired in.
             fingerprint=item.fingerprint,
             extraction_version=extraction_version,
@@ -432,7 +438,7 @@ class KnowledgePersistStep(StepBase):
             scope=tuple(str(value) for value in scope) if isinstance(scope, (list, tuple)) else (),
             slot_id=str(item.evidence.get("unit_ordinal") or "") or None,
             # The complete structure, travelling with the sighting that carries
-            # it — so it lands on the revision this sighting produces rather than
+            # it, so it lands on the revision this sighting produces rather than
             # on the assertion it continues. One assertion has many revisions and
             # a reworded claim keeps every earlier form.
             proposition=item.proposition,

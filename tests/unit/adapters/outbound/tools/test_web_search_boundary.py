@@ -1,14 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""`web_search` is the only network operation the default policy allows.
+"""Keep web search within its configured network destination.
 
-It is allowed because its destination is fixed in operator configuration rather
-than proposed by the model — `BOUNDED_DESTINATION` (ADR-0069). A followed
-redirect would break exactly that: the effective destination would be one the
-operator never named, and in langsearch mode the request carries an
-`Authorization: Bearer` header that would go with it.
-"""
+Redirects must not move a request or its credentials to a destination chosen
+outside operator configuration (ADR-0069)."""
 
 from __future__ import annotations
 
@@ -48,14 +44,14 @@ class _RecordingClient:
 
 
 @pytest.mark.parametrize("mode", ["searxng", "langsearch"])
-async def test_the_search_client_never_follows_a_redirect(monkeypatch, mode: str) -> None:  # noqa: ANN001
+async def test_the_search_client_never_follows_a_redirect(monkeypatch, mode: str) -> None:
     monkeypatch.setattr(httpx2, "AsyncClient", _RecordingClient)
     tool = WebSearchTool(
         name="search",
         config={"endpoint": "https://search.example/api", "mode": mode, "api_key": "k"},
     )
 
-    await tool._fetch("anything", 3)  # noqa: SLF001
+    await tool._fetch("anything", 3)
 
     assert _RecordingClient.kwargs.get("follow_redirects") is False, (
         "a bounded-destination operation must not silently follow a redirect "

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from nlght.adapters.outbound.config.file.models import PlatformFileConfigModel
 from nlght.core.config.snapshot import (
+    ActionAuthorizationConfig,
     CatalogsSnapshot,
     EmbeddingConfig,
     ExecutionConfig,
@@ -49,6 +50,11 @@ def to_snapshot(model: PlatformFileConfigModel) -> PlatformConfigSnapshot:
                 retry_base_seconds=model.execution.worker.retry_base_seconds,
                 retry_max_seconds=model.execution.worker.retry_max_seconds,
             ),
+        ),
+        action_authorization=ActionAuthorizationConfig(
+            enabled=model.action_authorization.enabled,
+            policy_timeout_seconds=model.action_authorization.policy_timeout_seconds,
+            approval_timeout_seconds=model.action_authorization.approval_timeout_seconds,
         ),
         embedding=EmbeddingConfig(
             provider=model.embedding.provider,

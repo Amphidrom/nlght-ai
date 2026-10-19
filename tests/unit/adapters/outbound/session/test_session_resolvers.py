@@ -12,10 +12,6 @@ from nlght.adapters.outbound.session.composite import CompositeSessionKeyResolve
 from nlght.adapters.outbound.session.header import HeaderSessionKeyResolver
 from nlght.adapters.outbound.session.query import QueryParamSessionKeyResolver
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 _JSON_CT = {"content-type": "application/json"}
 
 
@@ -33,11 +29,6 @@ def _resolve(resolver, *, headers=None, query_params=None, raw_body=b""):
             raw_body=raw_body,
         )
     )
-
-
-# ---------------------------------------------------------------------------
-# HeaderSessionKeyResolver
-# ---------------------------------------------------------------------------
 
 
 def test_header_resolver_returns_value() -> None:
@@ -58,11 +49,6 @@ def test_header_resolver_returns_none_if_missing() -> None:
 def test_header_resolver_returns_none_for_empty_header() -> None:
     resolver = HeaderSessionKeyResolver("x-session-id")
     assert _resolve(resolver, headers={"x-session-id": ""}) is None
-
-
-# ---------------------------------------------------------------------------
-# BodyParameterSessionKeyResolver
-# ---------------------------------------------------------------------------
 
 
 def test_body_resolver_extracts_top_level_key() -> None:
@@ -105,11 +91,6 @@ def test_body_resolver_returns_none_for_whitespace_only_value() -> None:
     assert _resolve(resolver, headers=_JSON_CT, raw_body=body) is None
 
 
-# ---------------------------------------------------------------------------
-# QueryParamSessionKeyResolver
-# ---------------------------------------------------------------------------
-
-
 def test_query_resolver_returns_value() -> None:
     resolver = QueryParamSessionKeyResolver("session_id")
     assert _resolve(resolver, query_params={"session_id": "qsess"}) == "qsess"
@@ -123,11 +104,6 @@ def test_query_resolver_returns_none_if_missing() -> None:
 def test_query_resolver_returns_none_for_empty_param() -> None:
     resolver = QueryParamSessionKeyResolver("session_id")
     assert _resolve(resolver, query_params={"session_id": ""}) is None
-
-
-# ---------------------------------------------------------------------------
-# CompositeSessionKeyResolver
-# ---------------------------------------------------------------------------
 
 
 def test_composite_returns_first_match() -> None:

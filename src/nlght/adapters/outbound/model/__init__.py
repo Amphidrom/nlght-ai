@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Model client adapters — one per supported provider."""
+"""Provide one model client adapter per supported provider."""
 
 from nlght.adapters.outbound.model.anthropic import AnthropicModelClient
 from nlght.adapters.outbound.model.google import GoogleModelClient

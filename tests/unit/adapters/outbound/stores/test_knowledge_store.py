@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +16,8 @@ from nlght.adapters.outbound.stores import knowledge as knowledge_module
 from nlght.adapters.outbound.stores.connections import StoreConnections
 from nlght.adapters.outbound.stores.knowledge import KnowledgeStoreTool
 from nlght.core.knowledge import KnowledgeObject
+from nlght.core.knowledge.knowledge import SupportingEvidence
+from nlght.core.model.trust import ContentTrust
 
 
 class _FakeConnections(StoreConnections):
@@ -104,7 +107,7 @@ def _opensearch_available(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_construction_without_a_knowledge_database_is_refused() -> None:
-    # The knowledge graph is a separate database; without its URL the store
+    # The knowledge graph is a separate database. Without its URL the store
     # must refuse rather than silently reading platform tables.
     with pytest.raises(ValueError, match="requires 'pg_url'"):
         KnowledgeStoreTool(name="knowledge", config={"os_url": "http://x"})
@@ -133,7 +136,7 @@ async def test_each_kind_queries_its_own_index() -> None:
 
 
 async def test_quarantined_results_are_dropped_even_when_the_index_returns_them() -> None:
-    # The search index may lag behind a review decision; PostgreSQL is authority.
+    # The search index may lag behind a review decision. PostgreSQL is authoritative.
     client = _FakeOpenSearch(["visible", "quarantined"])
     repository = _FakeRepository(visible={"visible"})
     tool = _tool(client, repository)
@@ -184,13 +187,7 @@ async def test_a_text_query_asks_the_wording_the_terms_and_the_structure() -> No
 
 
 async def test_a_question_in_the_sources_own_words_outranks_a_bare_term_match() -> None:
-    """Why the wording is boosted above a single-field term match.
-
-    A question is usually a sentence, and the sentence a claim was read from is
-    the closest thing the index holds to an answer — so a phrase hit on it is
-    worth more than one loose term matching a structured field, and less than a
-    phrase hit on the field that names the business question.
-    """
+    """Rank a match on observed source wording above a bare field-term match."""
     client = _FakeOpenSearch()
     tool = _tool(client, _FakeRepository())
 
@@ -240,7 +237,7 @@ async def test_an_index_prefix_scopes_every_index() -> None:
 async def test_the_llm_wrapper_returns_serialised_assertions() -> None:
     tool = _tool(_FakeOpenSearch(["visible"]), _FakeRepository(visible={"visible"}))
 
-    payload = json.loads(await tool.query_facts_tool(query="java"))
+    payload = json.loads((await tool.query_facts_tool(query="java")).content)
 
     assert payload == [
         {
@@ -266,3 +263,70 @@ def test_the_resource_config_carries_the_knowledge_connection() -> None:
     assert {option.name for option in KnowledgeStoreTool.options() if option.required} == {
         "pg_url", "os_url"
     }
+
+
+class _SupportedRepository(_FakeRepository):
+    def __init__(self, support: dict[str, tuple[str, ...]]) -> None:
+        super().__init__(visible=set(support))
+        self.support = support
+
+    async def resolve(self, identities, *, include_quarantined: bool = False):
+        resolved = await super().resolve(identities, include_quarantined=include_quarantined)
+        return [
+            replace(
+                item,
+                support=tuple(
+                    SupportingEvidence(document_id=f"doc-{source}", source_id=source)
+                    for source in self.support[item.identity]
+                ),
+            )
+            for item in resolved
+        ]
+
+
+async def test_a_claim_carried_only_by_trusted_sources_is_trusted() -> None:
+    tool = _tool(
+        _FakeOpenSearch(["claim"]),
+        _SupportedRepository({"claim": ("handbook",)}),
+        trusted_sources=["handbook"],  # type: ignore[arg-type]
+    )
+
+    output = await tool.query_facts_tool(query="java")
+
+    assert output.origin.trust is ContentTrust.TRUSTED
+
+
+async def test_one_untrusted_supporting_document_makes_the_claim_untrusted() -> None:
+    tool = _tool(
+        _FakeOpenSearch(["claim"]),
+        _SupportedRepository({"claim": ("handbook", "forum")}),
+        trusted_sources=["handbook"],  # type: ignore[arg-type]
+    )
+
+    output = await tool.query_facts_tool(query="java")
+
+    assert output.origin.trust is ContentTrust.UNTRUSTED
+    assert [ref.source_id for ref in output.origin.untrusted_sources] == ["forum"]
+
+
+async def test_a_claim_without_support_is_unannotated() -> None:
+    tool = _tool(
+        _FakeOpenSearch(["visible"]),
+        _FakeRepository(visible={"visible"}),
+        trusted_sources=["handbook"],  # type: ignore[arg-type]
+    )
+
+    output = await tool.query_facts_tool(query="java")
+
+    assert [ref.kind for ref in output.origin.untrusted_sources] == ["unannotated"]
+
+
+async def test_retrieval_labels_a_claim_through_the_store() -> None:
+    from nlght.adapters.outbound.workflow.steps.retrieval.search import _claim_origin
+
+    repository = _SupportedRepository({"claim": ("handbook",)})
+    tool = _tool(_FakeOpenSearch(["claim"]), repository, trusted_sources=["handbook"])  # type: ignore[arg-type]
+    (claim,) = await tool.query_facts(query="java")
+
+    assert _claim_origin(tool, claim).trust is ContentTrust.TRUSTED
+    assert _claim_origin(object(), claim).sources == ()

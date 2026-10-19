@@ -33,11 +33,6 @@ class Base(DeclarativeBase):
     pass
 
 
-# ============================================================
-# Workflows
-# ============================================================
-
-
 class Workflow(Base):
     __tablename__ = "workflows"
 
@@ -46,11 +41,11 @@ class Workflow(Base):
     description: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     capabilities: Mapped[list[str]] = mapped_column(_JSON, nullable=False, default=list)
-    # "blocking" | "non-blocking" — one run at a time vs any number in parallel.
+    # Blocking workflows allow one run at a time. Non-blocking workflows allow parallel runs.
     concurrency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'non-blocking'"))
-    # How many steps one run may take. NULL leaves it to the runtime's default;
+    # Limit steps per run. NULL uses the runtime default.
     # 0 removes the guard. Per workflow because only the workflow knows its own
-    # shape — one that spends a step per document needs a number that fits its
+    # shape. A workflow that spends a step per document needs a number that fits its
     # corpus, and one that answers a request needs twenty.
     max_hops: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[object] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
@@ -63,11 +58,6 @@ class Workflow(Base):
 
 
 Index("workflows_enabled_idx", Workflow.enabled)
-
-
-# ============================================================
-# Workflow Versions
-# ============================================================
 
 
 class WorkflowVersion(Base):
@@ -101,11 +91,6 @@ class WorkflowVersion(Base):
     )
 
 
-# ============================================================
-# Workflow Steps  —  State Machine Nodes
-# ============================================================
-
-
 class WorkflowStep(Base):
     __tablename__ = "workflow_steps"
     __table_args__ = (
@@ -125,7 +110,7 @@ class WorkflowStep(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     config: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False, default=dict[str, Any])
 
-    # State machine transitions (verdict → next step name)
+    # Map each verdict to the next step name.
     transitions: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False, default=dict[str, Any])
     is_terminal: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_start: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -146,18 +131,13 @@ Index(
 )
 
 
-# ============================================================
-# Resources
-# ============================================================
-
-
 class Resource(Base):
     """One configured resource.
 
-    ``resource_id`` is the identity; ``(kind, name)`` is the address, and it is
+    ``resource_id`` is the identity. ``(kind, name)`` is the address, and it is
     unique because everything resolves a resource by it and an access rule names
     it. ``provider`` selects the implementation and is deliberately not part of
-    the address — see migration ``0007``.
+    the address. See migration ``0007``.
     """
 
     __tablename__ = "resources"
@@ -177,11 +157,6 @@ Index("resources_by_kind", Resource.kind)
 Index("resources_enabled_idx", Resource.enabled)
 
 
-# ============================================================
-# Access policies
-# ============================================================
-
-
 class AccessPolicyRule(Base):
     __tablename__ = "access_policies"
 
@@ -198,11 +173,6 @@ class AccessPolicyRule(Base):
 
 Index("access_policies_by_subject_type", AccessPolicyRule.subject_type)
 Index("access_policies_enabled_idx", AccessPolicyRule.enabled)
-
-
-# ============================================================
-# Distributed workflow execution (ADR-0031)
-# ============================================================
 
 
 class WorkflowWorker(Base):

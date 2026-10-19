@@ -33,10 +33,6 @@ from nlght.core.workflow.workflow import WorkflowDef, WorkflowInvocation, Workfl
 
 _MESSAGES = [{"role": "user", "content": "hi"}]
 
-# ---------------------------------------------------------------------------
-# Stubs
-# ---------------------------------------------------------------------------
-
 
 class _CapturingGatewayService:
     """Records every call to process() for assertion."""
@@ -142,11 +138,6 @@ def _make_app(
     return app
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 def test_session_key_forwarded_to_gateway_when_resolver_configured() -> None:
     gateway = _CapturingGatewayService()
     adapter = OpenAIHttpProtocolAdapter(
@@ -205,7 +196,7 @@ def test_session_key_is_none_when_resolver_returns_none() -> None:
 
 
 def test_direct_inference_bypasses_gateway() -> None:
-    """Without workflow mapping, the adapter calls ModelClient directly — gateway not used."""
+    """Call the model directly when no workflow mapping matches."""
     gateway = _CapturingGatewayService()
     adapter = OpenAIHttpProtocolAdapter(
         base_path="/v1",

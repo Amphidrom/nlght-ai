@@ -42,30 +42,16 @@ def _norm(value: Any) -> str:  # noqa: ANN401 (content values are heterogeneous)
 
 
 def _structural_key(item: ExtractedItem, *, case_sensitive: bool = False) -> tuple[str, ...]:
-    """The whole structured assertion, so two different claims stay two.
+    """Key an extracted assertion by all nonblank structured fields.
 
-    Every field the extraction produced, for every kind. It used to be a fixed
-    projection per kind — a fact keyed on `(subject, predicate, object)`, a rule
-    on `rule_text` alone — which reached past the n-ary work in front of it:
+    Args:
+        item (ExtractedItem): Assertion whose structured content is keyed.
+        case_sensitive (bool): Preserve case in field values when true.
 
-        transfers 500 records from staging to archive
-        transfers 500 records from staging to backup
-
-    are one key and were collapsed here, before anything was persisted, while
-    `Proposition` and the entity key had long since carried every role. Two rules
-    about one subject with different thresholds went the same way, since neither
-    `subject` nor `rule_property` was in the key.
-
-    Not the entity identity, deliberately. This step exists to drop *structurally
-    identical* extractions inside one pass — the same sentence read twice — and
-    reaching for identity here would let it answer questions that belong to the
-    repository, where the slot, the history and the equivalence judgement are.
-    Two claims that share an entity key and differ in their fields are a
-    disagreement to resolve there, not a duplicate to drop here.
-
-    `observed_text` stays out. One sentence may state several atomic claims
-    (ADR-0049), so they share their wording by design, and keying on it would
-    fold them back into one.
+    Returns:
+        tuple[str, ...]: Kind followed by sorted ``field=value`` entries.
+        Observed wording is excluded because one sentence can contain several
+        distinct assertions.
     """
 
     def value(raw: Any) -> str:  # noqa: ANN401 (content values are heterogeneous)
@@ -112,28 +98,20 @@ class _RefineStep(StepBase):
         items: tuple[ExtractedItem, ...],
         before: tuple[ExtractedItem, ...],
     ) -> StepResult:
-        """Write the candidates back, and say what this step did to identity.
+        """Store refined candidates and record how many fingerprints changed.
 
-        Counts alone cannot answer the question a rerun raises. When a corpus
-        that was only reworded comes back with an assertion more, something
-        between the model and the key produced a different canonical
-        proposition — and this chain is four steps long. `in`/`out` stays flat
-        while `canonicalize` lowercases an object or `normalize` strips a
-        trailing stop, either of which moves the entity key the model is judged
-        by, so a chain reporting only counts leaves the model carrying the blame
-        for what a rewrite rule did.
+        Args:
+            ctx (WorkflowStepContext): Context whose extracted items are updated.
+            items (tuple[ExtractedItem, ...]): Candidates after refinement.
+            before (tuple[ExtractedItem, ...]): Candidates before refinement.
 
-        `rewritten` is how many candidates left carrying a fingerprint this
-        step was not handed. It was called `identity_changed`, from before
-        identity stopped being derived from content — these steps cannot change
-        an assertion's identity at all now, only the wording it is recorded
-        under. Counted against a multiset rather than a set,
-        because the interesting case is exactly the one a set misses: a step
-        that rewrites one candidate onto a fingerprint *another* candidate
-        already had — two spellings of one claim collapsing onto each other —
-        is the merge that makes an assertion disappear, and it would report
-        nothing. A split counts its new halves, which is right: they are claims
-        the step invented.
+        Returns:
+            StepResult: Context with updated candidates and the default verdict.
+
+        Side Effects:
+            Replaces ``knowledge.extracted`` and logs input, output, and
+            rewritten counts. The rewritten count uses a multiset so a merge
+            into an existing fingerprint remains visible.
         """
         ctx.metadata["knowledge.extracted"] = items
         handed_in = Counter(item.fingerprint for item in before)
@@ -144,7 +122,7 @@ class _RefineStep(StepBase):
             "[%s] %s.done | in=%d out=%d rewritten=%d",
             ctx.correlation_id, self.TYPE, len(before), len(items), rewritten,
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     @classmethod
     def options(cls) -> list[StepOption]:
@@ -570,11 +548,11 @@ class KnowledgeMetaEnrichmentStep(_RefineStep):
     """Derives searchable keywords for each candidate.
 
     The knowledge store's BM25 side ranks on the observed wording and matches
-    ``keywords`` for explicit term lookups; this is where the second comes from.
+    ``keywords`` for explicit term lookups. This is where the second comes from.
 
     It also used to assemble ``text_all``, a bag of every field value. That is
     gone: the wording is indexed now, and the bag was neither observed nor
-    quotable — for a pattern it was `description + pattern_name`, both already
+    quotable. For a pattern it was `description + pattern_name`, both already
     indexed beside it.
     """
 
@@ -587,12 +565,9 @@ class KnowledgeMetaEnrichmentStep(_RefineStep):
 
         enriched: list[ExtractedItem] = []
         for item in items:
-            # Sorted by field name, so the same claim yields the same keywords
-            # however the model happened to order its JSON keys — walking
-            # `values()` made a claim nobody edited re-index differently on the
-            # next run. Nothing may read a role position out of this: it is a
-            # term list for explicit lookups, and the language lives in
-            # `observed_text`.
+            # Sort fields to keep keywords stable across JSON key order changes.
+            # A values() walk could reindex an unchanged claim. These terms
+            # serve explicit lookups. `observed_text` carries the wording.
             text = " ".join(str(item.content[name]) for name in sorted(item.content))
             tokens = [
                 token.lower()
@@ -711,9 +686,9 @@ class KnowledgeValidateStep(_RefineStep):
     than facts because a wrong normative statement is more damaging than a wrong
     descriptive one.
 
-    A candidate carrying a technical signal — a flag, path, version, annotation,
-    dotted identifier — is exempt from the low-information gate, since short
-    technical tokens are precisely what makes those assertions valuable.
+    A candidate carrying a technical signal such as a flag, path, version,
+    annotation, or dotted identifier is exempt from the low-information gate.
+    Short technical tokens make those assertions valuable.
     """
 
     TYPE = "knowledge.validate"

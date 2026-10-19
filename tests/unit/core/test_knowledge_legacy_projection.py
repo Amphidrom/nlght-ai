@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""One truth, and an old view derived from it.
+"""Derive legacy payloads without losing proposition fields.
 
-The invariant this file exists to hold:
-
-    where a legacy payload exists, it is a lossless projection of the same
-    proposition
-
-Never two writes. Two writes can disagree and nothing afterwards says which is
-right; one derivation cannot disagree with itself. That is what makes this
-migration neither a big bang nor a dual write — an existing ternary fact keeps
-producing exactly the row it always did, and a claim with more parts is stored
-whole and simply has no legacy row.
+A representable proposition yields a lossless legacy view. Other shapes stay
+complete in their canonical representation.
 """
 
 from __future__ import annotations
@@ -62,12 +54,7 @@ def test_a_refusal_names_what_the_claim_carries() -> None:
 
 
 def test_a_claim_whose_parts_are_named_differently_makes_no_row() -> None:
-    """Not a defect, and not something to repair by renaming.
-
-    Whether `actor` means `subject` is an equivalence question, asked of two
-    complete propositions and answered by a judgement. Guessing it here would be
-    a role normalisation — the ontology this design has refused three times.
-    """
+    """Avoid guessing legacy field roles from unfamiliar proposition names."""
     result = legacy_fact_payload(_p(actor="Alice", action="transfers", target="Bob"))
 
     assert isinstance(result, NotRepresentable)
@@ -81,13 +68,7 @@ def test_a_missing_part_makes_no_row_rather_than_an_empty_column() -> None:
 
 
 def test_a_derived_row_says_exactly_what_the_proposition_says() -> None:
-    """The invariant, as an assertion rather than as a comment.
-
-    Anything the payload holds came from the proposition, and everything the
-    proposition holds is in the payload. A derivation that dropped a part, or
-    added one, would be the split brain this exists to prevent — arriving in a
-    single write.
-    """
+    """Require a derived legacy row to preserve the complete proposition."""
     proposition = _p(subject="spring", predicate="requires", object="maven")
 
     result = legacy_fact_payload(proposition)
@@ -102,9 +83,8 @@ def test_a_derived_row_says_exactly_what_the_proposition_says() -> None:
 
 
 def test_deriving_twice_gives_the_same_row() -> None:
-    # A derivation is a function of the proposition and of nothing else — no
-    # clock, no run, no state. If it were not, the "one truth" claim would be
-    # false in a way nothing would report.
+    # A derivation depends only on the proposition. Clock, run, and state
+    # cannot affect it, or repeated derivations could disagree silently.
     proposition = _p(subject="spring", predicate="requires", object="maven")
 
     assert legacy_fact_payload(proposition) == legacy_fact_payload(proposition)
@@ -118,10 +98,10 @@ def test_only_the_legacy_module_names_the_legacy_shape() -> None:
     it look like a privileged form of a proposition, and that had to be taken
     back out once already.
     """
-    import inspect  # noqa: PLC0415
+    import inspect
 
-    import nlght.core.knowledge.legacy as legacy  # noqa: PLC0415
-    import nlght.core.knowledge.projection as projection  # noqa: PLC0415
+    import nlght.core.knowledge.legacy as legacy
+    import nlght.core.knowledge.projection as projection
 
     shape_words = {"subject", "predicate", "object", "triple"}
 

@@ -105,7 +105,7 @@ async def test_atomicity_splits_a_conjunction_into_reviewable_claims() -> None:
 
 
 async def test_atomicity_leaves_prose_alone() -> None:
-    # Long fragments are sentences, not list items; splitting them invents claims.
+    # Long fragments are sentences, not list items. Splitting them invents claims.
     prose = "the runtime and also whatever else the operator happens to configure"
     out = await _run(KnowledgeAtomicityStep(config={}), (_fact(obj=prose),))
 
@@ -172,13 +172,7 @@ async def test_dedup_can_be_made_case_sensitive() -> None:
 
 
 async def test_dedup_keeps_two_n_ary_facts_that_differ_in_a_fourth_role() -> None:
-    """The key had reached past the n-ary work in front of it.
-
-    A fact was keyed on `(subject, predicate, object)`, so two claims differing
-    only in a further role were one key and the second was dropped here —
-    silently, before anything was persisted, while `Proposition` and the entity
-    key had long since carried every role.
-    """
+    """Keep n-ary facts separate when a fourth role differs."""
     staging_to_archive = ExtractedItem(
         kind="fact", type="migration", confidence=0.9,
         content={"predicate": "transfers", "subject": "migration tool",
@@ -196,14 +190,7 @@ async def test_dedup_keeps_two_n_ary_facts_that_differ_in_a_fourth_role() -> Non
 
 
 async def test_dedup_keeps_two_rules_that_share_a_sentence_but_not_a_subject() -> None:
-    """A rule was keyed on `rule_text` alone — and that is now often the sentence.
-
-    Since the wording is observed rather than assembled (ADR-0048), `rule_text`
-    commonly holds the source sentence verbatim. One sentence stating two
-    requirements therefore produced two rules with identical `rule_text` and
-    different subjects, and the second was dropped here: neither `subject` nor
-    `rule_property` took part in the key.
-    """
+    """Keep rules with different subjects separate despite shared wording."""
     sentence = "Access tokens must not be logged and sessions must expire after an hour."
     tokens = ExtractedItem(
         kind="rule", type="policy", confidence=0.9, observed_text=sentence,
@@ -343,12 +330,7 @@ async def test_graph_quality_penalises_an_overlong_predicate() -> None:
 
 
 async def test_meta_enrichment_produces_keywords_and_no_assembled_text() -> None:
-    """Terms for explicit lookups, and nothing that pretends to be language.
-
-    It also used to emit `text_all`, a bag of every field value. The wording is
-    indexed now, so the bag was a second copy of fields already indexed beside
-    it — and it was never observed, so it could not be quoted.
-    """
+    """Emit search keywords without inventing assembled claim text."""
     out = await _run(KnowledgeMetaEnrichmentStep(config={}), (_fact(),))
 
     assert "spring" in out[0].metadata["keywords"]
@@ -510,7 +492,7 @@ async def test_a_step_reports_how_many_candidates_it_rewrote(
     line = next(m for m in caplog.messages if "knowledge.canonicalize.done" in m)
     # The messy one was rewritten onto the identity the clean one already had.
     # Counted against a set this would report nothing, because that identity was
-    # handed in — and a claim quietly merging into another is precisely what a
+    # handed in, and a claim quietly merging into another is precisely what a
     # rerun needs to see.
     assert "in=2 out=2 rewritten=1" in line
 
@@ -529,9 +511,8 @@ async def test_a_step_that_changes_nothing_reports_nothing_changed(
 async def test_a_split_counts_both_halves_as_new_identities(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Atomicity invents claims rather than rewording one, and the number says so
-    # — which is the difference between "a step moved a key" and "a step made
-    # two assertions out of one".
+    # Atomicity can split one claim into two assertions. Count both as new
+    # identities so the test detects a split rather than a key move.
     caplog.set_level("INFO")
 
     await _run(KnowledgeAtomicityStep(config={}), (_fact(obj="Java 17 and Maven"),))

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.core.hive_mind.builder — MentalModelBuilder + ContextSnapshot."""
+"""Check mental model assembly and context snapshots."""
 from __future__ import annotations
 
 import pytest
@@ -26,11 +26,14 @@ def _engine() -> RelevanceEngine:
 
 
 def _builder(**_ignored) -> MentalModelBuilder:
-    """The builder no longer takes caps or a threshold — it selects nothing.
+    """Build a mental model builder without legacy selection limits.
 
-    `**_ignored` so the call sites that used to pass `max_turns=3` read as what
-    they now are: a request for a limit that no longer exists.
-    """
+    Args:
+        **_ignored (object): Obsolete caller limits retained by test call sites.
+
+    Returns:
+        MentalModelBuilder: Builder with the test relevance engine.
+        """
     return MentalModelBuilder(relevance_engine=_engine())
 
 
@@ -88,10 +91,6 @@ def test_from_step_config_rejects_invalid_values(config: dict[str, object], mess
         MentalModelBuilder.from_step_config(config)
 
 
-# ---------------------------------------------------------------------------
-# ContextSnapshot
-# ---------------------------------------------------------------------------
-
 def test_context_snapshot_defaults_empty() -> None:
     snap = ContextSnapshot()
     assert snap.active_atoms == []
@@ -106,10 +105,6 @@ def test_context_snapshot_accepts_values() -> None:
     assert len(snap.active_atoms) == 1
     assert "id1" in snap.dependency_ids
 
-
-# ---------------------------------------------------------------------------
-# MentalModelBuilder.build
-# ---------------------------------------------------------------------------
 
 def test_build_returns_mental_model_with_correct_turn_id() -> None:
     builder = _builder()
@@ -178,6 +173,6 @@ def test_build_deduplicates_entities() -> None:
 def test_build_empty_intents_uses_fallback() -> None:
     builder = _builder()
     snap    = ContextSnapshot()
-    # Should not raise — uses "informational" fallback
+    # An unknown category uses the informational fallback without raising.
     model   = builder.build(turn_id="t", context=snap, signal_entities=[], intents=[])
     assert model.intents == []

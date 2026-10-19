@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Workers — nlght Admin{% endblock %}
+{% block title %}Workers | nlght Admin{% endblock %}
 {% block content %}
 <h2>Workers</h2>
 <p class="muted">Registered workers, their capabilities, and what they are holding right now.</p>
@@ -45,7 +45,7 @@
 
 <p class="muted" style="margin-top:1.5rem">
   A worker with no capabilities claims any execution. One whose lease has expired still holds
-  whatever it was running until another worker takes it over — which is what makes an expired
+  whatever it was running until another worker takes it over. This makes an expired
   lease worth looking at when nothing seems to be progressing.
 </p>
 {% else %}

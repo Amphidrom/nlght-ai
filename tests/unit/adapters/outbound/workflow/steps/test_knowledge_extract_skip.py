@@ -1,18 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""`knowledge.extract` does not ask the model about a document twice.
+"""Skip model extraction when document content and extraction version match.
 
-Without this the model is asked the same question on every run and answers it in
-slightly different words each time. Once assertions are updated incrementally
-rather than rebuilt, those different words are a retraction and a re-review of
-something nobody edited — so the skip is not an optimisation, it is what keeps
-identity drift out of normal operation.
-
-Both halves of the key are exercised here, because each fails in its own
-direction: content alone skips a document after the model changed, version alone
-skips one that was edited.
-"""
+A changed input must reopen extraction."""
 
 from __future__ import annotations
 
@@ -57,21 +48,21 @@ class _Llm:
         self.response = response
         self.calls = 0
 
-    def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):  # noqa: ANN001, ANN201
+    def stream(self, messages, tools=None, tool_choice=None):
         self.calls += 1
         response = self.response.replace(
             "{quote}", quote_from(str(messages[0]["content"]))
         )
 
-        async def _gen():  # noqa: ANN202
+        async def _gen():
             yield ModelStreamEvent(kind="token", content=response)
             yield ModelStreamEvent(kind="done")
 
         return _gen()
 
-    async def call(self, messages, *, temperature=None) -> None: ...  # noqa: ANN001
+    async def call(self, messages) -> None: ...
 
-    def append_tool_turn(self, messages, tool_calls_raw, results, assistant_text=""):  # noqa: ANN001, ANN201
+    def append_tool_turn(self, messages, tool_calls_raw, results, assistant_text=""):
         return messages
 
 
@@ -114,7 +105,7 @@ class _Loader:
     def __init__(self, instance: object) -> None:
         self._instance = instance
 
-    def instantiate(self, *, kind, provider, name, config, **runtime_deps):  # noqa: ANN001, ANN003, ANN201
+    def instantiate(self, *, kind, provider, name, config, **runtime_deps):
         return self._instance
 
 
@@ -159,7 +150,7 @@ def _document(text: str, document_id: str = "doc-1") -> ProcessedDocument:
 @pytest.fixture(autouse=True)
 def _writer_type(monkeypatch: pytest.MonkeyPatch) -> None:
     # The step checks that its resource really is a writer, so the fake has to
-    # be what it checks against — the same substitution the persist tests make.
+    # be what it checks against. The persist tests make the same substitution.
     from nlght.adapters.outbound.workflow.steps.knowledge import extract as extract_module
 
     monkeypatch.setattr(extract_module, "KnowledgeIndexWriterTool", _Writer)
@@ -189,7 +180,7 @@ async def _run(step: KnowledgeExtractStep, llm: _Llm, text: str, document_id: st
 _TEXT = "Spring requires Java 17."
 
 
-def _acquired(content: str, source_form: str | None, external_id: str = "wiki:1"):  # noqa: ANN201
+def _acquired(content: str, source_form: str | None, external_id: str = "wiki:1"):
     from nlght.core.ingestion import SourceDocument
 
     return SourceDocument(
@@ -201,8 +192,15 @@ def _acquired(content: str, source_form: str | None, external_id: str = "wiki:1"
     )
 
 
-async def _run_acquired(step, llm, *, content: str, source_form: str | None):  # noqa: ANN001, ANN201
-    """A run where the snapshot is present, so a source form can exist."""
+async def _run_acquired(step, llm, *, content: str, source_form: str | None):
+    """A run where the snapshot is present, so a source form can exist.
+
+    Args:
+        step (Any): Step under test.
+        llm (Any): Model stub supplying extraction output.
+        content (str): Content supplied to the projection or step.
+        source_form (str | None): Source representation used for the acquired item.
+    """
     from nlght.core.ingestion import SourceSnapshot
 
     ctx = _ctx(llm)
@@ -218,13 +216,7 @@ async def _run_acquired(step, llm, *, content: str, source_form: str | None):  #
 
 
 async def test_markup_that_changed_is_re_extracted_even_when_the_text_did_not() -> None:
-    """The gap the three representations opened, and why the skip had to follow.
-
-    A heading given an `id` changes the markup and not one word of the text. The
-    skip hashed the text, so the document was skipped and the new anchor arrived
-    only with the next real edit — and slot identity resolves against exactly
-    those anchors. Hashing what the *parser* is handed closes it.
-    """
+    """Reextract markup changes that alter parser anchors without changing text."""
     repo = _Repo()
     await _run_acquired(
         _step(repo), _Llm(), content=_TEXT, source_form=f"<h1>Stack</h1><p>{_TEXT}</p>"
@@ -270,10 +262,6 @@ async def test_a_document_without_a_source_form_hashes_its_text_as_before() -> N
     assert plain.recorded[0].content_hash == recorded
 
 
-# ---------------------------------------------------------------------------
-# The first run, and the record it leaves
-# ---------------------------------------------------------------------------
-
 async def test_a_document_never_extracted_is_extracted_and_recorded() -> None:
     repo, llm = _Repo(), _Llm()
 
@@ -286,12 +274,7 @@ async def test_a_document_never_extracted_is_extracted_and_recorded() -> None:
 
 
 async def test_the_second_run_over_an_unchanged_document_does_not_ask_the_model() -> None:
-    """The acceptance metric of the design, at the step that costs the most.
-
-    Two consecutive runs over an unchanged source must change nothing. The
-    strongest way to hold that is not to run the extraction at all — a model
-    that is never asked cannot phrase an answer differently.
-    """
+    """Skip model extraction on a second run over unchanged input."""
     repo = _Repo()
     first_llm = _Llm()
     await _run(_step(repo), first_llm, _TEXT)
@@ -305,8 +288,8 @@ async def test_the_second_run_over_an_unchanged_document_does_not_ask_the_model(
 
 
 async def test_the_skip_verdict_is_distinct_from_finding_nothing() -> None:
-    # `empty` means the model read the text and had nothing to say; `unchanged`
-    # means it was not asked. A workflow routes those differently — one is worth
+    # `empty` means the model read the text and had nothing to say. `unchanged`
+    # means it was not asked. A workflow routes those differently: one is worth
     # an alert, the other is the normal case.
     repo = _Repo()
     await _run(_step(repo), _Llm(), _TEXT)
@@ -316,10 +299,6 @@ async def test_the_skip_verdict_is_distinct_from_finding_nothing() -> None:
     assert result.verdict == UNCHANGED
     assert result.verdict != "empty"
 
-
-# ---------------------------------------------------------------------------
-# Both halves of the key
-# ---------------------------------------------------------------------------
 
 async def test_an_edited_document_is_extracted_again() -> None:
     repo = _Repo()
@@ -333,13 +312,7 @@ async def test_an_edited_document_is_extracted_again() -> None:
 
 
 async def test_a_changed_model_re_extracts_an_unchanged_document() -> None:
-    """The half a content-only key would get wrong, and the dangerous one.
-
-    Nothing about the document changed, so a hash of its text still matches.
-    But the model did — and a model change is meant to be a deliberate versioned
-    event whose consequence actually happens, rather than one that silently
-    leaves the corpus as the old model wrote it.
-    """
+    """Reextract unchanged content when the configured model changes."""
     repo = _Repo()
     await _run(_step(repo, model="llama3"), _Llm(), _TEXT)
 
@@ -362,13 +335,7 @@ async def test_a_changed_confidence_floor_re_extracts_an_unchanged_document() ->
 
 
 async def test_a_changed_segmentation_re_extracts_an_unchanged_document() -> None:
-    """The part that changes what the model sees without changing the text.
-
-    `split_into_units` decides where a document is cut, and the model answers a
-    different question about a differently cut block. The bytes are identical,
-    so a content hash cannot see it — `SEGMENTATION_VERSION` is what makes a
-    change to the splitter re-extract the corpus instead of skipping all of it.
-    """
+    """Reextract unchanged content when the segmentation version changes."""
     import nlght.core.knowledge.extraction as extraction_module
 
     repo = _Repo()
@@ -376,17 +343,13 @@ async def test_a_changed_segmentation_re_extracts_an_unchanged_document() -> Non
 
     llm = _Llm()
     with pytest.MonkeyPatch.context() as patch:
-        # Patched where the value lives. The step does not name it at all — the
+        # Patch the version where it lives. The step does not name it because the
         # core folds it in, which is the point: a factor the step cannot forget.
         patch.setattr(extraction_module, "SEGMENTATION_VERSION", "2")
         await _run(_step(repo), llm, _TEXT)
 
     assert llm.calls == 1
 
-
-# ---------------------------------------------------------------------------
-# The safe directions
-# ---------------------------------------------------------------------------
 
 async def test_without_a_writer_nothing_is_skipped() -> None:
     # No writer means no knowledge database, so there is nowhere to record what
@@ -434,12 +397,7 @@ async def test_one_document_being_current_does_not_skip_another() -> None:
 
 @pytest.mark.parametrize("batch_size", [1, 2])
 async def test_nothing_is_recorded_until_every_unit_has_been_read(batch_size: int) -> None:
-    """Recording per batch would mark a document extracted while half of it was not.
-
-    A crash between batches would then skip the remainder for good — the run
-    after it sees a current record and asks nothing. This is the ordering
-    `ingestion.write` already keeps for the index: do the work, then record it.
-    """
+    """Record extraction state only after every document unit succeeds."""
     repo, llm = _Repo(), _Llm()
     step = _step(repo, unit_batch_size=batch_size)
     ctx = _ctx(llm)
@@ -472,20 +430,10 @@ async def test_the_extraction_version_is_carried_forward_for_persistence() -> No
 
 
 async def test_a_fully_skipped_run_still_leaves_the_chain_something_to_read() -> None:
-    """The rerun failed here, and the fault was the early return.
+    """Write an empty extraction result when all documents are skipped.
 
-    Every step after extraction reads `knowledge.extracted` and refuses to run
-    without it — that guard is right, it catches a workflow wired without an
-    extract step. But the skip returned before establishing the key, so a second
-    run over an unchanged corpus reached `knowledge.canonicalize` with nothing
-    in the context and the whole run failed on a configuration error that was
-    not one.
-
-    `empty` never had the problem: the model was asked, found nothing, and the
-    step still wrote an empty tuple. The skip has to leave the same trace — the
-    contract is that this step establishes the key, whether or not it did any
-    work.
-    """
+    Downstream steps still require the result key to distinguish an empty run
+    from a missing extraction step."""
     repo = _Repo()
     await _run(_step(repo), _Llm(), _TEXT)
 
@@ -519,7 +467,7 @@ async def test_the_refinement_chain_runs_over_a_fully_skipped_run() -> None:
 
 async def test_a_document_with_no_units_also_leaves_the_key_behind() -> None:
     # The same trap through the other early return: an empty page, or one whose
-    # text the classifier could not read, produces no units — and the chain
+    # text the classifier could not read, produces no units, and the chain
     # behind it still expects `knowledge.extracted` to exist.
     from nlght.adapters.outbound.workflow.registry import step_registry
 
@@ -536,18 +484,7 @@ async def test_a_document_with_no_units_also_leaves_the_key_behind() -> None:
 
 @pytest.mark.parametrize("parser", ["knowledge.parse", "knowledge.parse_auto"])
 async def test_every_parser_gives_an_assertion_a_document_and_a_revision(parser: str) -> None:
-    """The gap that produced a corpus with no lineage at all.
-
-    `document_id` was added to `knowledge.parse` and the pipeline uses
-    `knowledge.parse_auto`, which set the document but not its revision — so
-    every candidate reached the graph and none reached the lineage. Seventeen
-    assertions, zero history, and the counter said only that something was
-    missing.
-
-    Parametrised over both parsers because the fault was exactly that the two
-    disagreed about what a unit carries. Any further parser has to pass this
-    too.
-    """
+    """Carry document and processing revision IDs through every parser."""
     from nlght.adapters.outbound.workflow.registry import step_registry
     from nlght.adapters.outbound.workflow.steps.knowledge.persist import KnowledgePersistStep
 
@@ -591,7 +528,7 @@ async def test_the_funnel_says_where_candidates_were_lost() -> None:
     # One element that is not an object, and one whose content cannot form a fact.
     assert tally["malformed"] == 2
     assert tally["unknown_kind"] == 1
-    # Two survive parsing; the confidence floor is applied by the caller, so it
+    # Two survive parsing. The confidence floor is applied by the caller, so it
     # is not counted here.
     assert len(parsed) == 2
 

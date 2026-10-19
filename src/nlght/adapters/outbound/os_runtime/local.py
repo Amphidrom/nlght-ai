@@ -24,7 +24,7 @@ class LocalOsRuntime(OsRuntimeFactory, OsRuntime):
     Uses ``asyncio.create_subprocess_exec`` for process execution and
     ``asyncio.to_thread`` for blocking filesystem operations.
 
-    As a factory, ``bind()`` and ``create()`` always return ``self`` — the
+    As a factory, ``bind()`` and ``create()`` always return ``self``. The
     local runtime is not isolated per invocation. Intended for local
     development, tests, and deployments without containers.
 
@@ -61,7 +61,7 @@ class LocalOsRuntime(OsRuntimeFactory, OsRuntime):
 
         if _WINDOWS:
             # On Windows, built-ins like `date`, `echo`, `dir` are cmd.exe
-            # commands, not executables — run via shell so they are found.
+            # commands rather than executables. Run them through a shell.
             proc = await asyncio.create_subprocess_shell(
                 subprocess.list2cmdline(command),
                 stdout=asyncio.subprocess.PIPE,
@@ -119,10 +119,15 @@ class LocalOsRuntime(OsRuntimeFactory, OsRuntime):
         return ("powershell", "-Command") if _WINDOWS else ("sh", "-c")
 
     def security_capabilities(self) -> ExecutionCapabilities:
-        """Local execution is host execution; no weaker claim is supportable."""
+        """Report that local execution has host-level access.
+
+        Returns:
+            ExecutionCapabilities: Unconfined filesystem, network, process,
+            and secret capabilities.
+        """
         return ExecutionCapabilities.unconfined()
 
-    # ── OsRuntimeFactory — shared instance, bind/create return self ──────────
+    # Share one runtime instance across factory bindings.
 
     def bind(self, cid: str) -> LocalOsRuntime:
         return self

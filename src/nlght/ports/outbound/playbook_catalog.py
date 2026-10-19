@@ -17,8 +17,8 @@ class PlaybookCatalog(Protocol):
 
     Built once per workflow invocation by the ``PlaybookCatalogBuilder``
     and then stored immutably in ``WorkflowStepContext.playbooks``. Steps
-    call ``to_markdown()`` and place the result into the system prompt —
-    they do not select playbooks manually.
+    may render its content as untrusted model context. The catalog grants no
+    instruction authority to playbook text.
     """
 
     def definitions(self) -> dict[str, PlaybookDefinition]: ...
@@ -30,18 +30,29 @@ class PlaybookCatalog(Protocol):
     def names(self) -> list[str]: ...
 
     def to_markdown(self) -> str:
-        """All active playbooks as a single coherent Markdown document."""
+        """Render all active playbooks as one Markdown document.
+
+        Returns:
+            str: Combined Markdown text.
+        """
         ...
 
     def playbook_markdown(self, name: str) -> str:
-        """Markdown for a single playbook. Empty string if not present."""
+        """Render one active playbook as Markdown.
+
+        Args:
+            name (str): Playbook name.
+
+        Returns:
+            str: Markdown text, or empty text for an unknown name.
+        """
         ...
 
     def to_contract(self) -> str:
-        """Compact contract listing — one entry per playbook with activation criteria.
+        """Render playbook activation contracts for model context.
 
-        Used by ``SystemPromptBuilder`` for the "Playbook Routing" section
-        (when no playbook is active yet). Empty string if no playbooks are available.
+        Returns:
+            str: Compact contract text, empty without available playbooks.
         """
         ...
 
@@ -54,10 +65,10 @@ class PlaybookCatalog(Protocol):
 class PlaybookCatalogBuilder(Protocol):
     """Builds a request-scoped PlaybookCatalog.
 
-    No built-in implementation ships by default — this is a pure
-    extension point. Wire a custom implementation via
-    StepMachineWorkflowExecutor(playbook_catalog_builder=...). The
-    executor depends on this Protocol, not on any concrete builder class.
+    The built-in adapter constructs this catalog when playbooks are configured.
+    A deployment can inject a custom implementation through
+    StepMachineWorkflowExecutor(playbook_catalog_builder=...). The executor
+    depends on this Protocol.
     """
 
     async def build(

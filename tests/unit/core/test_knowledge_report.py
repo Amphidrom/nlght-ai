@@ -1,22 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Holding a rerun against the run before it.
+"""Specify movement reporting between successive knowledge runs.
 
-The acceptance metric is a comparison, not a number, and for a long time it was
-the wrong comparison. It could say *that* something moved and never *where*, so a
-run over a corpus somebody had deliberately edited reported "a variant gained a
-revision over an unchanged source" — the design working, printed as a failure.
-Read that often enough and the line stops being read at all.
-
-So movement is now attributed. Each claim carries the document and slot it stands
-in, each document the revision it was last seen at, and a document whose revision
-moved is one somebody edited. Nothing has to be told which those were — two
-pictures say it — and that is what makes the two gates separable:
-
-    unchanged source   nothing may move but the evidence
-    changed source     movement inside edited documents is the point of the run;
-                       movement anywhere else is still drift
+Each claim is attributed to a document and slot. A change in an untouched
+source is drift, while a change inside an edited source can be expected. The
+report keeps these outcomes distinct from missing legacy observations.
 """
 
 from __future__ import annotations
@@ -68,10 +57,6 @@ def _report(
     return LineageReport.from_dict(values)
 
 
-# ---------------------------------------------------------------------------
-# Nothing was edited
-# ---------------------------------------------------------------------------
-
 def test_a_rerun_that_changed_nothing_is_unchanged() -> None:
     result = compare(_report(_state()), _report(_state()))
 
@@ -95,13 +80,7 @@ def test_more_evidence_is_the_run_happening_not_the_corpus_moving() -> None:
 
 
 def test_a_revision_over_an_unedited_document_is_drift() -> None:
-    """The failure the whole design exists to remove.
-
-    No document revision moved, so nobody edited anything — and a claim gained a
-    second state, which means the model was asked again and answered
-    differently. Under incremental update that is a retraction and a re-review
-    of something nobody touched.
-    """
+    """Flag a new revision as drift when its document was not edited."""
     result = compare(_report(_state()), _report(_state(revision=2)))
 
     assert not result.unchanged
@@ -116,10 +95,6 @@ def test_a_new_assertion_in_an_unedited_document_is_drift() -> None:
     assert not result.unchanged
     assert [move.kind for move in result.movements] == ["assertion added"]
 
-
-# ---------------------------------------------------------------------------
-# Something was edited
-# ---------------------------------------------------------------------------
 
 def test_a_revision_inside_an_edited_document_is_expected() -> None:
     """The line that used to read as a failure and is the result being sought.
@@ -159,8 +134,8 @@ def test_an_edit_in_one_document_does_not_excuse_movement_in_another() -> None:
 
 
 def test_a_spent_approval_is_named_even_where_it_was_expected() -> None:
-    # On an edited document a lost approval is the design working — a changed
-    # rule must be looked at again — but somebody still has to act on it, so it
+    # On an edited document a lost approval is expected because a changed
+    # rule must be looked at again, but somebody still has to act on it, so it
     # is never silent.
     result = compare(
         _report(_state(document=DOC_B)),
@@ -195,11 +170,7 @@ def test_a_retirement_in_an_unedited_document_is_drift() -> None:
 
 
 def test_an_assertion_that_simply_disappeared_is_always_a_violation() -> None:
-    """Rows are retired here, never deleted.
-
-    One that is merely gone was deleted by something, and nothing in this design
-    deletes — so it is a violation whatever else the run did.
-    """
+    """Flag disappearance of an assertion that was not retired."""
     result = compare(
         _report(_state(document=DOC_B)),
         _report(documents={DOC_A: "rev-1", DOC_B: "rev-2"}),
@@ -220,10 +191,6 @@ def test_a_claim_with_no_document_is_never_excused() -> None:
     assert not result.unchanged
     assert result.movements[0].expected is False
 
-
-# ---------------------------------------------------------------------------
-# What the counts still answer
-# ---------------------------------------------------------------------------
 
 def test_more_graph_rows_the_lineage_cannot_reach_is_a_violation() -> None:
     result = compare(_report(_state()), _report(_state(), graph_without_lineage=9))
@@ -289,23 +256,9 @@ def test_the_round_trip_through_json_keeps_the_provenance() -> None:
     assert restored.documents == original.documents
 
 
-# ---------------------------------------------------------------------------
-# The document is the coarse gate; the section is the one that knows
-# ---------------------------------------------------------------------------
-
-def test_a_movement_in_a_section_nobody_touched_is_drift(  # noqa: D103
+def test_a_movement_in_a_section_nobody_touched_is_drift(
 ) -> None:
-    """The gap the document gate leaves, and the reason for the finer one.
-
-    Edit one paragraph and every claim in the file becomes "expected" — including
-    the ones in sections nobody went near. That is what waved through three
-    retirements and three additions in a live run: they were in an edited
-    document, so they were allowed, and nothing looked closer.
-
-    The corpus already knows better. Each slot records the parser input it was
-    read with, and a section whose input did not move explains nothing about a
-    claim that did.
-    """
+    """Detect drift in an untouched slot within an edited document."""
     before = _report(
         _state(variant="var-1"),
         documents={DOC_A: "rev-1"},
@@ -391,22 +344,8 @@ def test_an_unobserved_slot_in_an_unedited_document_is_still_drift() -> None:
     assert move.because == "document_unchanged"
 
 
-# ---------------------------------------------------------------------------
-# Classification drift: its own channel, and nothing is merged
-# ---------------------------------------------------------------------------
-
 def test_a_kind_exchanged_in_one_slot_is_reported_separately() -> None:
-    """What the slot gate cannot catch, from the run that showed it.
-
-    Three rules were retired and a decision and two facts arrived — in a slot
-    whose text really had been edited, so every one of the six read as expected
-    and the report said nothing more. `kind` is part of the identity namespace,
-    so the model calling one sentence a `rule` and then a `decision` retires the
-    claim and creates another whether or not anything moved.
-
-    Reported, and only reported. Whether the two are one claim is an equivalence
-    judgement over whole propositions, and this has neither.
-    """
+    """Report a claim kind change within an edited slot."""
     before = _report(
         _state(variant="var-1", kind="rule"),
         documents={DOC_A: "rev-1"},
@@ -438,7 +377,7 @@ def test_a_kind_exchanged_in_one_slot_is_reported_separately() -> None:
 
 
 def test_the_same_kind_leaving_and_arriving_is_not_classification_drift() -> None:
-    # A claim replaced by another of its own kind is ordinary movement; only an
+    # A claim replaced by another of its own kind is ordinary movement. Only an
     # exchange of kinds is the signal.
     before = _report(
         _state(variant="var-1", kind="rule"),
@@ -458,19 +397,8 @@ def test_the_same_kind_leaving_and_arriving_is_not_classification_drift() -> Non
     assert result.classification_drift == ()
 
 
-# ---------------------------------------------------------------------------
-# Historical debt is not a contract breach
-# ---------------------------------------------------------------------------
-
 def test_a_run_that_preserves_old_gaps_is_not_a_violation() -> None:
-    """The measurement that would fail a perfect run if it were an equality.
-
-    Revisions written before every kind had a proposition keep their `NULL`
-    deliberately — a backfill from the payload would be a guess wearing the
-    clothes of an observation. So a correct run leaves that number exactly where
-    it was, and comparing it against zero would report debt the design is
-    choosing to preserve as a fresh breach.
-    """
+    """Allow unchanged legacy proposition gaps across runs."""
     before = _report(_state(), revisions_without_proposition=19)
     after = _report(_state(), revisions_without_proposition=19)
 
@@ -479,7 +407,7 @@ def test_a_run_that_preserves_old_gaps_is_not_a_violation() -> None:
 
 def test_a_new_revision_with_no_proposition_is_a_violation() -> None:
     # Growth is the breach. The repository refuses to write one, so more of them
-    # means the refusal was bypassed — which is worth failing a run over.
+    # means the refusal was bypassed, which is worth failing a run over.
     before = _report(_state(), revisions_without_proposition=19)
     after = _report(_state(), revisions_without_proposition=20)
 
@@ -509,23 +437,16 @@ def test_unreferenced_propositions_are_reported_and_not_a_violation() -> None:
     assert compare(before, after).unchanged
 
 
-# ---------------------------------------------------------------------------
 # Presence before content
 #
 # A fingerprint may only be compared where the section was read on both sides. A
 # deleted section is never read again and keeps its last reading forever, so it
-# compares equal to itself — and a live run reported a removed section as the
+# compares equal to itself, and a live run reported a removed section as the
 # corpus drifting for exactly that reason, on the one document written to
 # demonstrate a removed section.
-# ---------------------------------------------------------------------------
 
 def test_a_section_that_was_removed_is_not_a_section_that_stood_still() -> None:
-    """The live failure, in miniature.
-
-    The slot's stored reading is identical on both sides — because nothing read
-    it again. Comparing those two equal fingerprints said "the section was read
-    and had not moved", and the retirement of the claim it held became drift.
-    """
+    """Distinguish a removed section from an unchanged section."""
     before = _report(
         _state(variant="var-1"),
         documents={DOC_A: "rev-1"},
@@ -572,13 +493,7 @@ def test_a_section_that_arrived_is_named_as_one() -> None:
 
 
 def test_a_reading_from_neither_revision_says_nothing_and_the_document_answers() -> None:
-    """The legacy case, kept and narrowed.
-
-    A reading older than both pictures cannot speak about either, so the
-    document decides — as it did before readings existed. What no longer happens
-    is treating a slot that was deliberately not read again as one that stood
-    still.
-    """
+    """Fall back to document revision when slot readings predate both runs."""
     before = _report(
         _state(variant="var-1"),
         documents={DOC_A: "rev-5"},
@@ -611,18 +526,8 @@ def test_a_report_with_no_readings_at_all_still_falls_back() -> None:
     assert move.gate == "document_fallback"
 
 
-# ---------------------------------------------------------------------------
-# What the headline is allowed to say
-# ---------------------------------------------------------------------------
-
 def test_an_accepted_run_over_an_edited_source_does_not_claim_nothing_moved() -> None:
-    """`unchanged` is a verdict, and it used to be printed as a description.
-
-    Every acceptable comparison was headed "corpus unchanged", so a report
-    listing a revision, a retirement and an addition announced that nothing had
-    moved directly above them — the exact misreading `expected_change` and `gate`
-    were added to prevent.
-    """
+    """Describe accepted movement without calling the corpus unchanged."""
     before = _report(_state())
     after = _report(_state(revision=2), documents={DOC_A: "rev-2", DOC_B: "rev-1"})
 

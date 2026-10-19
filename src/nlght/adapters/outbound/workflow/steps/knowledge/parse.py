@@ -22,7 +22,7 @@ EMPTY = "empty"
 class KnowledgeParseStep(StepBase):
     """Splits processed documents into knowledge units.
 
-    A unit is one coherent block of prose — the exact text handed to the
+    A unit is one coherent block of prose, the exact text handed to the
     extraction model. Splitting on blank lines and ALL-CAPS headings is the
     prototype's rule: a model reasons better over one block than over a whole
     document, and blank lines survive plain text, Markdown, and converted PDFs
@@ -36,6 +36,11 @@ class KnowledgeParseStep(StepBase):
     """
 
     TYPE = "knowledge.parse"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        EMPTY = EMPTY
 
     @classmethod
     def options(cls) -> list[StepOption]:
@@ -71,4 +76,4 @@ class KnowledgeParseStep(StepBase):
 
         ctx.metadata["knowledge.units"] = tuple(units)
         logger.info("[%s] knowledge.parse.done | units=%d", ctx.correlation_id, len(units))
-        return StepResult(ctx=ctx, verdict="DEFAULT" if units else EMPTY)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if units else self.Verdict.EMPTY)

@@ -196,22 +196,7 @@ async def test_changed_chunking_changes_the_processing_revision(tmp_path: Path) 
 async def test_a_renamed_file_gets_its_own_revision_and_its_own_chunk_ids(
     tmp_path: Path,
 ) -> None:
-    """Same bytes, new path — and nothing the two documents write may collide.
-
-    A rename is the one case where two documents hold identical content, so it
-    is the case an identity derived from content alone would get wrong. A
-    chunk's point id in Qdrant is `uuid5` over its chunk id, and that chunk id
-    is `stable_digest(processing_revision_id, position, content)`, so two documents sharing
-    a revision would write to each other's points. The tombstone that follows a
-    rename would then delete the file it had just written.
-
-    The path reaches that digest twice over: `document_id` is
-    `stable_digest(source, external_id)` at the source, and the processing
-    revision folds in `document.path` again. Either alone is enough — verified
-    by removing each and watching this still pass, then removing both and
-    watching it fail. This asserts the property rather than either mechanism, so
-    it survives one of them being refactored away and still catches losing both.
-    """
+    """Assign separate revision and chunk IDs to a renamed path."""
     async def processed(pattern: str) -> tuple[str, tuple[str, ...]]:
         ctx = _ctx()
         await IngestionSourceStep(
@@ -293,11 +278,6 @@ async def test_an_incomplete_snapshot_is_routable_rather_than_fatal(tmp_path: Pa
 
     assert result.verdict == INCOMPLETE
     assert result.ctx.metadata["ingestion.snapshot"].complete is False
-
-
-# ---------------------------------------------------------------------------
-# ingestion.embed
-# ---------------------------------------------------------------------------
 
 
 class _Embedding:
@@ -403,11 +383,6 @@ async def test_nothing_to_embed_reports_skipped() -> None:
     assert result.verdict == SKIPPED
 
 
-# ---------------------------------------------------------------------------
-# runtime dependencies reach steps through the loader
-# ---------------------------------------------------------------------------
-
-
 def test_a_bound_loader_injects_runtime_dependencies() -> None:
     embedding = _Embedding()
     bound = step_registry.bind(embedding_client=embedding)
@@ -457,11 +432,6 @@ def test_a_step_that_declares_no_dependencies_ignores_them() -> None:
     )
 
     assert isinstance(step, IngestionSourceStep)
-
-
-# ---------------------------------------------------------------------------
-# ingestion.write
-# ---------------------------------------------------------------------------
 
 
 class _Writer:
@@ -601,7 +571,7 @@ async def test_a_changed_enricher_revision_forces_a_rewrite(tmp_path: Path) -> N
     writer, repo = _Writer(), _IngestionRepo()
     await _run_until_not_more(_write_step(writer, repo), ctx)
 
-    # Same content, different processing revision — the reindex rule must fire.
+    # A changed processing revision must trigger reindexing even if content matches.
     for key, state in list(repo.state.items()):
         repo.state[key] = IndexState(
             document_id=state.document_id,
@@ -688,7 +658,7 @@ async def test_collections_are_prepared_before_the_first_write(tmp_path: Path) -
 
     await _run_until_not_more(_write_step(writer, repo), ctx)
 
-    # Writing into a missing collection fails; the bootstrap must run first.
+    # Writing into a missing collection fails. The bootstrap must run first.
     assert writer.prepared_dimension == 3
 
 
@@ -782,15 +752,7 @@ async def test_a_removal_alone_is_still_work_done(tmp_path: Path) -> None:
 async def test_a_rename_writes_the_new_document_and_removes_the_old_in_one_run(
     tmp_path: Path,
 ) -> None:
-    """The one run that both writes and deletes, and the two must not interfere.
-
-    Every other removal test tombstones documents that this run never touched.
-    A rename is different: the same run writes the arrival and deletes the
-    departure, and the deletion happens after the write. If the two documents
-    shared any id — which they would if identity came from content — the delete
-    would take the write with it and the file would vanish from the index while
-    the run reported success.
-    """
+    """Write the new path and tombstone the old path in one ingestion run."""
     async def acquire(pattern: str) -> WorkflowStepContext:
         ctx = _ctx()
         await IngestionSourceStep(
@@ -895,7 +857,7 @@ async def test_an_unchanged_document_on_the_current_generation_is_skipped(tmp_pa
 
 async def test_a_document_with_text_and_no_chunks_is_refused_not_recorded(tmp_path: Path) -> None:
     # It would be written lexically, be absent from the vector index, and then
-    # be recorded as fully indexed — a divergence nothing would ever repair.
+    # be recorded as fully indexed. That divergence would remain undetected.
     ctx = await _processed(tmp_path)
     await _run_until_not_more(IngestionEmbedStep(config={}, embedding_client=_Embedding()), ctx)
     # An embedded run whose chunks were lost for one document.
@@ -914,14 +876,7 @@ async def test_a_document_with_text_and_no_chunks_is_refused_not_recorded(tmp_pa
 async def test_a_changed_projection_rewrites_a_document_the_hashes_call_unchanged(
     tmp_path: Path,
 ) -> None:
-    """The reindex case none of the older three values could express.
-
-    The source has not changed, the processing has not changed, and the index
-    was not recreated — so `content_hash`, `enricher_hash` and
-    `index_generation` all still agree. Only the projection moved. Before the
-    fingerprint existed this document was skipped, the run reported success, and
-    the collection kept vectors from a model the queries no longer used.
-    """
+    """Rewrite indexed documents when projection changes without source changes."""
     ctx = await _processed(tmp_path)
     writer, repo = _Writer(), _IngestionRepo()
     await _run_until_not_more(_write_step(writer, repo), ctx)

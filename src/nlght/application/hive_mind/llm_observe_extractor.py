@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Backward-compat re-export — use entity_extractor.EntityExtractor directly."""
+"""Preserve the former LLMObserveExtractor import path."""
 
 from nlght.application.hive_mind.entity_extractor import EntityExtractor as LLMObserveExtractor
 

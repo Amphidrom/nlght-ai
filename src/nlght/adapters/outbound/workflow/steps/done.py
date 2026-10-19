@@ -9,7 +9,7 @@ from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
 class DoneStep(StepBase):
     """Terminal step that signals successful workflow completion.
 
-    Emits nothing — it is a structural terminal marker only.
+    Emits nothing because it is a structural terminal marker.
     Any output was already emitted by preceding steps.
     """
 

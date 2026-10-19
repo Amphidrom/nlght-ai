@@ -1,16 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Every migration must render without a database.
+"""Render every migration to SQL without a database connection.
 
-`nlght-ai migrate upgrade head --sql` is how an operator who cannot let the
-application touch their database gets a script to hand a DBA. Alembic runs the
-migrations with no connection: `op.get_bind().execute(...)` returns None rather
-than a result, so any migration that inspects rows before emitting DDL raises
-`AttributeError` — and the offline path is the only place that shows it.
-
-That happened: 0007 and 0008 both pre-flight a query, and the release found out
-in the wheel smoke test, after the whole gate had passed.
+This catches migrations that require query results during Alembic's offline
+mode, which operators use to review SQL before applying it.
 """
 
 from __future__ import annotations
@@ -32,7 +26,7 @@ integrations:
 def _render_offline_sql(tmp_path: Path) -> str:
     config = tmp_path / "platform.yaml"
     config.write_text(_CONFIG)
-    # The console script is `nlght.main:cli`; importing the module as __main__
+    # The console script is `nlght.main:cli`. Importing the module as __main__
     # would start the server instead. Driven in a subprocess because offline
     # rendering is what the operator actually runs, argv and all.
     completed = subprocess.run(
@@ -48,7 +42,7 @@ def _render_offline_sql(tmp_path: Path) -> str:
         check=False,
     )
     assert completed.returncode == 0, (
-        "offline migration SQL generation failed — a migration reads the "
+        "offline migration SQL generation failed. A migration reads the "
         f"database before emitting DDL:\n{completed.stderr[-3000:]}"
     )
     return completed.stdout

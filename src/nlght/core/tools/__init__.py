@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Core tool abstractions and provider-neutral action-security contracts."""
+"""Core tool types and provider-neutral action contracts."""
 
 from nlght.core.tools.action import (
     ActionDecision,
@@ -9,6 +9,7 @@ from nlght.core.tools.action import (
     ActionDecisionResult,
     ActionExecutionContext,
     ActionResolutionContext,
+    ActionReview,
     ActionSemanticsResolver,
     ApprovalDecision,
     ApprovalResult,
@@ -20,7 +21,6 @@ from nlght.core.tools.action import (
     ExecutionClass,
     FilesystemCapability,
     NetworkCapability,
-    PendingAction,
     ProcessCapability,
     ScopeClass,
     SecretsCapability,
@@ -48,7 +48,7 @@ __all__ = [
     "ExecutionClass",
     "FilesystemCapability",
     "NetworkCapability",
-    "PendingAction",
+    "ActionReview",
     "ProcessCapability",
     "ScopeClass",
     "SecretsCapability",

@@ -1,12 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Who may open a session, written around the attack rather than the happy path.
+"""Enforce session ownership across every access route.
 
-Knowing a `session_key` used to be the whole of the authorization. These tests
-are mostly one shape: somebody who knows a key and is not its owner gets nothing,
-by every route — including the route through a factory that keeps its sessions in
-memory and never consults a backend.
+Knowing a session key alone must not grant access to its state or workspace.
 """
 
 from __future__ import annotations
@@ -22,13 +19,12 @@ ALICE = PrincipalRef("alice")
 BOB = PrincipalRef("bob")
 
 
-def _access(**kwargs) -> SessionAccess:  # noqa: ANN003
+def _access(**kwargs) -> SessionAccess:
     kwargs.setdefault("enforced", True)
     return SessionAccess(SimpleStoreCoordinatorFactory(), **kwargs)
 
 
 # The owner, and everybody else
-# ---------------------------------------------------------------------------
 
 def test_creating_a_session_makes_the_caller_its_owner() -> None:
     access = _access()
@@ -56,13 +52,7 @@ def test_somebody_else_who_knows_the_key_is_refused() -> None:
 
 
 def test_a_cached_session_is_still_authorized() -> None:
-    """The path a check at the storage layer would miss entirely.
-
-    `SimpleStoreCoordinatorFactory` keeps sessions in memory and returns a cache
-    hit without touching any backend. A check placed at `SessionBackend.load()`
-    would never run for the second request — which is exactly the request
-    somebody with a stolen key makes.
-    """
+    """Enforce ownership even when a session factory returns a cache hit."""
     access = _access()
     access.open("s1", ALICE)
     assert access.open("s1", ALICE) is not None, "warm in the cache"
@@ -95,15 +85,9 @@ def test_saving_is_authorized_on_its_own() -> None:
 
 
 # What a refusal is allowed to reveal
-# ---------------------------------------------------------------------------
 
 def test_a_refusal_names_neither_the_owner_nor_the_session_contents() -> None:
-    """Otherwise the refusal itself is the disclosure.
-
-    "belongs to alice" tells a stranger that alice exists, that she uses this
-    system, and which key of hers is live — three things the caller was not
-    entitled to and did not have a moment earlier.
-    """
+    """Avoid disclosing owner or session state in an authorization refusal."""
     access = _access()
     access.open("s1", ALICE)
 
@@ -139,26 +123,45 @@ def test_exists_answers_about_the_caller_and_not_about_the_key() -> None:
 
 
 # Sessions that predate ownership
-# ---------------------------------------------------------------------------
 
 def test_an_unowned_session_is_not_adopted_by_whoever_asks_next() -> None:
-    """First-caller-wins would be an account takeover performed by a migration.
-
-    A session written before ownership existed has no owner. That is not the
-    same as being unclaimed, and no ordinary request may become its owner.
-    """
+    """Deny adoption of a legacy session with the same detail for each caller."""
     factory = SimpleStoreCoordinatorFactory()
     factory.get_or_create("legacy")  # written the old way, with no owner recorded
     access = SessionAccess(factory, enforced=True)
 
-    with pytest.raises(SessionAccessDeniedError, match="no recorded owner"):
+    with pytest.raises(SessionAccessDeniedError) as alice_denied:
         access.open("legacy", ALICE)
-    with pytest.raises(SessionAccessDeniedError, match="no recorded owner"):
+    with pytest.raises(SessionAccessDeniedError) as bob_denied:
         access.open("legacy", BOB)
+    assert str(alice_denied.value) == str(bob_denied.value)
+    assert str(alice_denied.value) == "no session 'legacy' for this principal"
+
+    owned_access = SessionAccess(SimpleStoreCoordinatorFactory(), enforced=True)
+    owned_access.open("legacy", ALICE)
+    with pytest.raises(SessionAccessDeniedError) as foreign_denied:
+        owned_access.open("legacy", BOB)
+    assert str(bob_denied.value) == str(foreign_denied.value)
+
+
+def test_save_requires_a_previously_claimed_owner() -> None:
+    """Deny saves to unknown and ownerless sessions without creating ownership."""
+    factory = SimpleStoreCoordinatorFactory()
+    legacy = factory.get_or_create("legacy")
+    access = SessionAccess(factory, enforced=True)
+
+    with pytest.raises(SessionAccessDeniedError) as unknown_denied:
+        access.save("unknown", legacy, ALICE)
+    with pytest.raises(SessionAccessDeniedError) as legacy_denied:
+        access.save("legacy", legacy, ALICE)
+
+    assert str(unknown_denied.value) == "no session 'unknown' for this principal"
+    assert str(legacy_denied.value) == "no session 'legacy' for this principal"
+    assert factory.exists("unknown") is False
+    assert factory.owner_of("legacy") is None
 
 
 # A deployment that establishes no identity
-# ---------------------------------------------------------------------------
 
 def test_without_identity_configured_the_platform_behaves_as_before() -> None:
     """Enforcement is a property of the configuration, never of a request.
@@ -175,7 +178,7 @@ def test_without_identity_configured_the_platform_behaves_as_before() -> None:
 
 def test_an_ephemeral_session_belongs_to_nobody_and_needs_no_owner() -> None:
     # No session key was asked for, so there is nothing to own. It is never
-    # persisted, so nobody reaches it again — including its caller.
+    # persisted, so neither the caller nor another principal can reach it again.
     access = _access()
 
     assert access.ephemeral("cid-1") is not None

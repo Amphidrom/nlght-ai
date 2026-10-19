@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -40,7 +41,8 @@ class _Service:
                 SimpleNamespace(
                     workflow_step_id=uuid.uuid4(),
                     name="select",
-                    type="phase",
+                    type="ingestion.source",
+                    config={},
                     position=2,
                     is_start=True,
                     is_terminal=False,
@@ -224,8 +226,8 @@ async def test_admin_static_serves_only_allowlisted_packaged_assets() -> None:
 
 
 async def test_an_allowlisted_but_unvendored_asset_is_a_404_not_a_500() -> None:
-    # The dagre pair is optional — the graph falls back to a built-in layout
-    # without it — so a checkout that does not carry it must answer 404 rather
+    # The dagre pair is optional. The graph falls back to a built-in layout
+    # without it, so a checkout that does not carry it must answer 404 rather
     # than raising on a missing file.
     absent = [
         asset for asset in ("dagre.min.js", "cytoscape-dagre.min.js")
@@ -243,7 +245,7 @@ async def test_router_dashboard_workflow_version_and_graph_paths(monkeypatch: py
     templates = _Templates()
     monkeypatch.setattr(router, "_svc", lambda request: svc)
     # The dashboard also reports what the runtime is doing, which reaches the
-    # execution repository — the fake engine on the request would not survive it.
+    # execution repository. The fake engine on the request would not survive it.
     monkeypatch.setattr(router, "_executions", lambda request: _Executions())
     monkeypatch.setattr(router, "_tmpl", lambda: templates)
     req = _request()
@@ -265,6 +267,9 @@ async def test_router_dashboard_workflow_version_and_graph_paths(monkeypatch: py
     assert created.status_code == 303
     assert forked.status_code == 303
     assert version.context["steps_json"].startswith("[")
+    assert json.loads(version.context["steps_json"])[0]["verdicts"] == [
+        "DEFAULT", "done", "failed", "incomplete",
+    ]
     assert activated.status_code == 303
     assert saved == {"ok": True}
     assert svc.saved_graph == {"a": {"ok": "b"}}
@@ -274,8 +279,8 @@ async def test_router_dashboard_workflow_version_and_graph_paths(monkeypatch: py
         "enabled": True,
         "capabilities": ["web", "code"],
         "concurrency": "non-blocking",
-        # Left empty on the form, which means the runtime's default rather than
-        # a number — the three states are what makes 0 mean unlimited.
+        # Preserve None for the runtime default, 0 for unlimited hops, and a
+        # positive number for an explicit limit.
         "max_hops": None,
     }
 
@@ -395,11 +400,6 @@ async def test_router_raises_404_for_missing_domain_objects(monkeypatch: pytest.
         with pytest.raises(HTTPException) as exc:
             await call
         assert exc.value.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Executions — read-only
-# ---------------------------------------------------------------------------
 
 
 class _Executions:

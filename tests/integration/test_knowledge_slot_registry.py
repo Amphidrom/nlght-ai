@@ -1,20 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The slot registry: a surrogate, and every path it has been found by.
+"""Preserve slot identity and the history of its anchors.
 
-Schema only. Nothing resolves a slot here — that is the next step, and these
-properties have to hold whatever the resolver ends up doing with them.
-
-The strength lives on the *anchor* rather than on the slot, and the reason is one
-transition:
-
-    authored → derived    a degradation
-
-When `[[expenses]]` disappears and only the heading path is left, a resolver that
-still believed it held an authored anchor would carry a lineage across a change
-nobody could see. One strength per slot cannot express that; a strength per
-anchor can, and the history is where the transition becomes visible.
+Anchor strength belongs to each observed path, so losing an authored anchor
+remains visible when a derived path still resolves the slot.
 """
 
 from __future__ import annotations
@@ -45,7 +35,7 @@ async def engine():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -56,8 +46,13 @@ async def engine():
     await engine.dispose()
 
 
-async def _slot_with(engine, *anchors: tuple[str, str]):  # noqa: ANN001, ANN201
-    """A slot and its anchor history, oldest first."""
+async def _slot_with(engine, *anchors: tuple[str, str]):
+    """A slot and its anchor history, oldest first.
+
+    Args:
+        engine (Any): Database engine used by the test.
+        *anchors (tuple[str, str]): Anchor records to attach to the slot.
+    """
     async with AsyncSession(engine) as session, session.begin():
         slot = KnowledgeSlot(slot_id="slot_1", document_id="doc-a")
         session.add(slot)
@@ -99,11 +94,7 @@ async def test_a_slot_keeps_every_path_it_has_been_found_by(engine) -> None:
 
 
 async def test_exactly_one_anchor_is_current(engine) -> None:
-    """`valid_to IS NULL` *is* current.
-
-    A separate `is_current` flag would be a second fact about the same thing, and
-    two facts about one thing can disagree — usually a year later, quietly.
-    """
+    """Represent current slot anchors by an open validity range."""
     history = await _slot_with(
         engine,
         ("Expenses", DERIVED_ANCHOR),
@@ -114,13 +105,7 @@ async def test_exactly_one_anchor_is_current(engine) -> None:
 
 
 async def test_a_degradation_is_visible_in_the_history(engine) -> None:
-    """The transition one strength per slot could not express.
-
-    The authored id was removed from the source, so the section arrives with a
-    heading path again. The slot continues — it is the same section — but a
-    resolver reading only "this slot is authored" would not see that it stopped
-    being. Here the last two rows say it plainly.
-    """
+    """Record an authored anchor becoming derived without losing slot continuity."""
     history = await _slot_with(
         engine,
         ("expenses-policy", AUTHORED_ANCHOR),

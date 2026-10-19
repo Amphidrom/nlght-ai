@@ -27,10 +27,6 @@ def _definition(
     )
 
 
-# ---------------------------------------------------------------------------
-# AdapterPlaybookCatalog
-# ---------------------------------------------------------------------------
-
 def test_catalog_get_existing() -> None:
     playbook   = _active_playbook("s1")
     catalog = AdapterPlaybookCatalog({"s1": playbook})
@@ -86,10 +82,6 @@ def test_catalog_playbook_markdown_missing() -> None:
     catalog = AdapterPlaybookCatalog({})
     assert catalog.playbook_markdown("gone") == ""
 
-
-# ---------------------------------------------------------------------------
-# PlaybookCatalogBuilder
-# ---------------------------------------------------------------------------
 
 class _FakeToolCatalog:
     def __init__(self, names: list[str]) -> None:
@@ -178,10 +170,6 @@ async def test_builder_access_policy_error_denies() -> None:
     catalog = await builder.build(tool_catalog=None, caller=caller)
     assert catalog.get("playbook_h") is None
 
-
-# ---------------------------------------------------------------------------
-# Markdown with phases / constraints / fallback
-# ---------------------------------------------------------------------------
 
 async def test_builder_playbook_with_phases() -> None:
     phases = [Phase(name="p1", goal="do x", tools=["shell"], role="executor",

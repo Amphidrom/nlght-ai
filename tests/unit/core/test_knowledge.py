@@ -86,17 +86,7 @@ def test_the_merge_is_order_independent() -> None:
 
 
 def test_a_unit_must_know_which_document_it_came_from() -> None:
-    """The guard that makes the parsers agree.
-
-    Provenance used to be a convention: every parser was expected to put
-    `document_id` and `processing_revision_id` into the metadata dict, and one of two put
-    in half of it. Every candidate then reached the graph and none reached the
-    lineage, because an assertion with no document revision cannot answer what
-    document D at revision R asserted.
-
-    It is a field now, and a unit without it does not get built — so a third
-    parser cannot repeat the mistake.
-    """
+    """Require document provenance when constructing a knowledge unit."""
     from nlght.core.knowledge import KnowledgeUnit
 
     with pytest.raises(ValueError, match="which document"):

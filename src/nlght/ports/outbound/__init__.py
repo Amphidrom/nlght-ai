@@ -1,13 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Outbound port protocols — interfaces implemented by infrastructure adapters.
-
-Import individual ports directly for minimal coupling:
-
-    from nlght.ports.outbound.model_client import ModelClient
-    from nlght.ports.outbound.signal_emitter import SignalEmitter
-"""
+"""Outbound port protocols implemented by infrastructure adapters."""
 
 from nlght.ports.outbound.access_policy import (
     ModelAccessPolicy,

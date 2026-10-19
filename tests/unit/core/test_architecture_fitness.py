@@ -1,16 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests that guard the direction of the architecture rather than its behaviour.
+"""Guard architectural dependency and authorization boundaries.
 
-Every rule here was true when it was written and is the sort of thing that decays
-without anybody deciding to break it: an import added for convenience, one branch
-on a type "just this once". A behavioural test cannot see any of that — the prompt
-still comes out right — which is exactly why these exist.
-
-They are deliberately narrow. Each one names a direction that was argued for in an
-ADR, and nothing else, so a failure means the architecture moved and not that
-somebody renamed a variable.
+These tests inspect imports and syntax because behavior tests cannot detect a
+dependency direction that changes while outputs remain the same. Each check
+tracks a boundary recorded in an ADR.
 """
 
 from __future__ import annotations
@@ -37,7 +32,14 @@ def _module_source(dotted: str) -> str:
 
 
 def _imports(dotted: str) -> set[str]:
-    """Every module this one imports, at any level, including lazy ones."""
+    """Every module this one imports, at any level, including lazy ones.
+
+    Args:
+        dotted (str): Dotted module path to inspect.
+
+    Returns:
+        set[str]: Names of modules imported directly or inside functions.
+    """
     tree = ast.parse(_module_source(dotted))
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -49,12 +51,13 @@ def _imports(dotted: str) -> set[str]:
 
 
 def _names_in(tree: ast.AST) -> set[str]:
-    """Every identifier the code uses, with prose excluded.
+    """Collect identifiers from code while excluding prose constants.
 
-    Comments do not survive parsing and string constants are skipped, so a
-    docstring may name the very thing the code must not touch — which is what a
-    docstring explaining a removal does. Scanning raw text would make explaining
-    a rule indistinguishable from breaking it.
+    Args:
+        tree (ast.AST): Parsed code to inspect.
+
+    Returns:
+        set[str]: Names and attribute names referenced by code.
     """
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -67,12 +70,14 @@ def _names_in(tree: ast.AST) -> set[str]:
     return found
 
 
-def _body_without_docstrings(function) -> str:  # noqa: ANN001
-    """The code of a function, with its prose removed.
+def _body_without_docstrings(function) -> str:
+    """Collect function identifiers while excluding string constants.
 
-    A docstring may — and here does — name the very thing the code must not
-    touch, which is the point of the docstring. Asserting against raw source
-    would make explaining a rule the same as breaking it.
+    Args:
+        function (Callable): Function whose source is inspected.
+
+    Returns:
+        str: Space-separated names and attribute names from the function body.
     """
     import textwrap
 
@@ -89,7 +94,6 @@ def _body_without_docstrings(function) -> str:  # noqa: ANN001
 
 
 # The reduction weighs information and never asks what it is made of
-# ---------------------------------------------------------------------------
 
 def test_the_reduction_never_reads_what_an_element_is() -> None:
     from nlght.core.hive_mind.relevance import _steps, reduce_to_budget
@@ -97,15 +101,15 @@ def test_the_reduction_never_reads_what_an_element_is() -> None:
     for function in (reduce_to_budget, _steps):
         names = _body_without_docstrings(function)
         assert "kind" not in names.split(), (
-            f"{function.__name__} reads element.kind — storage types are deciding again"
+            f"{function.__name__} reads element.kind: storage types are deciding again"
         )
         for domain in _DOMAIN_TYPES:
             assert domain not in names, f"{function.__name__} knows about {domain}"
 
 
 def test_the_reduction_module_does_not_reach_into_retrieval() -> None:
-    # `relevance` may know the session's own model — its scoring half is written
-    # against it — but a retrieved passage must reach it only as an element.
+    # `relevance` may know the session's own model. Its scoring half is written
+    # against it, but a retrieved passage must reach it only as an element.
     assert not any(
         "context" in name or "retrieval" in name
         for name in _imports("nlght.core.hive_mind.relevance")
@@ -113,7 +117,6 @@ def test_the_reduction_module_does_not_reach_into_retrieval() -> None:
 
 
 # The renderer renders and does not judge
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "renderer",
@@ -133,7 +136,7 @@ def test_the_rendering_function_reads_only_presentation() -> None:
     # `ModelContextBuilder._build_records`.
     from nlght.core.hive_mind.model_context import ModelContextBuilder
 
-    names = _body_without_docstrings(ModelContextBuilder._build_records)  # noqa: SLF001
+    names = _body_without_docstrings(ModelContextBuilder._build_records)
 
     assert "presentation" in names
     for domain in _DOMAIN_TYPES:
@@ -141,20 +144,17 @@ def test_the_rendering_function_reads_only_presentation() -> None:
 
 
 def test_the_rendering_function_carries_kind_without_branching_on_it() -> None:
-    """`kind` may travel to the record; it may not decide anything on the way.
+    """Carry element kind as data without branching on it in rendering.
 
-    The record is typed data now, so the renderer has to name the kind in order
-    to *carry* it — the old rule, "never read `kind` at all", would forbid the
-    very field that keeps provenance intact. What must not come back is the
-    branch: the moment a condition asks what an element is made of, a storage
-    type is choosing presentation again (ADR-0054).
+    A conditional on kind would let the storage type select its presentation
+    instead of the rendering policy (ADR-0054).
     """
     import textwrap
 
     from nlght.core.hive_mind.model_context import ModelContextBuilder
 
     tree = ast.parse(textwrap.dedent(
-        inspect.getsource(ModelContextBuilder._build_records),  # noqa: SLF001
+        inspect.getsource(ModelContextBuilder._build_records),
     ))
     for node in ast.walk(tree):
         tests = (
@@ -164,13 +164,12 @@ def test_the_rendering_function_carries_kind_without_branching_on_it() -> None:
         )
         for test in tests:
             assert "kind" not in _names_in(test), (
-                "_build_records branches on an element's kind — the renderer is "
+                "_build_records branches on an element's kind: the renderer is "
                 "classifying storage types again"
             )
 
 
 # Adapters depend on the generic vocabulary, never the other way round
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "adapter",
@@ -184,7 +183,7 @@ def test_an_adapter_does_not_know_the_renderer(adapter: str) -> None:
 
 
 def test_retrieval_does_not_depend_on_the_mental_model() -> None:
-    # Retrieval is upstream. It produces passages; whether a passage becomes an
+    # Retrieval is upstream. It produces passages. Whether a passage becomes an
     # element is somebody else's question.
     for module in ("nlght.core.retrieval.hit", "nlght.core.retrieval.fusion",
                    "nlght.core.retrieval.plan"):
@@ -207,16 +206,12 @@ def test_the_model_call_knows_nothing_about_how_its_prompt_was_made() -> None:
 
 
 # Nothing selects before the engine
-# ---------------------------------------------------------------------------
 
 def test_the_builder_no_longer_discards_candidates() -> None:
-    """The defect this guards against is a `[:limit]` reappearing "just here".
+    """Keep candidate selection outside the mental model builder.
 
-    `MentalModelBuilder` assembles and scores; what a model is told is decided
-    once, later, with retention and cost in view (ADR-0056). A cap or a threshold
-    back in this file would remove information before anything could weigh what
-    losing it costs — and every behavioural test would still pass, because the
-    prompt would simply be a little shorter.
+    The reduction stage weighs retention and cost before discarding any
+    candidate (ADR-0056).
     """
     names = _names_in(ast.parse(_module_source("nlght.core.hive_mind.builder")))
 
@@ -266,33 +261,11 @@ def test_there_is_only_one_notion_of_how_fully_to_say_something() -> None:
 
 
 def test_no_production_path_reaches_a_session_around_its_owner() -> None:
-    """The whole boundary is worth exactly as much as the paths that go through it.
+    """Require SessionAccess before production code opens session-bound state.
 
-    `SessionAccess` decides who may open a session — and decides nothing at all
-    for a caller that holds the factory and asks it directly. That call is one
-    line, it works, and it is invisible in review because it looks like every
-    other factory call in the codebase. So the rule is checked here rather than
-    trusted:
-
-        No production path may reach session-bound state by `session_key` alone,
-        without a successful `SessionAccess` first.
-
-    Outside the boundary itself, that means no production module calls
-    `get_or_create`, `owner_of`, `claim_ownership` or `list_sessions` on a store
-    coordinator factory or a session backend.
-
-    `WorkspaceManager.get_or_create(session_key)` is held to the same rule, and
-    for the same reason rather than a new one. A workspace is **part of its
-    session** — same key, same lifecycle — so it has no owner of its own and
-    needs no second ownership layer: whoever may not open the session may not
-    have the session's workspace either, and the authorization is inherited.
-
-    Neither that port nor `SessionBackend.delete`/`list_sessions` has a
-    production caller today, which is exactly why they are in here. Nothing is
-    being called unsafe. The day somebody wires one up — the session-management
-    endpoints those backend methods exist for, or a step that wants a working
-    directory — this test is what says the call has to sit behind an authorized
-    session (ADR-0061).
+    Store factories, session backends, and workspaces share the session key and
+    its ownership boundary. Direct calls can bypass that boundary even if the
+    resulting behavior appears correct (ADR-0061).
     """
     root = Path(__file__).resolve().parents[3] / "src" / "nlght"
     assert (root / "core" / "session" / "access.py").exists(), (
@@ -327,7 +300,7 @@ def test_no_production_path_reaches_a_session_around_its_owner() -> None:
             # different port, but the argument is the same session key and the
             # state behind it belongs to the same session.
             name = ast.unparse(node.func.value)
-            offenders.append(f"{path.relative_to(root)}:{node.lineno} — {name}.{node.func.attr}")
+            offenders.append(f"{path.relative_to(root)}:{node.lineno}: {name}.{node.func.attr}")
 
     assert not offenders, (
         "these reach a session without passing the ownership boundary:\n  "
@@ -336,16 +309,10 @@ def test_no_production_path_reaches_a_session_around_its_owner() -> None:
 
 
 def test_no_step_activates_a_resource_around_the_guard() -> None:
-    """One authorization boundary, and no way past it.
+    """Require steps to activate resources through the authorization guard.
 
-    The seven step-internal activations were the same twenty lines copied, none
-    of which asked a policy — so a workflow could reach any resource in the
-    database by naming it in its own configuration, and `data_index_writer`,
-    whose only protection was declaring no signatures, was reachable by exactly
-    the thing that uses it.
-
-    This holds the property rather than the refactor: a step that resolves
-    resources itself, or calls the loader directly, has built a second way in.
+    A direct lookup or instantiation would bypass the policy, including for
+    resources with no model-facing signatures.
     """
     steps = Path(__file__).resolve().parents[3] / "src" / "nlght" / "adapters" / "outbound" / "workflow" / "steps"
     offenders = {

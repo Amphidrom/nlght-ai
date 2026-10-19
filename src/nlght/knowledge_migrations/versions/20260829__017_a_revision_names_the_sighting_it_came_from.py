@@ -5,7 +5,7 @@
 
 Migration `0016` made the observation the unit an equivalence judgement compares.
 Without this column there was no way back from a claim already in the corpus to
-the sighting it came from, so the comparison **synthesised** one — a fresh row
+the sighting it came from, so the comparison **synthesised** a fresh row
 per candidate per comparison, stamped with the run that did the comparing rather
 than the run that did the seeing.
 

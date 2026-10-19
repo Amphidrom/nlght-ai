@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Which documents carry a claim *now*, as a citation has to answer it.
+"""Verify current document support for knowledge claims.
 
-A claim is not in a document. It is supported by however many sources currently
-assert it, and a second document is what keeps it alive when the first stops
-(ADR-0044). So the answer is a list, none of its entries is the claim's home, and
-none of them may be a document that has since removed the sentence — a citation
-that sends a reader to a file which no longer says it is wrong at exactly the
-moment somebody checks.
-
-That last part is why currency is recorded rather than read off the evidence:
-evidence is append-only and says "was observed here", forever. The distinction is
-the whole subject of this file.
+Evidence records past observations. Current support identifies documents that
+still carry a claim after a complete reread (ADR-0044).
 """
 
 from __future__ import annotations
@@ -57,7 +49,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -65,7 +57,7 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001 (the tests read exact rows)
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
@@ -111,17 +103,30 @@ def _graph(identity: str = "fp-500", run_id: str = "run-1") -> KnowledgeWrite:
 
 
 async def _observe(
-    repository,  # noqa: ANN001
+    repository,
     *lineages: LineageWrite,
     document_id: str = DOC_A,
     run_id: str = "run-1",
     anchor: str = "#threshold",
     content: str | None = None,
 ):
-    """One complete observation of one document — the production path.
+    """Record a complete document observation through the production path.
 
-    `record_document` is only ever called for a document read in full, which is
-    what makes it the one place allowed to say what a document currently carries.
+    Only a complete read may update current document support.
+
+    Args:
+        repository (SqlAlchemyKnowledgeRepository): Repository under test.
+        *lineages (LineageWrite): Claims observed in this document.
+        document_id (str): Stable document identity.
+        run_id (str): Identity of the observation run.
+        anchor (str): Section anchor used for the observation.
+        content (str | None): Source text override for this observation.
+
+    Returns:
+        DocumentOutcome: Reconciliation result for the document.
+
+    Side Effects:
+        Persists the complete observation and updates current support.
     """
     sections = (
         [
@@ -145,13 +150,12 @@ async def _observe(
     )
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _rows(repository, model):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
 # 1. A carries the state
-# ---------------------------------------------------------------------------
 
 async def test_a_document_that_carries_a_state_is_its_current_support(
     repository,
@@ -183,7 +187,6 @@ async def test_re_observing_the_same_section_is_one_support_not_two(
 
 
 # 2. Two documents, and neither owns the claim
-# ---------------------------------------------------------------------------
 
 async def test_two_documents_both_stay_support_and_neither_becomes_the_owner(
     repository,
@@ -215,7 +218,7 @@ async def test_a_claim_carries_no_flat_document_of_its_own(repository) -> None:
     await _observe(repository, _lineage())
     claim = (await repository.resolve(["fp-500"]))[0]
 
-    hits = await RetrievalSearchStep._knowledge(  # noqa: SLF001
+    hits = await RetrievalSearchStep._knowledge(
         RetrievalSearchStep(config={}),
         _StubStore([claim]), "expenses", _StubPlan(),
         lambda *_args, **_kwargs: None,
@@ -228,10 +231,10 @@ async def test_a_claim_carries_no_flat_document_of_its_own(repository) -> None:
 
 
 class _StubStore:
-    def __init__(self, claims: list) -> None:  # noqa: ANN001
+    def __init__(self, claims: list) -> None:
         self._claims = claims
 
-    async def query_rules(self, **_kwargs: object) -> list:  # noqa: ANN001
+    async def query_rules(self, **_kwargs: object) -> list:
         return self._claims
 
 
@@ -242,18 +245,15 @@ class _StubPlan:
         return 10
 
 
-# 3. A document drops the claim; another keeps it alive
-# ---------------------------------------------------------------------------
+# 3. A document drops the claim. Another keeps it alive
 
 async def test_a_document_that_dropped_the_claim_stops_being_current_support(
     repository,
 ) -> None:
-    """The case the whole slice exists for.
+    """Drop a document's current support when it no longer carries the claim.
 
-    Doc A removed the sentence. The assertion is untouched — doc B still carries
-    it — but an answer citing doc A would send a reader to a file that no longer
-    says it. The sighting stays in the evidence, because doc A really did assert
-    it once and the diff is built on that record.
+    Preserve the assertion because another document still supports it. Keep the
+    former sighting as historical evidence.
     """
     await _observe(repository, _lineage())
     await _observe(
@@ -279,15 +279,12 @@ async def test_a_document_that_dropped_the_claim_stops_being_current_support(
 
 
 # 4. A partial run says nothing about what a document carries
-# ---------------------------------------------------------------------------
 
 async def test_a_partial_run_never_removes_support(repository) -> None:
     """A run that did not see all of a document cannot say what it carries.
 
-    `record_document` is called only for a document observed in full; everything
-    else goes through `persist`, which writes evidence and leaves currency alone.
-    The same gate retraction uses — two mechanisms deciding currency by different
-    rules is how a corpus starts contradicting itself.
+    `record_document` requires a complete observation. Partial persistence
+    writes evidence but leaves current support unchanged.
     """
     await _observe(repository, _lineage())
     before = (await repository.resolve(["fp-500"]))[0].support
@@ -302,13 +299,12 @@ async def test_a_partial_run_never_removes_support(repository) -> None:
 async def test_an_unchanged_section_keeps_its_support_when_the_model_stays_silent(
     repository,
 ) -> None:
-    """Support agrees with the guard that refused to retire it.
+    """Keep support when the stable-slot guard retains a claim.
 
     The stable-slot guard exists because a model asked twice about byte-identical
     text answered differently (ADR-0044). Dropping the support row for a claim
-    the same run refused to retire would say the document no longer carries
-    something the corpus insists it still asserts — and the citation would
-    disappear over a model's nondeterminism.
+    the same run refused to retire would remove a valid citation because of
+    model nondeterminism.
     """
     second = _lineage(
         text="Expenses above CHF 5000 require board approval.",
@@ -333,7 +329,6 @@ async def test_an_unchanged_section_keeps_its_support_when_the_model_stays_silen
 
 
 # 5. A state the corpus has moved past keeps its own support
-# ---------------------------------------------------------------------------
 
 async def test_a_citation_of_the_canonical_state_uses_only_that_state_s_support(
     repository,
@@ -355,12 +350,11 @@ async def test_a_citation_of_the_canonical_state_uses_only_that_state_s_support(
 
 
 # 6. The quarantine view shows more, and means the same
-# ---------------------------------------------------------------------------
 
 async def test_including_quarantined_does_not_change_what_support_means(
     repository,
 ) -> None:
-    """A review surface sees claims retrieval does not. It sees the same support.
+    """Keep support semantics identical in review and retrieval views.
 
     `include_quarantined` widens *which nodes* come back. It must not quietly
     widen what `support` is, or a reviewer and a reader would be looking at two
@@ -383,7 +377,6 @@ async def test_including_quarantined_does_not_change_what_support_means(
 
 
 # The wording, and the passage
-# ---------------------------------------------------------------------------
 
 async def test_the_wording_comes_from_the_revision_and_not_from_the_support(
     repository,
@@ -448,10 +441,8 @@ async def test_support_rows_are_replaced_and_not_accumulated(repository) -> None
 async def test_the_report_counts_claims_nothing_currently_carries(repository) -> None:
     """The operator number for migration 0019.
 
-    Those claims resolve without a citable source, which is the honest state
-    until each document is read in full again — nothing was backfilled, because
-    which of the recorded sightings were current was never written down. Without
-    a count, three such claims and thirty thousand look identical from outside.
+    Claims without a complete current observation resolve without a citable
+    source. The report counts them until a complete reread establishes support.
     """
     # The partial path: evidence and a graph node, and nothing saying a document
     # still carries it.
@@ -470,21 +461,11 @@ async def test_the_report_counts_claims_nothing_currently_carries(repository) ->
 async def test_an_empty_section_is_a_shape_production_does_not_produce(
     repository,
 ) -> None:
-    """A contract test, and deliberately not a feature.
+    """Pin the effect of an empty section supplied outside the production path.
 
-    `knowledge.persist` never passes a section with no assertions: a document
-    with no candidates arrives as an empty *section list*, not as an empty
-    section. Should a caller ever supply one, this is what happens, and it is
-    worth being visible rather than discovered.
-
-    The stable-slot guard reads its extraction version off the claims a section
-    produced (`_extraction_of`), so a section that produced nothing cannot state
-    which question was asked of it — and a guard that cannot tell whether the
-    same question was asked must not fire. The section is therefore treated as
-    saying nothing, which retires what it held and drops its support.
-
-    Nothing here is built to make that case work. It is pinned so that a future
-    caller sees the consequence before relying on the shape.
+    `knowledge.persist` sends an empty section list when there are no candidates.
+    A supplied empty section has no extraction version, so the stable-slot guard
+    cannot retain its claims. Recording it retires the claims and their support.
     """
     await _observe(repository, _lineage())
     assert (await repository.resolve(["fp-500"]))[0].support

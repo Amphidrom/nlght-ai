@@ -1,4 +1,4 @@
-"""Initial schema — workflows, workflow_versions, workflow_steps, resources.
+"""Create the initial workflow and resource schema.
 
 Revision ID: 0001
 Revises:
@@ -19,9 +19,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # ------------------------------------------------------------------
-    # workflows
-    # ------------------------------------------------------------------
     op.create_table(
         "workflows",
         sa.Column("workflow_id",  postgresql.UUID(as_uuid=True), primary_key=True),
@@ -34,9 +31,6 @@ def upgrade() -> None:
     )
     op.create_index("workflows_enabled_idx", "workflows", ["enabled"])
 
-    # ------------------------------------------------------------------
-    # workflow_versions
-    # ------------------------------------------------------------------
     op.create_table(
         "workflow_versions",
         sa.Column("workflow_version_id", postgresql.UUID(as_uuid=True), primary_key=True),
@@ -57,9 +51,6 @@ def upgrade() -> None:
         postgresql_where=sa.text("status = 'active'"),
     )
 
-    # ------------------------------------------------------------------
-    # workflow_steps
-    # ------------------------------------------------------------------
     op.create_table(
         "workflow_steps",
         sa.Column("workflow_step_id",     postgresql.UUID(as_uuid=True), primary_key=True),
@@ -88,9 +79,6 @@ def upgrade() -> None:
         postgresql_where=sa.text("is_start = true"),
     )
 
-    # ------------------------------------------------------------------
-    # resources
-    # ------------------------------------------------------------------
     op.create_table(
         "resources",
         sa.Column("resource_id",     postgresql.UUID(as_uuid=True), primary_key=True),

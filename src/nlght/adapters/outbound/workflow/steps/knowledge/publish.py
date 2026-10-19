@@ -5,16 +5,16 @@
 
 This is how an approved assertion reaches search. Extraction fills PostgreSQL,
 review decides what may be read, and this step carries that decision into the
-index — nothing else does. Without it an approval changes a flag and nothing
+index. No other step does. Without it an approval changes a flag and nothing
 else, and the assertion stays invisible.
 
 It is deliberately not tied to a single decision. A review session works a batch
-of assertions and then asks for more; that moment is the natural boundary, and a
+of assertions and then asks for more. That moment is the natural boundary, and a
 sweep is what suits it: it publishes everything approved since the last one and
 withdraws everything refused, regardless of who decided it, in which browser, or
 whether a tab was closed before anything could be sent. The same sweep rebuilds
 an index that was deleted and repairs one that drifted, because there is only one
-thing it can do — make the index match what PostgreSQL says may be found.
+thing it can do: make the index match what PostgreSQL says may be found.
 
 PostgreSQL holds everything the index needs: the assertion, its payload, and the
 metadata carrying its keywords. Nothing here re-reads a source or asks a model,
@@ -60,7 +60,7 @@ class KnowledgePublishStep(StepBase):
         writer:     resource name of the `knowledge_index_writer` activation
         batch_size: assertions handled by one invocation (default 200)
 
-    Reads an optional ``identities`` list from the trigger payload; without one
+    Reads an optional ``identities`` list from the trigger payload. Without one
     it sweeps the whole graph. Emits ``knowledge.published`` and
     ``knowledge.withdrawn``.
 
@@ -70,6 +70,12 @@ class KnowledgePublishStep(StepBase):
     """
 
     TYPE = "knowledge.publish"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        MORE = MORE
+        NOTHING_TO_PUBLISH = NOTHING_TO_PUBLISH
 
     def __init__(
         self,
@@ -144,19 +150,28 @@ class KnowledgePublishStep(StepBase):
         )
 
         if len(canonical) == batch_size or len(gone) == batch_size:
-            return StepResult(ctx=ctx, verdict=MORE)
+            return StepResult(ctx=ctx, verdict=self.Verdict.MORE)
         if not published and not withdrawn:
-            return StepResult(ctx=ctx, verdict=NOTHING_TO_PUBLISH)
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+            return StepResult(ctx=ctx, verdict=self.Verdict.NOTHING_TO_PUBLISH)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     async def _publish_named(
         self, ctx: WorkflowStepContext, writer: KnowledgeIndexWriterTool, identities: list[str]
     ) -> StepResult:
-        """Bring exactly these assertions in line, in one invocation.
+        """Synchronize named assertions with their current review state.
 
-        Each one goes in or comes out according to what PostgreSQL says it is
-        now — the same rule as the sweep, applied to a named set rather than to
-        everything.
+        Args:
+            ctx (WorkflowStepContext): Context receiving publication counts.
+            writer (KnowledgeIndexWriterTool): Knowledge index writer.
+            identities (list[str]): Assertion identities to resolve and publish.
+
+        Returns:
+            StepResult: Default verdict when any claim resolves, or
+            ``NOTHING_TO_PUBLISH`` when none resolved.
+
+        Side Effects:
+            Creates required indexes, publishes or withdraws resolved claims,
+            and records counts in context metadata.
         """
         writer.ensure_ready()
         found = await writer.repository.resolve(identities, include_quarantined=True)
@@ -176,8 +191,8 @@ class KnowledgePublishStep(StepBase):
             ctx.correlation_id, writer.name, len(identities), published, withdrawn,
         )
         if not published and not withdrawn:
-            return StepResult(ctx=ctx, verdict=NOTHING_TO_PUBLISH)
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+            return StepResult(ctx=ctx, verdict=self.Verdict.NOTHING_TO_PUBLISH)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     @staticmethod
     async def _index(writer: KnowledgeIndexWriterTool, assertion: KnowledgeObject) -> None:
@@ -187,7 +202,17 @@ class KnowledgePublishStep(StepBase):
         )
 
     def _identities(self, ctx: WorkflowStepContext) -> list[str] | None:
-        """The named subset, when the trigger asked for one."""
+        """Read an optional list of assertion identities from the trigger.
+
+        Args:
+            ctx (WorkflowStepContext): Context containing the trigger payload.
+
+        Returns:
+            list[str] | None: Nonblank identities, or ``None`` for a full sweep.
+
+        Raises:
+            WorkflowConfigurationError: The supplied value is not a list of strings.
+        """
         raw = ctx.trigger.payload.get("identities")
         if raw is None:
             return None
@@ -212,7 +237,7 @@ class KnowledgePublishStep(StepBase):
         return batch_size
 
     async def _writer(self, caller: RequestContext | None) -> KnowledgeIndexWriterTool:
-        assert self._resources is not None and self._tools is not None  # noqa: S101 (guarded by run)
+        assert self._resources is not None and self._tools is not None
         name = str(self.config.get("writer", "")).strip()
         if not name:
             raise WorkflowConfigurationError(

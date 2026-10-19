@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
+from nlght.core.model.trust import SOURCE_PLAYBOOK
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 
@@ -13,11 +14,12 @@ class ActivatePlaybookTool(ToolBase):
     """Built-in control tool for playbook selection.
 
     The step loop intercepts calls to this tool before execute() is reached.
-    activate() is a no-op signal — playbook phase execution is driven by the
+    activate() is a no-op signal because playbook phase execution is driven by the
     step that detects the tool call name.
     """
 
     KIND: ClassVar[str] = "activate_playbook"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_PLAYBOOK
     PROVIDER: ClassVar[str] = "platform"
 
     @classmethod

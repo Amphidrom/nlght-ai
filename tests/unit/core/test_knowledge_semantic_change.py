@@ -1,32 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The seven cases that decide whether an approval survives an edit.
+"""Classify rule edits that preserve or change normative meaning.
 
-The gate on this part of the design. Each case is one edit to a rule's body and
-one expected answer, and the four that must come back `normative` and the three
-that must not are not variations of one thing — they produce opposite outcomes
-for a reviewer:
-
-    normative  a new revision, needing review, the old approval not carried
-    rewrite    the same claim in other words, the approval standing
-    unchanged  nothing worth recording at all
-
-Getting them the wrong way round is expensive in both directions. Read a changed
-threshold as a rewording and a person's approval covers a value they never saw;
-read a rewording as a change and the queue fills with sentences nobody edited.
-
-Three of the seven cannot be decided by looking at the strings, and that is a
-fact about language rather than a gap in the code: `must` becoming `must not`
-changes the rule and `must` becoming `shall` does not, and no rule over
-characters separates those without knowing what the words mean. They are
-delegated as one decision with three answers.
-
-**What the delegated cases prove, and what they do not.** With a stub standing in
-for the classifier they prove the decision is asked for, honoured, and
-conservative when the answer is doubt. They do not prove any particular model
-gets `must not` right — that is a property of the model, and only a live run can
-speak to it.
+A normative change starts a reviewable revision. A wording change can retain
+the prior approval.
 """
 
 from __future__ import annotations
@@ -41,20 +19,16 @@ from nlght.core.knowledge.semantics import (
 
 
 def _asked(answer: str) -> str:
-    """What the classifier said, standing in for the model.
+    """Return a scripted semantic-change verdict for the classifier.
 
-    The judgement itself is the model's. What these assert is that it is asked
-    for, that its answer decides, and that doubt falls the conservative way —
-    not that any particular model gets `must not` right. That is a property of
-    the model, and `tests/local_e2e/test_semantic_change_live.py` puts the same
-    seven cases to a real one.
-    """
+    Args:
+        answer (str): Model verdict to supply.
+
+    Returns:
+        str: Verdict passed to semantic_change().
+        """
     return answer
 
-
-# ---------------------------------------------------------------------------
-# Materially different — the approval does not carry
-# ---------------------------------------------------------------------------
 
 def test_must_becoming_must_not_is_normative() -> None:
     assert semantic_change(
@@ -88,10 +62,6 @@ def test_a_moved_quantity_is_normative() -> None:
     ) == NORMATIVE
 
 
-# ---------------------------------------------------------------------------
-# The same claim — the approval stands
-# ---------------------------------------------------------------------------
-
 def test_must_becoming_shall_is_only_a_rewrite() -> None:
     """The case that makes a word list impossible.
 
@@ -117,10 +87,6 @@ def test_punctuation_and_spacing_change_nothing() -> None:
         "Lines  are   limited to 100 characters.",
     ) == UNCHANGED
 
-
-# ---------------------------------------------------------------------------
-# What a classifier's answer is allowed to do
-# ---------------------------------------------------------------------------
 
 def test_doubt_resolves_to_normative_not_to_rewrite() -> None:
     """A review nobody needed costs a minute; an approval nobody gave costs trust.

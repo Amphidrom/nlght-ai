@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""PipelineExtractor — composes multiple MemoryExtractor stages.
-
-Runs each stage in sequence and merges their ExtractionResult into one.
-Deduplicates by entity key and candidate key across stages.
-Intent is taken from the first non-"store" stage result.
-"""
+"""Compose multiple memory extraction stages."""
 
 from __future__ import annotations
 

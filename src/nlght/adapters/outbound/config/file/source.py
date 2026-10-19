@@ -10,6 +10,7 @@ import yaml
 
 from nlght.adapters.outbound.config.file.mapper import to_snapshot
 from nlght.adapters.outbound.config.file.models import (
+    ActionAuthorizationModel,
     EmbeddingModel,
     ExecutionModel,
     ExecutionStreamModel,
@@ -43,7 +44,6 @@ class FileConfigurationSource(ConfigurationSource):
         persistence = integrations.get("persistence", {}) or {}
         hive_mind = persistence.get("hive_mind", {}) or {}
 
-        # ── Singular os_runtime block ────────────────────────────────────────
         os_runtime_raw = raw.get("os_runtime")
         os_runtime_model: OsRuntimeModel | None = None
         if os_runtime_raw and isinstance(os_runtime_raw, dict):
@@ -53,7 +53,6 @@ class FileConfigurationSource(ConfigurationSource):
                 config=dict(os_runtime_raw.get("config", {}) or {}),
             )
 
-        # ── integrations.persistence.workflows ──────────────────────────────
         workflows_raw = persistence.get("workflows", {}) or {}
         persistence_workflows = WorkflowsPersistenceModel(
             backend=str(workflows_raw.get("backend", "postgres")),
@@ -95,6 +94,8 @@ class FileConfigurationSource(ConfigurationSource):
             ),
         )
 
+        action_authorization = self._action_authorization(raw.get("action_authorization"))
+
         embedding_raw = raw.get("embedding", {}) or {}
         embedding = EmbeddingModel(
             provider=str(embedding_raw.get("provider", "")).strip(),
@@ -117,6 +118,7 @@ class FileConfigurationSource(ConfigurationSource):
             catalogs_playbooks_definitions_path=catalogs_playbooks_definitions_path,
             licensing=licensing,
             execution=execution,
+            action_authorization=action_authorization,
             embedding=embedding,
             principal=dict(raw.get("principal") or {}),
             protocol_adapters=[
@@ -163,6 +165,54 @@ class FileConfigurationSource(ConfigurationSource):
         if len(providers) == 1:
             return FileConfigurationSource._hive_mind_provider(providers[0])
         return None
+
+    @staticmethod
+    def _action_authorization(raw: object) -> ActionAuthorizationModel:
+        """Validate action authorization settings without coercing booleans.
+
+        Args:
+            raw (object): Parsed YAML block, or ``None`` for defaults.
+
+        Returns:
+            ActionAuthorizationModel: Validated settings with authorization
+            enabled by default.
+
+        Raises:
+            ValueError: The block has unknown keys or invalid field types.
+
+        Notes:
+            Strict validation prevents a typo from silently disabling the
+            authorization control.
+        """
+        if raw is None:
+            return ActionAuthorizationModel()
+        if not isinstance(raw, dict):
+            raise ValueError("action_authorization must be a mapping")
+        known = {"enabled", "policy_timeout_seconds", "approval_timeout_seconds"}
+        unknown = sorted(str(key) for key in raw if key not in known)
+        if unknown:
+            raise ValueError(
+                f"action_authorization: unknown key(s) {', '.join(unknown)}; "
+                f"expected {', '.join(sorted(known))}"
+            )
+        defaults = ActionAuthorizationModel()
+        enabled = raw.get("enabled", defaults.enabled)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"action_authorization.enabled must be true or false, not {enabled!r}")
+
+        def _seconds(key: str, default: float) -> float:
+            value = raw.get(key, default)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"action_authorization.{key} must be a number, not {value!r}")
+            return float(value)
+
+        return ActionAuthorizationModel(
+            enabled=enabled,
+            policy_timeout_seconds=_seconds("policy_timeout_seconds", defaults.policy_timeout_seconds),
+            approval_timeout_seconds=_seconds(
+                "approval_timeout_seconds", defaults.approval_timeout_seconds
+            ),
+        )
 
     @staticmethod
     def _protocol_adapter(raw: dict[str, Any]) -> ProtocolAdapterModel:

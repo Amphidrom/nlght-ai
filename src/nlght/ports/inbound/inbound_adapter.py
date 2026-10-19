@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 class InboundAdapter(Protocol):
     """Inbound port for non-HTTP trigger sources.
 
-    Implement this protocol to drive workflows from any external source —
-    polling loops, message queues, cron schedulers, etc.
+    Implement this protocol to drive workflows from polling loops, message
+    queues, schedulers, or other external sources.
 
     The adapter receives ``executor`` and ``repository`` on ``start()``.
     It is responsible for managing its own background tasks and resources.

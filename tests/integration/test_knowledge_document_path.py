@@ -1,20 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The document's name travels with the sighting, and decides nothing.
+"""Preserve the observed document path with each knowledge sighting.
 
-Three rules, and the third is why the first two matter:
-
-    a path may change            → no assertion and no revision because of it
-    a path is stored as observed → never reconstructed from `document_id`
-    a report names both runs     → each sighting keeps the name it saw
-
-`document_id` is a hash, so a report naming only that can say a claim moved and
-never which file. The obvious place to look a name up was `ingestion_documents`,
-and a live corpus had it empty: a knowledge-only flow does not write the
-ingestion record, so every document came back unnameable and every expectation
-reported "in neither snapshot". Joining the two lifecycles to borrow a string is
-a decision of its own; carrying the name with the evidence is not.
+Changing a path does not itself create an assertion revision. Reports use the
+path recorded for each run rather than reconstructing it from a document ID.
 """
 
 from __future__ import annotations
@@ -51,7 +41,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -59,13 +49,22 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
 
 def _sighting(*, path: str, revision: str, run: str) -> LineageWrite:
-    """The same claim, in the same document, seen under a given name."""
+    """The same claim, in the same document, seen under a given name.
+
+    Args:
+        path (str): Document path seen by the run.
+        revision (str): Document revision identifier.
+        run (str): Run identifier for the sighting.
+
+    Returns:
+        LineageWrite: Lineage write for the document path and revision.
+    """
     return LineageWrite(
         entity=ENTITY,
         kind="rule",
@@ -82,18 +81,13 @@ def _sighting(*, path: str, revision: str, run: str) -> LineageWrite:
     )
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _rows(repository, model):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
 async def test_a_renamed_document_changes_nothing_about_the_claim(repository) -> None:
-    """The gate: same document_id, new path, same knowledge.
-
-    A rename is not an edit. The file is called something else and says the same
-    thing, so the assertion continues, no revision is written, and the only new
-    row is the sighting — which knows the new name.
-    """
+    """Keep the assertion and revision stable across a document-path rename."""
     first = await repository.record_lineage(
         _sighting(path="docs/a.md", revision="rev-1", run="run-1")
     )
@@ -108,13 +102,7 @@ async def test_a_renamed_document_changes_nothing_about_the_claim(repository) ->
 
 
 async def test_each_sighting_keeps_the_name_it_saw(repository) -> None:
-    """Stored as observed, never reconstructed.
-
-    The two runs saw two names, and both are true of the moments they describe.
-    Recomputing a path from `document_id` — or overwriting the old one — would
-    make the earlier evidence say something that was not the case when it was
-    written.
-    """
+    """Keep the document path observed by each historical sighting."""
     await repository.record_lineage(_sighting(path="docs/a.md", revision="rev-1", run="run-1"))
     await repository.record_lineage(
         _sighting(path="docs/renamed-a.md", revision="rev-1", run="run-2")

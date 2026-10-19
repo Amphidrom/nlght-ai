@@ -12,8 +12,8 @@ class GenericJsonProtocolDetector(ProtocolDetector):
 
     It puts no requirement on method, body, or content type. A workflow mapped
     to a path must be reachable by a plain GET or a bodyless POST, because many
-    such workflows are parameterless — a reindex, a rebuild, a job kicked off by
-    hand. The name describes the *response* shape, not a demand on the request:
+    such workflows are parameterless. Examples include a reindex, rebuild, or
+    job kicked off by hand. The name describes the *response* shape, not a demand on the request:
     a body, if one is sent, is still expected to be JSON, but that is the
     trigger resolver's contract, not a precondition for detection here.
 

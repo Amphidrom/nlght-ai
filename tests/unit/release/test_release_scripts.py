@@ -39,11 +39,6 @@ release_badges = _load("release_badges")
 prepare_release = _load("prepare_release")
 
 
-# ---------------------------------------------------------------------------
-# set_version.normalize
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("tag", "expected"),
     [
@@ -64,11 +59,6 @@ def test_normalize_accepts_release_tags(tag: str, expected: str) -> None:
 def test_normalize_rejects_non_release_tags(tag: str) -> None:
     with pytest.raises(ValueError):
         set_version.normalize(tag)
-
-
-# ---------------------------------------------------------------------------
-# set_version.apply
-# ---------------------------------------------------------------------------
 
 
 def test_apply_patches_version_line(tmp_path) -> None:
@@ -94,11 +84,6 @@ def test_apply_fails_without_version_line(tmp_path) -> None:
         set_version.apply("0.2.0", pyproject)
 
 
-# ---------------------------------------------------------------------------
-# set_version.check
-# ---------------------------------------------------------------------------
-
-
 def test_check_passes_when_versions_match(tmp_path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nname = "nlght-ai"\nversion = "0.2.0"\n', encoding="utf-8")
@@ -112,11 +97,6 @@ def test_check_fails_when_versions_differ(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="tag resolves to version"):
         set_version.check("0.2.0", pyproject)
-
-
-# ---------------------------------------------------------------------------
-# rotate_change_notes.rotate
-# ---------------------------------------------------------------------------
 
 
 def _notes_dir(tmp_path, body: str) -> Path:
@@ -135,7 +115,7 @@ def test_rotate_moves_entries_and_resets_main(tmp_path) -> None:
 
     assert target == notes / "0.2.0.md"
     released = target.read_text(encoding="utf-8")
-    assert released.startswith("# Change notes — v0.2.0\n\nReleased: 2026-07-17\n")
+    assert released.startswith("# Change notes: v0.2.0\n\nReleased: 2026-07-17\n")
     assert "- area: did a thing. (#1)" in released
     assert "- other: fixed a bug." in released
 
@@ -175,11 +155,6 @@ def test_rotate_fails_without_main_section(tmp_path) -> None:
         rotate_change_notes.rotate("0.2.0", notes)
 
 
-# ---------------------------------------------------------------------------
-# prepare_release.main
-# ---------------------------------------------------------------------------
-
-
 def test_prepare_release_bumps_version_and_rotates_notes(tmp_path) -> None:
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text('[project]\nname = "nlght-ai"\nversion = "0.1.0"\n', encoding="utf-8")
@@ -212,11 +187,6 @@ def test_prepare_release_fails_on_bad_tag(tmp_path) -> None:
     assert rc == 2
     assert 'version = "0.1.0"' in pyproject.read_text(encoding="utf-8")
     assert not badge.exists()
-
-
-# ---------------------------------------------------------------------------
-# Repository release contract
-# ---------------------------------------------------------------------------
 
 
 def test_project_metadata_targets_public_release_surfaces() -> None:

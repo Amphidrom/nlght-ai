@@ -7,10 +7,6 @@ from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.adapters.outbound.signals.streaming import QueuedSignalEmitter
 from nlght.core.signals.signal import Signal
 
-# ---------------------------------------------------------------------------
-# BufferingSignalEmitter
-# ---------------------------------------------------------------------------
-
 
 async def test_buffering_emitter_collects_signals() -> None:
     emitter = BufferingSignalEmitter()
@@ -37,11 +33,6 @@ async def test_buffering_emitter_collected_returns_copy() -> None:
 async def test_buffering_emitter_empty_by_default() -> None:
     emitter = BufferingSignalEmitter()
     assert emitter.collected() == []
-
-
-# ---------------------------------------------------------------------------
-# QueuedSignalEmitter
-# ---------------------------------------------------------------------------
 
 
 async def test_queued_emitter_yields_emitted_signals() -> None:

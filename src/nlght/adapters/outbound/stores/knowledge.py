@@ -9,7 +9,7 @@ answers "which assertions match this question", PostgreSQL then resolves those
 identities into full objects with their payload and metadata.
 
 Quarantine is enforced by the repository, which returns only reviewed knowledge
-unless explicitly asked otherwise — so no query path here can leak an
+    unless explicitly asked otherwise. No query path here can leak an
 unreviewed assertion.
 """
 
@@ -24,9 +24,15 @@ from nlght.adapters.outbound.persistence.knowledge_repository import (
     SqlAlchemyKnowledgeRepository,
 )
 from nlght.adapters.outbound.stores.connections import StoreConnections
+from nlght.adapters.outbound.stores.source_trust import (
+    TRUSTED_SOURCES_OPTION,
+    SourceLabeller,
+    trusted_sources,
+)
 from nlght.adapters.outbound.tools.builtin.action_semantics import READ_REQUEST
 from nlght.core.knowledge import DECISION, FACT, PATTERN, RULE, KnowledgeObject
-from nlght.core.tools.tool import ToolBase, ToolOption, ToolParameter, ToolSignature
+from nlght.core.model.trust import SOURCE_KNOWLEDGE, UNANNOTATED, ContentOrigin
+from nlght.core.tools.tool import ToolBase, ToolOption, ToolOutput, ToolParameter, ToolSignature
 from nlght.ports.outbound.knowledge_repository import KnowledgeRepository
 
 logger = logging.getLogger(__name__)
@@ -91,7 +97,7 @@ class KnowledgeStoreTool(ToolBase):
         # The activation's own pg_url, with no way around it. An injectable
         # repository would let something outside the activation decide which
         # database this store reads, which is the whole point of the resource.
-        # The pool behind it is shared; which database is read is not.
+        # The pool behind it is shared. Which database is read is not.
         pg_url = str(config.get("pg_url", "")).strip()
         if not pg_url:
             raise ValueError(
@@ -109,6 +115,13 @@ class KnowledgeStoreTool(ToolBase):
         self._password = config.get("os_password")
         self._verify_certs = bool(config.get("os_verify_certs", True))
         self._timeout = int(config.get("os_timeout", 30))
+        # A claim is as trusted as the documents that carry it: all of them
+        # from listed sources, or it is untrusted (ADR-0074).
+        self._labeller = SourceLabeller(
+            kind=SOURCE_KNOWLEDGE,
+            resource_id=self.resource_id or f"{self.KIND}/{name}",
+            trusted=trusted_sources(config, where=f"knowledge store '{name}'"),
+        )
         if not _HAS_OPENSEARCH:
             raise ImportError(
                 "opensearch-py is required for KnowledgeStoreTool. "
@@ -143,6 +156,7 @@ class KnowledgeStoreTool(ToolBase):
             ToolOption("os_password", "string", "OpenSearch password"),
             ToolOption("os_verify_certs", "boolean", "Verify TLS certificates", default=True),
             ToolOption("os_timeout", "integer", "Request timeout in seconds", default=30),
+            TRUSTED_SOURCES_OPTION,
         ]
 
     @classmethod
@@ -201,17 +215,47 @@ class KnowledgeStoreTool(ToolBase):
 
     # -- LLM-facing wrappers -------------------------------------------------
 
-    async def query_facts_tool(self, **kwargs: Any) -> str:  # noqa: ANN401
-        return _serialize(await self.query_facts(**kwargs))
+    async def query_facts_tool(self, **kwargs: Any) -> ToolOutput:  # noqa: ANN401
+        return self._output(await self.query_facts(**kwargs))
 
-    async def query_rules_tool(self, **kwargs: Any) -> str:  # noqa: ANN401
-        return _serialize(await self.query_rules(**kwargs))
+    async def query_rules_tool(self, **kwargs: Any) -> ToolOutput:  # noqa: ANN401
+        return self._output(await self.query_rules(**kwargs))
 
-    async def query_patterns_tool(self, **kwargs: Any) -> str:  # noqa: ANN401
-        return _serialize(await self.query_patterns(**kwargs))
+    async def query_patterns_tool(self, **kwargs: Any) -> ToolOutput:  # noqa: ANN401
+        return self._output(await self.query_patterns(**kwargs))
 
-    async def query_decisions_tool(self, **kwargs: Any) -> str:  # noqa: ANN401
-        return _serialize(await self.query_decisions(**kwargs))
+    async def query_decisions_tool(self, **kwargs: Any) -> ToolOutput:  # noqa: ANN401
+        return self._output(await self.query_decisions(**kwargs))
+
+    def claim_origin(self, claim: KnowledgeObject) -> ContentOrigin:
+        """Identify the origins of documents supporting a claim.
+
+        Args:
+            claim (KnowledgeObject): Claim whose support identifies its sources.
+
+        Returns:
+            ContentOrigin: Combined source origin, or unannotated when the claim
+            has no supporting documents.
+        """
+        sources = [evidence.source_id for evidence in claim.support]
+        return self._labeller.origin(sources) if sources else UNANNOTATED
+
+    def _output(self, items: list[KnowledgeObject]) -> ToolOutput:
+        """Serialize claims and label the result with their supporting sources.
+
+        Args:
+            items (list[KnowledgeObject]): Claims to serialize.
+
+        Returns:
+            ToolOutput: Serialized claims with an origin derived from their
+            supporting documents.
+        """
+        return ToolOutput(
+            _serialize(items),
+            self._labeller.result_origin(
+                [evidence.source_id for evidence in item.support] for item in items
+            ),
+        )
 
     # -- internals -----------------------------------------------------------
 
@@ -220,7 +264,7 @@ class KnowledgeStoreTool(ToolBase):
         kind: str,
         *,
         query: str | None = None,
-        type: str | None = None,  # noqa: A002 (public tool parameter name)
+        type: str | None = None,
         min_confidence: float | None = None,
         limit: int = 10,
     ) -> list[KnowledgeObject]:
@@ -272,7 +316,7 @@ class KnowledgeStoreTool(ToolBase):
             # read from is the closest thing the index holds to an answer.
             #
             # It replaced a `text_all` bag assembled from every field value,
-            # which carried no phrase, no grammar and no quotation — and for
+            # which carried no phrase, no grammar and no quotation, and for
             # several kinds was only a second copy of fields indexed beside it.
             should.append({"match_phrase": {"observed_text": {"query": query, "boost": 11}}})
             should.append({"match": {"observed_text": {"query": query, "boost": 6}}})
@@ -289,7 +333,7 @@ class KnowledgeStoreTool(ToolBase):
         try:
             response = self._client.search(index=index, body=body)
         except Exception:
-            # A degraded search backend must not take the whole step down; an
+            # A degraded search backend must not take the whole step down. An
             # empty result is the honest answer here.
             logger.exception("knowledge.search | index=%s", index)
             return []

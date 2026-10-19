@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Build structured, untrusted model context from runtime knowledge.
-
-This module owns store selection and budget reduction. It cannot create a
-trusted instruction message or provider role; its only output is a tuple of
-``ContextRecord`` values.
-"""
+"""Build structured untrusted context records for a model."""
 
 from __future__ import annotations
 
@@ -17,6 +12,7 @@ from typing import Protocol
 from nlght.core.hive_mind.elements import (
     context_atom_elements,
     planning_atom_elements,
+    remembered_origin,
     result_elements,
     turn_elements,
 )
@@ -29,6 +25,15 @@ from nlght.core.model.messages import (
     ContextRecord,
     ContextSupport,
 )
+from nlght.core.model.trust import (
+    PLATFORM_TEXT,
+    SOURCE_PLAYBOOK,
+    UNANNOTATED,
+    ContentLedger,
+    ContentOrigin,
+    ContentTrust,
+    SourceRef,
+)
 from nlght.core.playbooks.playbook import Phase
 from nlght.core.workflow import WorkflowStepContext
 
@@ -36,7 +41,7 @@ _UNBOUNDED = 1 << 62
 
 
 class PromptSlot(Protocol):
-    """Extension content, untrusted unless a future registry grants authority."""
+    """Render extension content as untrusted model context."""
 
     def render(self) -> str | None: ...
 
@@ -88,7 +93,26 @@ class ModelContextBuilder:
         reserved_instruction_tokens: int = 0,
         compression_reports: list[PromptCompressionReport] | None = None,
     ) -> tuple[ContextRecord, ...]:
-        """Build records while reducing only budgetable ``MentalElement`` data."""
+        """Build context records while reducing budgetable elements only.
+
+        Args:
+            mental_model (MentalModel): Mental model to render as context.
+            input_policy (PromptInputPolicy | None): Optional policy for selecting model input.
+            working_memory_reference_resolver (Callable[[list[str]], list[str]] | None):
+                Optional resolver for working-memory references.
+            slots (list[PromptSlot] | None): Optional prompt slots.
+            token_budget (TokenBudget | None): Optional model token budget.
+            max_prompt_tokens (int | None): Optional prompt size cap.
+            reserved_instruction_tokens (int): Tokens reserved for trusted instructions.
+            compression_reports (list[PromptCompressionReport] | None): Optional list
+                receiving reduction reports.
+
+        Returns:
+            tuple[ContextRecord, ...]: Typed ContextRecord sequence.
+
+        Side Effects:
+            May invoke the supplied resolver and append compression reports.
+        """
 
         policy = input_policy or PromptInputPolicy()
         elements = _elements_for(mental_model, policy, working_memory_reference_resolver)
@@ -157,11 +181,23 @@ class ModelContextBuilder:
             if policy.include_playbooks:
                 content = self._build_playbooks(policy.active_playbook, policy.active_phase)
                 if content:
-                    records.append(_runtime_record(ContextKind.PLAYBOOK, "playbooks", content))
+                    # Who controls playbook text is not settled. Until it is,
+                    # it is untrusted content (ADR-0074).
+                    records.append(_runtime_record(
+                        ContextKind.PLAYBOOK, "playbooks", content, origin=_PLAYBOOK_ORIGIN,
+                    ))
             if policy.include_tools:
                 content = self._build_tools(exclude=policy.exclude_tools)
                 if content:
-                    records.append(_runtime_record(ContextKind.TOOL_GUIDANCE, "tools", content))
+                    # Signature descriptions are code. Resource names are
+                    # operator configuration. Platform text.
+                    records.append(_runtime_record(
+                        ContextKind.TOOL_GUIDANCE, "tools", content, origin=PLATFORM_TEXT,
+                    ))
+
+        # The interpretation, summary and delta are derived from the request and
+        # from what the session remembers, so they inherit both origins.
+        derived = _derived_origin(mental_model, self.ctx)
 
         if policy.include_current_request_interpretation:
             if mental_model.intents:
@@ -169,18 +205,21 @@ class ModelContextBuilder:
                     "request:intents",
                     ContextKind.REQUEST_INTERPRETATION,
                     f"User intent: {', '.join(mental_model.intents)}",
+                    origin=derived,
                 ))
             if mental_model.entities:
                 records.append(_derived_record(
                     "request:entities",
                     ContextKind.REQUEST_INTERPRETATION,
                     f"Active entities: {', '.join(mental_model.entities)}",
+                    origin=derived,
                 ))
             if mental_model.summary:
                 records.append(_derived_record(
                     "request:summary",
                     ContextKind.SUMMARY,
                     f"Current turn summary: {mental_model.summary}",
+                    origin=derived,
                 ))
 
         ordered_elements = sorted(
@@ -212,6 +251,7 @@ class ModelContextBuilder:
                     "request:delta",
                     ContextKind.DELTA,
                     f"Signal delta: {nature} (confidence={confidence})",
+                    origin=derived,
                 ))
 
         for position, slot in enumerate(slots or ()):
@@ -284,7 +324,7 @@ class ModelContextBuilder:
         lines = [
             "## Tools",
             "Tools are provided via the API. Use ONLY the API tool call mechanism.",
-            "Never output tool calls as plain text, XML tags, or code blocks — the result will not be processed.",
+            "Never output tool calls as plain text, XML tags, or code blocks. The result will not be processed.",
             "",
         ]
         for tool in standalone:
@@ -330,24 +370,75 @@ class ModelContextBuilder:
         return "\n".join(lines)
 
 
-def _runtime_record(kind: ContextKind, item_id: str, content: str) -> ContextRecord:
+_PLAYBOOK_ORIGIN = ContentOrigin.of(
+    SourceRef(SOURCE_PLAYBOOK, "", "", ContentTrust.UNTRUSTED),
+)
+
+
+def _runtime_record(
+    kind: ContextKind,
+    item_id: str,
+    content: str,
+    *,
+    origin: ContentOrigin,
+) -> ContextRecord:
     return ContextRecord(
         record_id=f"runtime:{item_id}",
         kind=kind,
         content=content,
-        provenance=ContextProvenance(source="runtime_catalog", item_id=item_id),
+        provenance=ContextProvenance(source="runtime_catalog", item_id=item_id, origin=origin),
         estimated_tokens=estimate_tokens(content),
     )
 
 
-def _derived_record(record_id: str, kind: ContextKind, content: str) -> ContextRecord:
+def _derived_record(
+    record_id: str,
+    kind: ContextKind,
+    content: str,
+    *,
+    origin: ContentOrigin,
+) -> ContextRecord:
     return ContextRecord(
         record_id=record_id,
         kind=kind,
         content=content,
-        provenance=ContextProvenance(source="request_interpretation"),
+        provenance=ContextProvenance(source="request_interpretation", origin=origin),
         estimated_tokens=estimate_tokens(content),
     )
+
+
+def _derived_origin(mental_model: MentalModel, ctx: WorkflowStepContext | None) -> ContentOrigin:
+    """Combine sources that could influence the current interpretation.
+
+    Args:
+        mental_model (MentalModel): Current mental model and its sources.
+        ctx (WorkflowStepContext | None): Optional workflow context with recorded exposure.
+
+    Returns:
+        ContentOrigin: ContentOrigin for derived context.
+    """
+    origins = [remembered_origin(mental_model)]
+    ledger = getattr(ctx, "ledger", None)
+    if isinstance(ledger, ContentLedger):
+        origins.append(ledger.origin)
+    combined = ContentOrigin.combine(*(origin for origin in origins if origin.sources))
+    return combined if combined.sources else UNANNOTATED
+
+
+def _element_origin(element: MentalElement) -> ContentOrigin:
+    """Read provenance carried by a mental element.
+
+    Args:
+        element (MentalElement): MentalElement and its stored origin.
+
+    Returns:
+        ContentOrigin: ContentOrigin for the element.
+    """
+    for holder in (element.provenance, element.payload):
+        origin = getattr(holder, "origin", None)
+        if isinstance(origin, ContentOrigin):
+            return origin
+    return UNANNOTATED
 
 
 def _context_provenance(element: MentalElement) -> ContextProvenance:
@@ -380,6 +471,7 @@ def _context_provenance(element: MentalElement) -> ContextProvenance:
         source_name=str(getattr(source, "source_name", "")),
         external_id=str(getattr(source, "external_id", "")),
         support=support,
+        origin=_element_origin(element),
     )
 
 

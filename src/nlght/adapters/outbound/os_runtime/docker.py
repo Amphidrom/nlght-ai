@@ -25,7 +25,7 @@ from nlght.ports.outbound.os_runtime import OsRuntime, OsRuntimeFactory
 if TYPE_CHECKING:
     # The repo's own top-level docker/ directory (Dockerfile assets) shadows
     # the docker SDK package name when it isn't installed (no [docker] extra
-    # in the dev environment). mypy never analyzes either candidate — the
+    # in the dev environment). mypy never analyzes either candidate because the
     # docker.* override in pyproject sets follow_imports = "skip", so these
     # names are Any regardless of which package resolution wins.
     from docker import DockerClient
@@ -43,7 +43,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _DOCKER_MISSING = (
-    "docker package not installed — install with: pip install 'nlght-ai[docker]'"
+    "docker package is not installed. Install with: pip install 'nlght-ai[docker]'"
 )
 
 
@@ -56,7 +56,7 @@ class _NeverRaised(Exception):
     """Placeholder except-clause type for the docker.errors.NotFound fallback.
 
     ``except type(None)`` is invalid Python (TypeError: catching classes that
-    do not inherit from BaseException) — this is a valid, never-actually-raised
+    do not inherit from BaseException). This is a valid, never-actually-raised
     stand-in for when the docker package (and _docker_errors) isn't installed.
     """
 
@@ -64,7 +64,7 @@ class _NeverRaised(Exception):
 class DockerOsRuntimeFactory(OsRuntimeFactory):
     """Creates a dedicated Docker container per invocation (named after the CID).
 
-    Implements OsRuntimeFactory and SubsystemLifecycle — ``start()`` initializes
+    Implements OsRuntimeFactory and SubsystemLifecycle. ``start()`` initializes
     the Docker client, ``stop()`` is a no-op (containers are cleaned up
     individually via ``release()``).
     """
@@ -104,7 +104,18 @@ class DockerOsRuntimeFactory(OsRuntimeFactory):
         pass
 
     def bind(self, cid: str) -> DockerOsRuntime:
-        """Returns a lazy runtime for this CID — the container is created only on first access."""
+        """Reuse or create a lazy Docker runtime for a correlation ID.
+
+        Args:
+            cid (str): Correlation ID naming the runtime instance.
+
+        Returns:
+            DockerOsRuntime: Existing or newly bound runtime. Its container
+            starts only when the runtime is first used.
+
+        Side Effects:
+            Cache a newly bound runtime by correlation ID.
+        """
         if cid in self._instances:
             return self._instances[cid]
         rt = DockerOsRuntime(
@@ -181,7 +192,7 @@ class DockerOsRuntime(OsRuntime):
         self._client: DockerClient | None = client
         self._container: Container | None = None
         self._env: dict[str, str] = {}
-        # docker-py shares one HTTP connection per client; concurrent exec_run /
+        # docker-py shares one HTTP connection per client. Concurrent exec_run /
         # archive calls interleave on the socket and corrupt the demux stream
         # ("N is not a valid stream"). Serialise all container I/O on this lock.
         self._io_lock = threading.Lock()
@@ -189,9 +200,6 @@ class DockerOsRuntime(OsRuntime):
     def _resolve(self, path: str) -> str:
         return path if path.startswith("/") else f"{self._workdir}/{path}"
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     async def start(self) -> None:
         await asyncio.to_thread(self._sync_start)
@@ -263,9 +271,6 @@ class DockerOsRuntime(OsRuntime):
         except Exception as exc:
             logger.warning("docker_runtime.stop_failed | name=%s error=%s", self._name, exc)
 
-    # ------------------------------------------------------------------
-    # OsRuntime — exec
-    # ------------------------------------------------------------------
 
     def add_env(self, env: dict[str, str]) -> None:
         if env and not self._allow_runtime_env:
@@ -317,9 +322,6 @@ class DockerOsRuntime(OsRuntime):
             stderr_b.decode("utf-8", errors="replace") if stderr_b else "",
         )
 
-    # ------------------------------------------------------------------
-    # OsRuntime — file system
-    # ------------------------------------------------------------------
 
     async def read_text(self, path: str) -> str:
         return await asyncio.to_thread(self._sync_read_text, path)
@@ -385,13 +387,17 @@ class DockerOsRuntime(OsRuntime):
         if exit_code != 0:
             raise RuntimeError(f"delete '{path}' failed: {stderr.strip()}")
 
-    # ------------------------------------------------------------------
 
     def shell(self) -> tuple[str, str]:
         return ("bash", "-c")
 
     def security_capabilities(self) -> ExecutionCapabilities:
-        """Capabilities enforced by container creation and env handling."""
+        """Report the capabilities enforced by Docker runtime configuration.
+
+        Returns:
+            ExecutionCapabilities: Sandbox boundaries and configured network
+            and secret exposure.
+        """
         return ExecutionCapabilities(
             filesystem=FilesystemCapability.SANDBOX,
             network=(
@@ -415,5 +421,5 @@ class DockerOsRuntime(OsRuntime):
     def _assert_running(self) -> None:
         if self._container is None:
             raise RuntimeError(
-                "DockerOsRuntime is not started — call start() before use."
+                "DockerOsRuntime is not started. Call start() before use."
             )

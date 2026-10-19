@@ -1,13 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""TurnSummary → MentalElement.
+"""Adapt past conversation turns into reducible mental elements.
 
-Note which "summary" this is. `MentalModel.summary` is a line about the *current*
-turn and is framing — it describes the moment rather than the world, and is not
-reducible. `TurnSummary` objects in `recent_turns` are past conversation, which is
-knowledge, and they go through this adapter.
-"""
+Current-turn framing remains separate from those historical turn summaries."""
 
 from __future__ import annotations
 
@@ -43,7 +39,7 @@ def test_a_turn_reads_as_one_line_built_from_its_fields() -> None:
     text = element.at(element.levels[0]).text
     assert "[7]" in text
     assert "user: what is the limit?" in text
-    assert "→ 100 characters" in text
+    assert "-> 100 characters" in text
 
 
 def test_conversation_is_held_harder_than_a_passing_result() -> None:

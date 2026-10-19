@@ -1,48 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Where an assertion stands: the container the incremental diff runs in.
-
-Two runs compare one slot's assertions against the same slot's, so a slot that
-loses its identity retracts and recreates everything inside it and takes the
-approvals with them. That makes it the third surrogate in the model, for the same
-reason as the other two — the path proposes the match, the id is minted once and
-never derived.
-
-    document_id   the document a slot belongs to; matching never crosses it
-    slot_id       persisted, minted once
-    anchors       every path this slot has been found by, and what each was worth
-    content       a recovery aid, and only that
-
-so the effective identity is `document_id + slot_id`, and the anchors and the
-content are aids for finding a slot again *within* one document.
-
-**An anchor is worth what its source made it worth.** An id the author wrote —
-`[[expenses]]`, `id="expenses"` — survives a rename, a reorder, an insertion
-above it and a rewrite. A heading path survives none of those; it finds the
-section again while nobody renames a heading, and stops the moment somebody does.
-Both resolve; they do not resolve with the same confidence, and the resolution
-says which happened so a later reader is not left to assume.
-
-The strength travels **on each anchor** rather than once per slot, and one
-transition is the reason:
-
-    authored → authored    ordinary
-    derived  → authored    an upgrade; very likely the same section
-    derived  → derived     the fallback rungs are doing the work
-    authored → derived     a degradation — do not continue blindly
-
-When an authored id is removed and only a heading path is left, a slot that
-claimed one strength for its whole life would carry a lineage across a change
-nobody could see.
-
-**The current anchor is the primary signal.** A resolving anchor is the answer
-and nothing else is consulted. Content is a recovery aid, reached only where no
-anchor resolves, and it claims a slot only when it claims exactly one. Several
-candidates mean nothing is claimed: that errs towards a document holding one slot
-too many, which shows up as an assertion arriving twice, over two sections
-quietly becoming one, which nobody sees.
-"""
+"""Resolve document sections to persistent slot identities."""
 
 from __future__ import annotations
 
@@ -79,7 +38,7 @@ class SlotAnchor:
     """One path a slot has been found by, and how much it was worth.
 
     Temporal rather than a current value beside a list of old ones: the same path
-    can legitimately come back — a heading renamed and renamed back — and a
+    can legitimately return when a heading is renamed and later restored. A
     mapping from anchor to strength would collapse that history into one entry.
     """
 
@@ -106,7 +65,11 @@ class SlotMatch:
 
     @property
     def is_authored(self) -> bool:
-        """Whether the match rested on something the source itself wrote."""
+        """Identify a match grounded in a source-authored anchor.
+
+        Returns:
+            bool: Whether the resolution is authored.
+        """
         return self.resolution in (AUTHORED_EXACT, AUTHORED_ALIAS)
 
 
@@ -115,12 +78,14 @@ def _anchors(value: Mapping[str, Any]) -> Sequence[SlotAnchor]:
 
 
 def _live(document_id: str, known: Mapping[str, Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
-    """This document's slots that are still in play.
+    """Filter live slots belonging to one document.
 
-    Retired ones are excluded rather than filtered later: a section that comes
-    back must not silently reattach to a slot retired months ago. Whether the old
-    lineage continues is a decision worth taking deliberately, and taking it
-    implicitly through a resolver is what the surrogate ids exist to prevent.
+    Args:
+        document_id (str): Document whose slots are being considered.
+        known (Mapping[str, Mapping[str, Any]]): Known slot values keyed by slot ID.
+
+    Returns:
+        dict[str, Mapping[str, Any]]: Live slot values belonging to the document.
     """
     return {
         slot_id: value
@@ -141,19 +106,19 @@ def resolve_slot(
     content: str,
     known: Mapping[str, Mapping[str, Any]],
 ) -> SlotMatch:
-    """Which slot of this document this section is — an existing one, or a new one.
+    """Resolve one section through exact anchor and content signals.
 
-    A ladder, and every rung requires a *unique* answer:
+    Args:
+        document_id (str): Document containing the arriving section.
+        anchor (str): Authored section anchor.
+        content (str): Exact section content.
+        known (Mapping[str, Mapping[str, Any]]): Known slot values available for matching.
 
-        the current anchor, exactly
-        → the current anchor, among several sharing it, disambiguated by content
-        → a path this slot used to have
-        → the content, when it matches exactly one slot
-        → otherwise a new slot
+    Returns:
+        SlotMatch: Match to an existing slot or a newly minted slot.
 
-    Nothing here weighs a score. Two candidates at any rung mean the section is
-    new, because choosing between them is the heuristic that would decide
-    identity.
+    Side Effects:
+        May generate a random slot ID for an unmatched section.
     """
     live = _live(document_id, known)
 
@@ -173,7 +138,7 @@ def resolve_slot(
         return SlotMatch(slot_id, _resolution(found.strength, exact=True))
     if by_anchor:
         # A document with two sections under one heading path. The anchor cannot
-        # decide, so the content says which is which — the second and last place
+        # decide, so the content says which is which. This is the second and last place
         # it is allowed to.
         same_content = [
             slot_id for slot_id in by_anchor if live[slot_id].get("content") == content
@@ -191,7 +156,7 @@ def resolve_slot(
     if len(by_alias) == 1:
         # Resolved without looking at the content: once a rename is recorded, a
         # source that reverts it is not a rediscovery. That is what the history
-        # is for — a later run does not work the move out again every time.
+        # is for. A later run does not work the move out again every time.
         slot_id, found = next(iter(by_alias.items()))
         return SlotMatch(slot_id, _resolution(found.strength, exact=False))
     if by_alias:
@@ -216,15 +181,18 @@ def resolve_slot(
 def retire_slot(
     slot_id: str, known: Mapping[str, Mapping[str, Any]], *, at: datetime | None = None
 ) -> dict[str, Any]:
-    """Mark a slot retired, keeping what a later run would recognise it by.
+    """Close a slot while retaining its anchor history.
 
-    Dropping the row instead would make a section that comes back
-    indistinguishable from one that was never there, and the decision whether to
-    continue the old lineage could no longer be taken at all.
+    Args:
+        slot_id (str): Slot to close.
+        known (Mapping[str, Mapping[str, Any]]): Known slot values keyed by slot ID.
+        at (datetime | None): Retirement time. Defaults to the current time.
 
-    The current anchor is closed rather than removed: it becomes the path this
-    slot *had*, which is the one a returning section is most likely to arrive
-    under.
+    Returns:
+        dict[str, Any]: Copy of the slot value with its anchor history closed.
+
+    Side Effects:
+        Reads the clock when at is omitted.
     """
     value = known.get(slot_id)
     if value is None:
@@ -250,31 +218,25 @@ def retire_slot(
 
 
 def section_fingerprint(content: str) -> str:
-    """What a section says, as the registry compares it.
+    """Hash normalized section content for slot comparison.
 
-    A hash, and of the *normalised* text: a section reflowed or given a full stop
-    has not changed what it says, and a fingerprint that moved on those would
-    make every reformatting look like a rename.
+    Args:
+        content (str): Section text.
 
-    One function, because the side that writes it and the side that compares it
-    disagreeing is a bug nothing would report — every recovery would simply stop
-    working.
+    Returns:
+        str: Section fingerprint.
     """
     return stable_digest(normalise(content))
 
 
 def parser_input_fingerprint(content: str) -> str:
-    """What the model was actually shown, as a hash — and nothing normalised away.
+    """Hash exact parser input without normalization.
 
-    The other question about a section, and deliberately not the one above.
-    `section_fingerprint` asks *is this probably the same section*, which is why
-    it may fold a reflow and a full stop; this one asks *was the model asked
-    exactly this*, and an answer that folds anything is answering a different
-    question.
+    Args:
+        content (str): Parser input text.
 
-    Using the normalised hash for both froze a slot's claims across a real edit:
-    a sentence given a full stop is a changed question, the guard read it as an
-    unchanged section, and the corrected wording never became a revision.
+    Returns:
+        str: Parser-input fingerprint.
     """
     return stable_digest(content)
 
@@ -286,7 +248,7 @@ class ObservedSection:
     The business boundary, deliberately: what a section *is* to the registry is
     where it can be found and what it says, and nothing else. The ordinal the
     parser produced is carried under a name that says what it is and takes part
-    in no decision — it renumbers when a paragraph is inserted above, which is
+    in no decision. It renumbers when a paragraph is inserted above, which is
     exactly why it must never reach identity again.
 
     Two fingerprints of one text, because two different questions are asked of
@@ -303,7 +265,7 @@ class ObservedSection:
     unit_ordinal: str = ""
     assertions: tuple[Any, ...] = ()
     #: The exact input this section was read from. Empty where a caller could
-    #: not say — a section with no parser text — and an empty one never lets the
+    #: not say. A section with no parser text is empty and never lets the
     #: stable-slot guard fire, because "both unknown" is not "both the same".
     parser_input_fingerprint: str = ""
 
@@ -317,7 +279,18 @@ class ObservedSection:
         unit_ordinal: str = "",
         assertions: tuple[Any, ...] = (),
     ) -> ObservedSection:
-        """One section from the one text it was read from."""
+        """Record the exact section content seen by a parser.
+
+        Args:
+            anchor (str): Section anchor as parsed.
+            anchor_strength (str): Strength of the parsed anchor.
+            content (str): Exact section text.
+            unit_ordinal (str): Parser position of the section.
+            assertions (tuple[Any, ...]): Claims observed in the section.
+
+        Returns:
+            ObservedSection: Observed section with content and parser-input fingerprints.
+        """
         return cls(
             anchor=anchor,
             anchor_strength=anchor_strength,
@@ -329,11 +302,10 @@ class ObservedSection:
 
     @property
     def anchorable(self) -> bool:
-        """Whether a persisted slot may be minted for this section at all.
+        """Permit a persistent slot only for a usable anchor.
 
-        A section nothing can find again would get a slot that is new on every
-        run, retiring and recreating everything it holds each time — worse than
-        no slot, because it claims a stability it does not have.
+        Returns:
+            bool: Whether the section can be anchored.
         """
         return self.anchor_strength in (AUTHORED_ANCHOR, DERIVED_ANCHOR) and bool(self.anchor)
 
@@ -344,7 +316,17 @@ def slot_value(
     content: str = "",
     status: str = "live",
 ) -> dict[str, Any]:
-    """One slot as the resolver reads it."""
+    """Build a slot value for registry storage.
+
+    Args:
+        document_id (str): Document that owns the slot.
+        anchors (Sequence[SlotAnchor]): Recorded anchor history.
+        content (str): Current section content.
+        status (str): Slot lifecycle status.
+
+    Returns:
+        dict[str, Any]: Registry value with immutable anchor history.
+    """
     return {
         "document_id": document_id,
         "anchors": tuple(anchors),
@@ -354,16 +336,26 @@ def slot_value(
 
 
 def current_anchor(value: Mapping[str, Any]) -> SlotAnchor | None:
-    """The path this slot is found by now, if it still has one."""
+    """Find the currently valid anchor of a slot.
+
+    Args:
+        value (Mapping[str, Any]): Slot value.
+
+    Returns:
+        SlotAnchor | None: Current SlotAnchor or None.
+    """
     return next((anchor for anchor in _anchors(value) if anchor.is_current), None)
 
 
 def degraded(value: Mapping[str, Any], arriving: str) -> bool:
-    """Whether this slot's anchor stopped being something the source wrote.
+    """Detect loss of an authored section anchor.
 
-    The transition a single strength per slot could not express. Continuing is
-    still right — it is the same section — but doing it without noticing is how a
-    lineage gets carried across a change nobody could see.
+    Args:
+        value (Mapping[str, Any]): Existing slot value.
+        arriving (str): Anchor of the arriving section.
+
+    Returns:
+        bool: True when the authored anchor loses specificity.
     """
     anchor = current_anchor(value)
     return anchor is not None and anchor.strength == AUTHORED_ANCHOR and arriving == DERIVED_ANCHOR

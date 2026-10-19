@@ -6,7 +6,7 @@
 One definition of what a source configuration looks like, because there are now
 two callers: the `ingestion.source` step, which acquires a snapshot to process,
 and a configured watcher, which acquires one to notice that something changed.
-They describe the same thing and must keep describing it the same way — a
+They describe the same thing and must keep describing it the same way. A
 watcher pointed at a different tree than the run it triggers is a fault nobody
 sees, because the symptom is nothing happening.
 
@@ -87,10 +87,22 @@ SOURCE_BUILDERS: dict[str, Callable[[Mapping[str, Any], str], DocumentSource]] =
 
 
 def build_source(kind: str, config: Mapping[str, Any], *, where: str) -> DocumentSource:
-    """Build the source named by ``kind``, or say which kinds exist.
+    """Construct a configured document source by kind.
 
-    ``where`` names the thing being configured — a step or a watcher — so the
-    message points at the block to fix rather than at this function.
+    Args:
+        kind (str): Registered source kind.
+        config (Mapping[str, Any]): Source-specific configuration.
+        where (str): Step or watcher location named in errors.
+
+    Returns:
+        DocumentSource: Source adapter for the requested kind.
+
+    Raises:
+        SourceConfigurationError: The kind is unknown or required settings are
+            missing or malformed.
+
+    Side Effects:
+        Confluence source construction creates an HTTP client.
     """
     builder = SOURCE_BUILDERS.get(kind)
     if builder is None:

@@ -1,20 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""UC1 — Request Routing
+"""Route OpenAI and generic JSON requests through configured workflows.
 
-Tests the contracts documented in the quickstart and creating-workflows docs:
-
-  - POST /v1/chat/completions with a configured workflow is routed through
-    the step machine and returns a JSON response.
-  - POST /v1/chat/completions with no workflow mapping falls back to the
-    upstream model provider proxy (502 when no provider is reachable).
-  - Invalid request body → 422.
-  - A workflow present in the mapping but absent from the DB → unhandled
-    WorkflowNotFoundError → 500 (adapter does not catch it).
-  - Generic-JSON adapter: it is the catch-all, so any path/method resolves; an
-    unmapped-but-absent workflow → 404. (A bodyless GET resolves too — the
-    detector no longer demands a JSON body.)
+The tests cover proxy fallback, invalid bodies, missing generic workflows,
+workflow responses, and the health endpoint.
 """
 
 from __future__ import annotations
@@ -26,10 +16,6 @@ from integration._helpers import build_test_app, build_test_container, seed_work
 
 pytestmark = pytest.mark.integration
 
-
-# ---------------------------------------------------------------------------
-# Happy path — OpenAI adapter routes through a real workflow
-# ---------------------------------------------------------------------------
 
 async def test_openai_chat_completions_routes_through_workflow(
     session_factory, workflow_repo, resource_repo,
@@ -60,15 +46,10 @@ async def test_openai_chat_completions_routes_through_workflow(
 def test_openai_chat_completions_no_workflow_mapping_falls_back_to_proxy(
     workflow_repo, resource_repo,
 ):
-    """When no workflow mapping is configured, the adapter proxies upstream.
-
-    Because no model provider URL is set in the test container, the proxy
-    attempt raises an HTTPException(503) — 'No model provider configured'.
-    This verifies the fallback branch is taken rather than the executor path.
-    """
+    """Use the upstream proxy when no workflow mapping matches the request."""
     container = build_test_container(
         workflow_repo, resource_repo,
-        openai_workflow_mapping={},  # empty mapping → no workflow routing
+        openai_workflow_mapping={},  # An empty map routes to the proxy.
     )
     app = build_test_app(container)
 
@@ -85,7 +66,7 @@ def test_openai_chat_completions_no_workflow_mapping_falls_back_to_proxy(
 def test_openai_chat_completions_invalid_body_returns_422(
     workflow_repo, resource_repo,
 ):
-    """Malformed request body → 422 before the workflow is touched."""
+    """Reject a malformed OpenAI request before workflow execution."""
     container = build_test_container(
         workflow_repo, resource_repo,
         openai_workflow_mapping={"chat_completions": "any"},
@@ -102,15 +83,11 @@ def test_openai_chat_completions_invalid_body_returns_422(
     assert resp.status_code == 422
 
 
-# ---------------------------------------------------------------------------
-# Generic-JSON adapter error paths
-# ---------------------------------------------------------------------------
-
 async def test_generic_json_workflow_not_found_returns_404(
     session_factory, workflow_repo, resource_repo,
 ):
     """When no matching workflow exists in the DB the gateway returns 404."""
-    # We seed nothing — the workflow "unknown-op" does not exist.
+    # No workflow is seeded, so "unknown-op" cannot resolve.
     container = build_test_container(
         workflow_repo, resource_repo,
         include_generic_json=True,
@@ -147,10 +124,6 @@ async def test_generic_json_found_workflow_returns_200(
 
     assert resp.status_code == 200
 
-
-# ---------------------------------------------------------------------------
-# Healthz sanity
-# ---------------------------------------------------------------------------
 
 def test_healthz_always_returns_ok(workflow_repo, resource_repo):
     container = build_test_container(workflow_repo, resource_repo)

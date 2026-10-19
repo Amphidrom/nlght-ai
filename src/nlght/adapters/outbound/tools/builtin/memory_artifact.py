@@ -23,11 +23,11 @@ class LoadMemoryArtifactTool(ToolBase):
 
     Artifacts are written to ``<workspace>/memory_artifacts/<uuid><ext>`` by
     ``MemoryIngestionPipeline`` when a workspace is provided.  HiveMind stores
-    only a compact ``[memory_artifact]`` reference; this tool resolves that
+    only a compact ``[memory_artifact]`` reference. This tool resolves that
     reference back to the full content on demand.
 
     Configuration:
-      ``artifacts_dir`` — absolute path to the artifacts directory.
+      ``artifacts_dir``: absolute path to the artifacts directory.
       Overridden by the workspace context when injected at catalog build time.
     """
 
@@ -94,7 +94,6 @@ class LoadMemoryArtifactTool(ToolBase):
             ),
         ]
 
-    # ------------------------------------------------------------------
 
     def _artifacts_dir(self) -> Path | None:
         if self._workspace is not None:

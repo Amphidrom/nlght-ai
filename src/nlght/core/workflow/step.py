@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from nlght.core.model.messages import CanonicalMessage
+from nlght.core.model.trust import ContentLedger
 from nlght.core.trigger.trigger import Trigger
 
 if TYPE_CHECKING:
@@ -27,7 +29,7 @@ class WorkflowStepContext:
     """Mutable execution context passed between steps in the step machine.
 
     Steps read execution state from this context and emit output via
-    ``emitter`` — they do not write response fields and have no knowledge
+    ``emitter``. They do not write response fields and have no knowledge
     of the transport layer (HTTP, SSE, JSON).
 
     The executor creates the appropriate ``SignalEmitter`` implementation
@@ -51,9 +53,16 @@ class WorkflowStepContext:
     execution_id: uuid.UUID | None = None
     """This run's durable execution, when it has one (see ``WorkflowInvocation``)."""
     dispatcher: ExecutionDispatcher | None = None
-    """Submits further executions — the seam a step uses to spread work across
+    """Submits further executions. This lets a step spread work across
     workers instead of looping over it here."""
     metadata: dict[str, Any] = field(default_factory=dict)
+    ledger: ContentLedger = field(default_factory=ContentLedger)
+    """Everything this run's model context has taken in, and where it came from.
+
+    Monotonic for the run and shared with ``tools``: a step that trims its
+    messages does not make content it already read disappear from the next
+    decision (ADR-0074). Pass ``origin_of(messages)`` as ``context_origin``
+    when a step executes a tool itself."""
 
 
 @dataclass
@@ -91,22 +100,45 @@ class StepBase:
 
     ``config`` is the step's JSON configuration from its workflow version.
     Additional keyword arguments are runtime dependencies supplied by a bound
-    ``StepLoader`` (a repository, an embedding client, …); a step that does not
+    ``StepLoader`` (for example, a repository or embedding client). A step that does not
     need them ignores them, exactly as ``ToolBase`` does.
     """
 
     TYPE: ClassVar[str]
+
+    class Verdict:
+        """Verdicts shared by every workflow step."""
+
+        DEFAULT = "DEFAULT"
+        DONE = "done"
+        FAILED = "failed"
+
+    @classmethod
+    def verdicts(cls, config: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+        """List verdicts available from this step before it runs.
+
+        Args:
+            config (Mapping[str, Any] | None): Persisted step configuration.
+
+        Returns:
+            tuple[str, ...]: Common and step-specific verdict values in declaration order.
+        """
+        values: list[str] = []
+        for owner in reversed(cls.Verdict.__mro__):
+            for name, value in vars(owner).items():
+                if name.isupper() and isinstance(value, str) and value not in values:
+                    values.append(value)
+        return tuple(values)
 
     def __init__(self, *, config: dict[str, Any], **_: object) -> None:
         self.config = config
 
     @classmethod
     def options(cls) -> list[StepOption]:
-        """The configuration keys this step understands.
+        """Declare typed configuration options for a step.
 
-        Override to make a step self-describing: the admin UI renders these as
-        typed inputs with descriptions and defaults. The default is empty, which
-        means "free-form JSON" and preserves existing behaviour.
+        Returns:
+            list[StepOption]: Empty option list until a subclass overrides it.
         """
         return []
 

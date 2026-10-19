@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.core.hive_mind.system_prompt — SystemPromptBuilder."""
+"""Check system prompt construction from model context."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -36,7 +36,14 @@ def _model(**kwargs) -> MentalModel:
 
 
 def _render_records(records: tuple[ContextRecord, ...]) -> str:
-    """Human-readable test view; production retains these as typed records."""
+    """Human-readable test view; production retains these as typed records.
+
+    Args:
+        records (tuple[ContextRecord, ...]): Typed prompt records to render.
+
+    Returns:
+        str: Readable representation of the typed prompt records.
+    """
 
     lines: list[str] = []
     seen_sections: set[str] = set()
@@ -51,7 +58,7 @@ def _render_records(records: tuple[ContextRecord, ...]) -> str:
 class _TestPromptView:
     """Exercise both builders while keeping their outputs separate in production."""
 
-    def __init__(self, ctx=None) -> None:  # noqa: ANN001
+    def __init__(self, ctx=None) -> None:
         self.context_builder = ModelContextBuilder(ctx=ctx)
 
     def build(
@@ -60,9 +67,9 @@ class _TestPromptView:
         ego: str,
         constraints: list[str] | None = None,
         input_policy: PromptInputPolicy | None = None,
-        working_memory_reference_resolver=None,  # noqa: ANN001
-        slots=None,  # noqa: ANN001
-        token_budget=None,  # noqa: ANN001
+        working_memory_reference_resolver=None,
+        slots=None,
+        token_budget=None,
         max_system_prompt_tokens: int | None = None,
         compression_reports: list[PromptCompressionReport] | None = None,
     ) -> str:
@@ -127,10 +134,6 @@ def _scored_atom(
     )
 
 
-# ---------------------------------------------------------------------------
-# DEFAULT_CONSTRAINTS
-# ---------------------------------------------------------------------------
-
 def test_default_constraints_not_empty() -> None:
     assert len(DEFAULT_CONSTRAINTS) > 0
 
@@ -160,10 +163,6 @@ def test_system_prompt_builder_supports_trusted_only_prompt() -> None:
 
     assert prompt == "Trusted ego.\n\nAlways follow these constraints:\n- Trusted constraint."
 
-
-# ---------------------------------------------------------------------------
-# decision-equivalent: include_results=True only
-# ---------------------------------------------------------------------------
 
 def test_decision_includes_ego() -> None:
     builder = _builder()
@@ -196,10 +195,6 @@ def test_decision_empty_constraints() -> None:
     assert "constraints" not in prompt.lower()
 
 
-# ---------------------------------------------------------------------------
-# orient-equivalent: include_directives + include_intents + include_entities
-# ---------------------------------------------------------------------------
-
 def test_orient_includes_intent() -> None:
     builder = _builder()
     model   = _model(intents=["informational"], entities=["python"])
@@ -221,10 +216,6 @@ def test_orient_no_recent_turns() -> None:
     )
     assert "Recent conversation" not in prompt
 
-
-# ---------------------------------------------------------------------------
-# task-equivalent: adds include_recent_turns + include_atoms + include_results
-# ---------------------------------------------------------------------------
 
 def test_task_includes_recent_turns() -> None:
     builder = _builder()
@@ -404,10 +395,6 @@ def test_policy_can_include_session_results_without_conversation_store() -> None
     assert "Recent conversation" not in prompt
 
 
-# ---------------------------------------------------------------------------
-# plan-equivalent: adds include_delta (SPEC/PLAN atoms + delta)
-# ---------------------------------------------------------------------------
-
 def test_plan_includes_active_atoms() -> None:
     builder = _builder()
     model   = _model(active_atoms=[_scored_atom("atom content")])
@@ -421,15 +408,6 @@ def test_plan_includes_spec_and_plan_atom_types() -> None:
     assert "spec data" in prompt
     assert "Planning context:" in prompt
 
-
-# ---------------------------------------------------------------------------
-# Unknown directives — there is no fallback rendering any more
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Turn result summary included
-# ---------------------------------------------------------------------------
 
 def test_task_turn_with_result_summary() -> None:
     builder = _builder()
@@ -446,15 +424,7 @@ def test_task_turn_with_result_summary() -> None:
 
 
 def test_prompt_compression_omits_the_least_relevant_when_the_budget_is_exceeded() -> None:
-    """The budget is met by giving up the least relevant, whatever sort it is.
-
-    Relevance is stated here rather than left to tie, because a tie would be
-    broken on the element id — which follows the order the caller supplied and
-    would make this test pass for a reason that is not the mechanism. In a real
-    turn the scores differ: recency is one of the four dimensions the
-    `RelevanceEngine` computes, so an older result scores lower without anything
-    having to sort by age.
-    """
+    """Omit lower-relevance elements to meet the prompt budget."""
     builder = _builder()
     reports: list[PromptCompressionReport] = []
     model = _model(
@@ -483,23 +453,8 @@ def test_prompt_compression_omits_the_least_relevant_when_the_budget_is_exceeded
     assert reports[0].reason == "model_context_token_budget"
 
 
-# ---------------------------------------------------------------------------
-# The renderer is blind to what it is rendering
-# ---------------------------------------------------------------------------
-
 def test_two_elements_alike_but_for_their_kind_render_identically() -> None:
-    """The contract slice B exists to establish.
-
-    Same chosen representation, same presentation metadata, different `kind` —
-    and the prompt must not be able to tell. Before this, it very much could: a
-    session result tagged `user_fact` got one heading and one without it got
-    another, an atom's type decided which of two sections it landed in, and
-    session results were the only thing a budget could drop. Format and policy
-    were both decided by which store a thing came out of.
-
-    Rendered through the real builder rather than through a helper, because the
-    claim is about the prompt and not about a function.
-    """
+    """Render equal representations identically despite different storage kinds."""
     from nlght.core.hive_mind.models import (
         Level,
         MentalElement,
@@ -523,7 +478,7 @@ def test_two_elements_alike_but_for_their_kind_render_identically() -> None:
     model = _model()
 
     def _render(kind: str) -> str:
-        return _render_records(builder.context_builder._build_records(  # noqa: SLF001
+        return _render_records(builder.context_builder._build_records(
             mental_model=model,
             policy=PromptInputPolicy(),
             view=reduce_to_budget([_element(kind)], budget=100),

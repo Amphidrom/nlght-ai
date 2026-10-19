@@ -62,21 +62,14 @@ def _hit(
     )
 
 
-def _fused(*hits: RetrievalHit):  # noqa: ANN202
+def _fused(*hits: RetrievalHit):
     return fuse(rank_within_sources(list(hits)))
 
 
 # 1. The text is the finding's text
-# ---------------------------------------------------------------------------
 
 def test_a_passage_is_exactly_what_the_store_returned() -> None:
-    """No expansion and no reconstruction.
-
-    Neighbour expansion is not possible from what the pipeline indexes — the
-    chunk payload carries no position and no offsets — and expanding a chunk to
-    its whole document would inflate a finding retrieval deliberately narrowed.
-    Neither is approximated here.
-    """
+    """Preserve the exact passage returned by the store without expansion."""
     hit = _hit(VECTOR, CHUNK, "c1", "the chunk text", document_id="d1")
 
     passages = passages_from(_fused(hit))
@@ -85,7 +78,6 @@ def test_a_passage_is_exactly_what_the_store_returned() -> None:
 
 
 # 2. Order comes from retrieval, and only from retrieval
-# ---------------------------------------------------------------------------
 
 def test_the_order_survives_a_permutation_of_the_input() -> None:
     hits = [
@@ -122,7 +114,6 @@ def test_ranks_are_positions_and_run_from_one() -> None:
 
 
 # 3-5. What is one passage, and what is two
-# ---------------------------------------------------------------------------
 
 def test_two_stores_finding_one_thing_make_one_passage() -> None:
     passages = passages_from(_fused(
@@ -135,12 +126,7 @@ def test_two_stores_finding_one_thing_make_one_passage() -> None:
 
 
 def test_a_document_and_a_chunk_of_it_stay_two_passages() -> None:
-    """Overlapping text is not evidence that either finding is redundant.
-
-    Dropping the document because a chunk of it is present would be this layer
-    deciding which finding is the better one — an interpretation, in the one
-    place in the pipeline that is supposed to make none.
-    """
+    """Keep document and chunk findings as separate passages."""
     passages = passages_from(_fused(
         _hit(LEXICAL, DOCUMENT, "d1", "the whole document, including the part"),
         _hit(VECTOR, CHUNK, "c1", "the part", document_id="d1"),
@@ -183,7 +169,6 @@ def test_one_carrier_in_two_revisions_is_two_passages() -> None:
 
 
 # 6-8. The budget
-# ---------------------------------------------------------------------------
 
 def _passage(rank: int, text: str) -> ContextPassage:
     return ContextPassage(
@@ -212,14 +197,7 @@ def test_a_passage_that_does_not_fit_is_dropped_and_never_cut() -> None:
 
 
 def test_a_smaller_budget_only_removes_from_the_bottom() -> None:
-    """The reason a non-fitting passage stops the selection rather than being skipped.
-
-    Skipping ahead to a smaller passage would let a *smaller* budget drop
-    something from the middle of the list, and two budgets would no longer be
-    comparable. Taking a prefix is what makes "less budget, less context, from
-    the bottom" true — at the cost of sometimes leaving budget unspent, which
-    `omitted` shows rather than hides.
-    """
+    """Select a prefix so smaller budgets remove only lower-ranked passages."""
     passages = [_passage(1, "a" * 10), _passage(2, "b" * 50), _passage(3, "c" * 5)]
 
     generous = select(passages, ContextBudget(max_chars=100)).passages
@@ -244,13 +222,12 @@ def test_a_negative_budget_is_refused() -> None:
 
 def test_cost_is_characters_and_says_so() -> None:
     # Not estimated tokens. The platform's TokenBudget owns the model's context
-    # window; translating its share into characters happens where the model is
+    # window. Translating its share into characters happens where the model is
     # known, and this layer claims no precision it does not have.
     assert _passage(1, "hello").cost == 5
 
 
 # 9-10. What must survive, and what must not appear
-# ---------------------------------------------------------------------------
 
 def test_provenance_survives_whole() -> None:
     selection = build_context(

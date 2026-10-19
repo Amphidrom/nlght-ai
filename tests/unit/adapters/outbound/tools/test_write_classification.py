@@ -17,12 +17,14 @@ import pytest
 
 import nlght.adapters.outbound.tools.builtin  # noqa: F401  (fills the registry)
 from nlght.adapters.outbound.tools.registry import tool_registry
+from nlght.core.model.trust import ContentExposure, ContentTrust, SourceRef
 from nlght.core.tools.action import (
     ActionDecision,
     ActionDecisionReason,
     ActionDecisionResult,
     ActionExecutionContext,
     ActionResolutionContext,
+    ActionReview,
     ConcreteAction,
     DataEgressClass,
     ExecutionCapabilities,
@@ -49,12 +51,8 @@ ARGUMENTS = {
 class AllowReversibleWritesPolicy:
     """Plausible deployment policy: reversible writes are not worth a prompt."""
 
-    async def evaluate(
-        self,
-        action: ConcreteAction,
-        context: ActionExecutionContext,
-    ) -> ActionDecisionResult:
-        del context
+    async def evaluate(self, review: ActionReview) -> ActionDecisionResult:
+        action = review.action
         if action.side_effect is SideEffectClass.REVERSIBLE_WRITE:
             return ActionDecisionResult(ActionDecision.ALLOW, ActionDecisionReason.POLICY_ALLOWED)
         if action.side_effect is SideEffectClass.DESTRUCTIVE_WRITE:
@@ -65,7 +63,7 @@ class AllowReversibleWritesPolicy:
 
 
 def _side_effect(signature_name: str) -> SideEffectClass:
-    for cls in tool_registry._registry.values():  # noqa: SLF001
+    for cls in tool_registry._registry.values():
         for signature in cls.signatures():
             if signature.name == signature_name:
                 context = ActionResolutionContext(
@@ -85,11 +83,15 @@ async def _decide(signature_name: str) -> ActionDecision:
         capabilities=CONFINED,
     )
     result = await AllowReversibleWritesPolicy().evaluate(
-        action,
-        ActionExecutionContext(
-            request_id="r", correlation_id="c", principal=None, workflow="w",
-            session_id=None, resource_address="kind/name",
-            signature_name=signature_name, has_external_untrusted_input=True,
+        ActionReview(
+            context=ActionExecutionContext(
+                request_id="r", correlation_id="c", principal=None, workflow="w",
+                session_id=None, resource_address="kind/name",
+                signature_name=signature_name, exposure=ContentExposure((SourceRef("web", "", "https://attacker.example", ContentTrust.UNTRUSTED),)),
+            ),
+            action=action,
+            action_fingerprint="f",
+            effective_arguments_json="{}",
         ),
     )
     return result.decision

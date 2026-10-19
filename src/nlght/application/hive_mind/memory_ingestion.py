@@ -1,11 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Memory ingestion pipeline.
-
-Bridges extraction and StoreCoordinator transaction semantics.
-The extractor is injected — no default, no NLP fallback.
-"""
+"""Apply extracted memory candidates to a session store."""
 
 from __future__ import annotations
 
@@ -205,7 +201,18 @@ def _promote_to_workspace(
     workspace: WorkspaceContext,
     artifacts: list[ExtractedArtifact],
 ) -> dict[str, str]:
-    """Write each artifact's content to workspace and return label → compact-ref map."""
+    """Persist extracted artifacts in the workflow workspace.
+
+    Args:
+        workspace (WorkspaceContext): Workspace that receives the artifacts.
+        artifacts (list[ExtractedArtifact]): Extracted artifacts to persist.
+
+    Returns:
+        dict[str, str]: Artifact labels mapped to compact references.
+
+    Side Effects:
+        Creates artifact files under the workspace root.
+    """
     artifacts_dir = workspace.root_path / "memory_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +233,14 @@ def _promote_to_workspace(
 
 
 def _parse_artifact_ref(content: str) -> dict[str, str]:
-    """Parse fields from a ``[memory_artifact]`` compact reference string."""
+    """Decode fields from a compact memory artifact reference.
+
+    Args:
+        content (str): Reference string.
+
+    Returns:
+        dict[str, str]: Parsed field names and values.
+    """
     rest = content[len("[memory_artifact]"):].strip()
     fields: dict[str, str] = {}
     for part in rest.split(" | "):

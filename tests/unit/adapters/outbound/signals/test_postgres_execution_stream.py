@@ -1,17 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Delivery semantics of the distributed broker, over a substituted connection.
+"""Check execution-stream delivery through a substituted notification bus.
 
-The fake bus below behaves like PostgreSQL's ``LISTEN``/``NOTIFY`` in the two
-respects this adapter depends on: a notification reaches *every* listening
-session, including one on the connection that published it, and payloads are
-delivered in the order they were sent. Those two properties are the assumption
-this file rests on, and nothing here proves them — that would need a real
-database, which CI does not have. What *is* proven here is everything the
-adapter does on top of them: routing, de-duplication of its own echo, and
-reassembly of a payload too large for one notification.
-"""
+The fake bus broadcasts to all listeners, including the publisher, and keeps
+send order. These tests check adapter behavior under those assumptions."""
 
 from __future__ import annotations
 
@@ -195,7 +188,7 @@ async def test_a_broken_transport_does_not_fail_the_publishing_run() -> None:
     await asyncio.sleep(0.01)
 
     try:
-        # The relay degrades; the execution producing the signals carries on, and
+        # The relay degrades. The execution producing the signals carries on, and
         # local subscribers still see everything.
         await broker.publish(execution_id, _sig("a"))
         await broker.close(execution_id)

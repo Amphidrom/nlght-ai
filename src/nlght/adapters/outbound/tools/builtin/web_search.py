@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import httpx2
 
 from nlght.adapters.outbound.tools.builtin.action_semantics import CONFIGURED_NETWORK_READ
+from nlght.core.model.trust import SOURCE_WEB
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,6 @@ def _domain(url: str) -> str:
         return (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
-
 
 
 def _parse_response(data: dict[str, Any], mode: str, limit: int) -> list[dict[str, Any]]:
@@ -68,22 +68,23 @@ class WebSearchTool(ToolBase):
     """Built-in tool for searching the web.
 
     Supports SearXNG and LangSearch backends. Returns structured source-candidate
-    objects directly from the search API — no page enrichment.
+    objects directly from the search API without page enrichment.
 
     Configuration:
-      ``endpoint``  — search API URL (required)
-      ``api_key``   — API key if required by the backend (optional)
-      ``timeout_s`` — HTTP timeout in seconds (default ``10``)
-      ``mode``      — ``searxng`` (default) or ``langsearch``
+      ``endpoint``: search API URL (required)
+      ``api_key``: API key if required by the backend (optional)
+      ``timeout_s``: HTTP timeout in seconds (default ``10``)
+      ``mode``: ``searxng`` (default) or ``langsearch``
     """
 
     KIND: ClassVar[str]     = "web_search"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_WEB
     PROVIDER: ClassVar[str] = "http"
 
     @classmethod
     def signatures(cls) -> list[ToolSignature]:
         params = [
-            ToolParameter(name="query", type="string", description="Search query — natural language or keywords."),
+            ToolParameter(name="query", type="string", description="Search query in natural language or keywords."),
             ToolParameter(name="top_k", type="number", description="Number of results to return.", required=False, default=5),
         ]
         return [
@@ -99,9 +100,6 @@ class WebSearchTool(ToolBase):
             ),
         ]
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     async def _fetch(self, query: str, top_k: int) -> dict[str, Any] | None:
         endpoint: str | None = self.config.get("endpoint")
@@ -163,9 +161,6 @@ class WebSearchTool(ToolBase):
             return None
         return _parse_response(data, mode, top_k)
 
-    # ------------------------------------------------------------------
-    # Operations
-    # ------------------------------------------------------------------
 
     async def search(self, *, query: str, top_k: int = 5) -> str:
         err = self._check_endpoint(query)

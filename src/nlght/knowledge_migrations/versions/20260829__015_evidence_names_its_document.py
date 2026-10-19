@@ -4,7 +4,7 @@
 """Evidence records what the document was called when it was read.
 
 `document_id` is a hash. It answers "which document" for a diff and answers
-nothing for a person, so a report could say a claim moved and never which file —
+nothing for a person. A report could say a claim moved without naming the file,
 and an expectation file could not name `timeouts.adoc` at all.
 
 The obvious place to look it up was `ingestion_documents`, and it is the wrong
@@ -17,9 +17,9 @@ already does.
 
 **Provenance, and never identity.** A renamed document is the same document: the
 path may change without opening an assertion or writing a revision, and nothing
-resolves a slot by it. What it is for is naming — in a report, in a citation, in
-an expectation — and it is stored exactly as observed rather than reconstructed,
-so two sightings of one document under two names each keep the name they saw.
+resolves a slot by it. It names a file in a report, citation, or expectation and
+is stored exactly as observed. Two sightings of one document under two names
+each keep the name they saw.
 
 Nullable, and nothing is backfilled. Evidence written before this has no path and
 cannot be given one: what the file was called at that moment was not recorded.

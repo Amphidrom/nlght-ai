@@ -34,11 +34,6 @@ def _snapshot(session_id: str = "s1") -> SessionSnapshot:
     )
 
 
-# ---------------------------------------------------------------------------
-# Serialisation helpers
-# ---------------------------------------------------------------------------
-
-
 def test_ser_de_turn_roundtrip() -> None:
     t = TurnSummary(
         turn_nr=3, user_input="hello", intent="greet",
@@ -70,10 +65,6 @@ def test_ser_result_file_backed_clears_content() -> None:
     assert data["workspace_path"] == "/tmp/file.txt"
 
 
-# ---------------------------------------------------------------------------
-# SessionSnapshot to_dict / from_dict
-# ---------------------------------------------------------------------------
-
 def test_snapshot_to_dict_from_dict_roundtrip() -> None:
     t  = TurnSummary(turn_nr=1, user_input="hi", intent="greet", topic="t")
     r  = SessionResult(content="data")
@@ -93,10 +84,6 @@ def test_snapshot_to_dict_from_dict_roundtrip() -> None:
     assert len(snap2.results)              == 1
     assert snap2.interrupted_task_ids      == ["task-1"]
 
-
-# ---------------------------------------------------------------------------
-# FileSystemBackend
-# ---------------------------------------------------------------------------
 
 def test_filesystem_backend_save_and_load(tmp_path) -> None:
     backend = FileSystemBackend(base_dir=str(tmp_path))
@@ -143,7 +130,7 @@ def test_filesystem_backend_sanitises_session_id(tmp_path) -> None:
     backend = FileSystemBackend(base_dir=str(tmp_path))
     snap    = _snapshot("session/with:special*chars")
     backend.save(snap)
-    # Should not raise — special chars get replaced
+    # Special characters are replaced without raising an error.
     sessions = backend.list_sessions()
     assert len(sessions) == 1
 

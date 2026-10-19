@@ -1,12 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Fan-out: one acquisition's documents spread over the worker pool.
+"""Distribute acquired documents to child ingestion runs.
 
-What matters here is what a child is given — the *names* of its documents and a
-link to the run that fanned it out — and what fan-out refuses to do when the
-deployment cannot support it.
-"""
+Children receive document names and parent-run linkage; unsupported
+deployments must not attempt fan-out."""
 
 from __future__ import annotations
 
@@ -182,11 +180,7 @@ async def test_a_child_is_told_which_documents_are_its_share_not_their_content()
 
 
 async def test_every_child_gets_its_own_run_identity() -> None:
-    """A correlation id identifies one run, and children are separate runs.
-
-    Sharing the parent's would collide on every key built from it — the ingestion
-    snapshot record, the executor's already-running guard, the per-run workspace.
-    """
+    """Give each ingestion child its own correlation and run identity."""
     ctx, dispatcher = _fanning_ctx("a.md", "b.md", "c.md")
 
     await IngestionFanOutStep(
@@ -277,7 +271,7 @@ async def test_an_empty_snapshot_fans_nothing_out() -> None:
 
 
 async def test_fanning_out_from_an_inline_run_is_a_configuration_error() -> None:
-    """No execution to parent children to means no fan-out — not a silent serial run."""
+    """Reject fan-out when the parent has no queued execution identity."""
     ctx, _ = _fanning_ctx("a.md")
     ctx.execution_id = None
 
@@ -387,7 +381,7 @@ async def test_a_run_without_a_share_still_acquires_the_whole_source(tmp_path: P
 
 
 async def test_a_child_given_an_empty_share_acquires_nothing(tmp_path: Path) -> None:
-    """An empty share is not 'no restriction' — it must not index the corpus."""
+    """Keep an empty child share from acquiring the whole corpus."""
     _repo(tmp_path)
 
     result = await IngestionSourceStep(config=_source_config(tmp_path)).run(
@@ -408,7 +402,7 @@ async def test_an_unreadable_share_is_a_configuration_error(tmp_path: Path) -> N
 
 async def test_a_child_carries_the_work_flow_s_own_capabilities() -> None:
     # Every other way of submitting a workflow derives required_capabilities from
-    # workflow.capabilities — the HTTP and streaming paths both do. Reading them
+    # workflow.capabilities. The HTTP and streaming paths both do. Reading them
     # only there meant a flow restricted to particular workers was restricted
     # when a caller submitted it and open to anyone when a fan-out did, which is
     # how a machine that cannot reach the source ends up holding a share.
@@ -430,7 +424,7 @@ async def test_the_step_narrows_further_rather_than_replacing() -> None:
         workflow_repository=_Workflows(declared_capabilities=("ingestion",)),
     ).run(ctx)
 
-    # Both, deduplicated and ordered — a worker needs everything named.
+    # The worker needs all declared capabilities, deduplicated and ordered.
     assert dispatcher.submissions[0].required_capabilities == ("gpu", "ingestion")
 
 
@@ -459,14 +453,7 @@ async def test_a_flow_that_declares_nothing_still_fans_out_to_any_worker() -> No
 
 
 async def test_children_inherit_the_principal_that_started_the_run() -> None:
-    """A distribution must not launder work into an identity nobody authorized.
-
-    Every child is a separate execution with its own correlation id, and it is
-    tempting to build its context field by field from what a child needs — at
-    which point the principal quietly stops travelling, and the children run
-    as nobody. `dataclasses.replace` carries it because it carries everything
-    not named; this pins that, because the next edit here could easily not.
-    """
+    """Carry the parent principal into each child execution."""
     ctx, dispatcher = _fanning_ctx("a.md", "b.md", "c.md")
     ctx.trigger = dataclasses.replace(
         ctx.trigger,

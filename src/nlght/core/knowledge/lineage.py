@@ -1,29 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""An assertion over its lifetime: continuation, supersession, and matching.
-
-An assertion is a surrogate id with a sequence of revisions under it. A rewording
-is the same assertion at a new revision; a materially different claim is a
-withdrawal and a new one, recorded as an event rather than inferred later from a
-distance score.
-
-Two questions are kept apart here, because they are not the same decision:
-
-    is this still the same assertion?
-    does the human approval of it still hold?
-
-An expense limit moving from CHF 500 to 550 is the same rule — the same business
-question — so the assertion continues. But a person approved five hundred, not
-five fifty, so the approval does not. Treating the two as one decision gets one
-of them wrong: either the rule is torn up and re-reviewed for a rewording, or a
-changed limit is served under an old approval.
-
-The matcher in this module never decides identity. An extracted entity key
-resolves by lookup; similarity is reached only where extraction failed to
-canonicalise, and then only to propose which existing entity a new assertion
-probably belongs to.
-"""
+"""Represent assertion continuity, supersession, and score matching."""
 
 from __future__ import annotations
 
@@ -55,22 +33,17 @@ SAME_FROM = 0.95
 """At or above this, two assertions are the same one."""
 
 AMBIGUOUS_FROM = 0.80
-"""Between this and `SAME_FROM`, continuity is uncertain.
-
-Not a review case by itself: sending every uncertain match to a person would
-refill the queue this design exists to keep empty. Ambiguity asks for a better
-matcher first — a structured comparison, then an equivalence classifier — and a
-person only when those have also failed.
-"""
+"""Keep uncertain matches separate until structure or equivalence can decide them."""
 
 
 def band(score: float) -> str:
-    """Which of the three bands a match score falls into.
+    """Classify a match score without forcing an uncertain match.
 
-    A binary threshold has to be wrong in one direction at the boundary: set it
-    high and reworded assertions are retracted and re-reviewed, set it low and a
-    materially changed rule is carried through on an old approval. The middle
-    band refuses to guess.
+    Args:
+        score (float): Similarity score.
+
+    Returns:
+        str: Same, ambiguous, or new band.
     """
     if score >= SAME_FROM:
         return SAME
@@ -80,30 +53,26 @@ def band(score: float) -> str:
 
 
 def link(entity_key: str, known: Mapping[str, str]) -> str | None:
-    """Which existing assertion this entity key is, if any.
+    """Resolve an entity key through known assertion identities.
 
-    Deterministic and first. A key that resolves is the answer and no score is
-    consulted; a key that does not resolve is a new assertion, and the caller
-    mints one. Quietly attaching it to the nearest thing is how a matcher starts
-    defining identity.
+    Args:
+        entity_key (str): Stable entity key to resolve.
+        known (Mapping[str, str]): Entity keys mapped to assertion IDs.
+
+    Returns:
+        str | None: Existing assertion ID or None.
     """
     return known.get(entity_key)
 
 
 def assign(scores: Mapping[tuple[str, str], float]) -> dict[str, str]:
-    """Pair old assertions with new ones so the total score is highest.
+    """Choose a maximum-total-score one-to-one assignment.
 
-    Global rather than greedy. Greedy takes the largest score first and is then
-    forced into whatever is left — given A→X .91, A→Y .89, B→X .90, B→Y .40 it
-    picks A→X and B→Y for 1.31, where A→Y and B→X score 1.79. The cost of
-    getting that wrong is not academic: B is paired with something it barely
-    resembles, so an assertion that merely moved is recorded as one retraction
-    and one creation, and its approval is gone.
+    Args:
+        scores (Mapping[tuple[str, str], float]): Scores for candidate old and new assertion pairs.
 
-    A slot holds one to five assertions, so the exhaustive search this does is
-    free. Pairs scoring below the ambiguous floor are not considered at all —
-    an assignment that paired everything would report a retraction as a
-    rewording.
+    Returns:
+        dict[str, str]: Accepted old-to-new assertion pairing.
     """
     candidates = {
         pair: score for pair, score in scores.items() if score >= AMBIGUOUS_FROM
@@ -136,31 +105,12 @@ def assign(scores: Mapping[tuple[str, str], float]) -> dict[str, str]:
 
 @dataclass(slots=True, frozen=True)
 class LineageWrite:
-    """One sighting of one claim, with everything needed to place it.
+    """Carry one observed claim and the context needed to place it.
 
-    The caller says what it saw and where; the repository decides whether that
-    is a new assertion, a new case of an existing one, a new state of a case, or
-    a claim it has already recorded.
-
-    ``normative_change`` is the second question asked separately: whether the
-    substance moved, and therefore whether an approval given against the earlier
-    state can still stand. It is the caller's judgement because only the caller
-    compared the two values.
-
-    ``fact_proposition`` is the complete extracted structure a *fact* carried,
-    and it lands on the revision this sighting produces. An assertion has many
-    revisions and each records the form the claim took at the time — two
-    propositions with different fingerprints can continue one assertion, when an
-    equivalence judgement says they are one claim — so one proposition per
-    assertion would flatten that history and lose the earlier form of anything
-    reworded.
-
-    Named for its kind on purpose, and rejected for any other. `rule`, `pattern`
-    and `decision` have no propositions: they are documents of a fixed shape
-    rather than n-ary claims, and a field called `proposition` on the general
-    lineage contract would read as a universal proposition model that has not
-    been decided. When one is, this becomes it — deliberately, not by a name
-    that quietly implied it first.
+    The repository resolves assertion, variant, and revision continuity. The
+    caller supplies `normative_change` after comparing substance. `proposition`
+    holds the complete extracted structure for every built-in kind, and the
+    resulting revision records that structure.
     """
 
     entity: EntityKey
@@ -173,17 +123,13 @@ class LineageWrite:
     run_id: str
     scope: tuple[str, ...] = ()
     slot_id: str | None = None
-    #: What the source calls the document — provenance for a reader, never part
-    #: of identity. A rename must not open an assertion or write a revision, and
-    #: nothing resolves a slot by it.
+    #: Keep the source path for provenance without making renames change identity.
     document_path: str = ""
     source_span: dict[str, object] | None = None
     normative_change: bool = False
     proposition: Proposition | None = None
-    #: The sighting this write was recorded as, so the revision it produces can
-    #: name it. An observation is an event and is written once per sighting —
-    #: never once per comparison, which would stamp a candidate seen last week
-    #: with the run that merely looked at it today.
+    #: Record one event per sighting so comparisons do not falsely assign an
+    #: earlier candidate to the current run.
     observation_id: uuid.UUID | None = None
     #: The assertion an equivalence judgement placed this sighting on, when the
     #: matching ladder found none. Decided by the caller because deciding it
@@ -194,18 +140,12 @@ class LineageWrite:
     #: agreement found nothing, so a judgement can never override what the source
     #: plainly said.
     continues: str | None = None
-    #: Where that candidate was found, because it is also the premise the verdict
-    #: was formed under — and the two premises are revalidated differently.
+    #: Keep the candidate search scope because slot and corpus verdicts have
+    #: different revalidation requirements.
     #:
-    #:     "slot"    judged as a claim standing in the slot this sighting was
-    #:               expected to land in; a verdict is stale once the authoritative
-    #:               placement lands somewhere else
-    #:     "corpus"  judged as a live claim elsewhere that shared enough structure
-    #:               to be worth asking about; slot membership was never part of it
+    #:     "slot"    stale when authoritative placement lands elsewhere
+    #:     "corpus"  independent of slot membership
     #:
-    #: Carried rather than inferred. Inferring it made every cross-document
-    #: verdict look stale, and treating them all as corpus-scoped would have
-    #: quietly undone the slot revalidation.
     continues_scope: str = ""
 
     def __post_init__(self) -> None:
@@ -231,38 +171,22 @@ class RecordedLineage:
     revision: int
     review_state: str
     supersedes: int | None
-    #: The fingerprint of the state this sighting landed on — which is *not*
-    #: necessarily the one it arrived with. A sighting judged to be the same
-    #: state keeps the fingerprint already recorded, and the graph node is
-    #: addressed by this so the two cannot describe different things.
-    #:
-    #: A content address, and nothing else. It says what a state hashes to; it
-    #: does not say which state a graph node stands for, and two revisions may
-    #: carry the same one — see `revision_id`.
+    #: Keep the fingerprint of the resolved state. Two revisions can share a
+    #: content hash, so the hash does not identify the revision.
     fingerprint: str = ""
-    #: The state itself, as an id rather than as a hash. The graph node points
-    #: at it, which is what makes "is this node current" one hop instead of a
-    #: question about every revision that happens to hash the same.
+    #: Point the graph node at an exact revision to resolve current state.
     revision_id: str = ""
-    #: How the continuation was decided — which rung of the ladder answered, or
-    #: that none did. Worth carrying: a corpus held together by exact agreement
-    #: and one held together by resemblance deserve very different trust, and
-    #: `ambiguous` names the cases a better signal should be tried on first.
+    #: Record the matching rung so exact continuation and ambiguity remain
+    #: distinguishable in reports.
     resolution: str = "key"
 
 
 @dataclass(slots=True, frozen=True)
 class SlotSupport:
-    """Whether one slot still carries one claim.
+    """Report whether one slot carries a claim without deciding retirement.
 
-    **Diagnostic, never a decision.** A slot losing a claim is not the claim
-    going: it may have moved to another section, or lost its heading and fallen
-    into the unscoped part of the document, and retiring it for that would be the
-    ordering failure this design already paid for once. What retirement asks is
-    whether the *document* still carries it anywhere.
-
-    What this answers is the question a reviewer has when the number moves:
-    *where* did it stop being said.
+    Document-wide support controls retirement because a claim can move between
+    slots while the document still asserts it.
     """
 
     assertion_id: str
@@ -273,19 +197,10 @@ class SlotSupport:
 
 @dataclass(slots=True, frozen=True)
 class DocumentOutcome:
-    """What one document's writes did, once the whole document was seen.
+    """Collect the writes and retirements after one complete document read.
 
-    Retraction is a set operation and cannot be assembled from single writes: a
-    claim is gone because the source no longer contains it, which is only
-    knowable once everything the source *does* contain has arrived.
-
-    The container is the **document**, not the slot, and that distinction was
-    paid for. A slot id is a section's position, so inserting a paragraph
-    renumbers every section below it — and slot-scoped retraction then retired
-    each unchanged claim from the slot it used to be in and re-created it in the
-    one it moved to, losing its approval and its history to an edit that never
-    touched it. The slot stays the container that *matches* a claim; the
-    document is the one that decides a claim is gone.
+    Retraction compares document-wide support after all claims arrive. Slot
+    movement alone cannot retire a claim that the document still asserts.
     """
 
     #: The graph objects written, so the caller can index what may be read
@@ -304,12 +219,7 @@ class DocumentOutcome:
 
 @dataclass(slots=True, frozen=True)
 class AssertionRevision:
-    """One state of one assertion.
-
-    ``assertion_id`` is the surrogate and does not move; ``revision`` counts the
-    states. ``review_state`` answers the second question — whether the approval
-    given against an earlier state still stands.
-    """
+    """Record one state and its review status under a stable assertion ID."""
 
     assertion_id: str
     revision: int
@@ -331,8 +241,7 @@ class RetiredAssertion:
 
     assertion_id: str
     retired_at: datetime
-    #: Which index holds it — the store is partitioned by kind, so withdrawing
-    #: needs both halves of the address.
+    #: Withdrawal needs the kind because indexes are partitioned by kind.
     kind: str = ""
     #: The graph identity of its last state, so the search index can be told.
     #: Retiring the lineage without withdrawing the document would leave the
@@ -348,12 +257,19 @@ def continue_assertion(
     new_text: str,
     normative_change: bool = False,
 ) -> AssertionRevision:
-    """The same assertion, saying it differently — or saying something else.
+    """Create the next revision of one assertion.
 
-    ``normative_change`` is the second question asked separately. False is a
-    rewording and the approval stands; true means the substance moved (CHF 500
-    to CHF 550) and the approval a person gave against the old value cannot
-    carry, even though the rule is the same rule.
+    Args:
+        assertion_id (str): Assertion to revise.
+        revision (int): Current revision number.
+        new_text (str): Wording of the next revision.
+        normative_change (bool): Whether the change requires review.
+
+    Returns:
+        AssertionRevision: New assertion revision with matching review state.
+
+    Raises:
+        ValueError: New text is blank or the current revision is below one.
     """
     if not new_text.strip():
         raise ValueError("an assertion revision must have text")
@@ -371,11 +287,21 @@ def continue_assertion(
 def supersede_assertion(
     *, assertion_id: str, new_text: str
 ) -> tuple[RetiredAssertion, AssertionRevision]:
-    """A different claim: retire the old assertion and open a new one.
+    """Retire one assertion and open a distinct claim.
 
-    Not everything continues. A materially different claim is a withdrawal and a
-    creation, and recording it as an event is what keeps it from having to be
-    inferred later from a distance score.
+    Args:
+        assertion_id (str): Assertion being retired.
+        new_text (str): Wording of the distinct new claim.
+
+    Returns:
+        tuple[RetiredAssertion, AssertionRevision]: Retirement record and first revision
+            of a new assertion.
+
+    Raises:
+        ValueError: The new claim text is blank.
+
+    Side Effects:
+        Reads the clock and generates a new surrogate ID.
     """
     if not new_text.strip():
         raise ValueError("an assertion revision must have text")

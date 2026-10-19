@@ -1,20 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Reading a model's answer about two complete propositions.
+"""Distinguish an ambiguous equivalence judgment from no judgment.
 
-What the adapter does with a *non-answer* matters as much as what it does with an
-answer, and it is the whole reason this file is long:
-
-    ambiguous   a judge looked and could not tell
-    unjudged    no judgement happened
-
-A backend that timed out did not weigh the claims and find them hard — it did not
-weigh them. Recording that as `ambiguous` would put a deliberation in the trail
-that never took place, and the trail's value is that it reports what happened.
-
-So every technical non-answer lands on `unjudged`, and only `yes`, `no` and
-`uncertain` from a model that actually replied produce a verdict.
+The adapter must preserve that distinction when the model response is missing
+or malformed.
 """
 
 from __future__ import annotations
@@ -40,15 +30,15 @@ class _Llm:
         self.response = response
         self.fail = fail
         self.prompts: list[str] = []
-        self.temperature: float | None = None
+        self.call_options: dict[str, object] | None = None
 
-    def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):  # noqa: ANN001, ANN201
+    def stream(self, messages, tools=None, tool_choice=None, **kwargs):
         self.prompts.append(str(messages[0]["content"]))
-        self.temperature = temperature
+        self.call_options = kwargs
         if self.fail:
             raise RuntimeError("backend unreachable")
 
-        async def _gen():  # noqa: ANN202
+        async def _gen():
             yield ModelStreamEvent(kind="token", content=self.response)
             yield ModelStreamEvent(kind="done")
 
@@ -56,7 +46,14 @@ class _Llm:
 
 
 def _p(**fields: object) -> AssertionObservation:
-    """A fact's claim: its proposition, its kind, and the sentence it came from."""
+    """A fact's claim: its proposition, its kind, and the sentence it came from.
+
+    Args:
+        **fields (object): Proposition fields used by the observation.
+
+    Returns:
+        AssertionObservation: Observation of a fact with its proposition and wording.
+    """
     return AssertionObservation.of(Proposition(fields))
 
 
@@ -75,12 +72,7 @@ async def test_the_only_doubt_a_model_may_express_is_uncertain() -> None:
 
 @pytest.mark.parametrize("response", ["", "maybe", "possibly the same", "YES?!?", "1"])
 async def test_an_answer_that_is_not_one_of_the_three_is_no_judgement(response: str) -> None:
-    """Not doubt. Nothing decided anything, so nothing may be recorded as having.
-
-    An unreadable reply is the model failing to answer, which is a different fact
-    from the model answering "I cannot tell" — and the second is worth recording
-    as a deliberation while the first is not.
-    """
+    """Treat an unreadable equivalence answer as no judgment."""
     assert await ModelPropositionEquivalence(_Llm(response)).classify(_A, _B) == UNJUDGED
 
 
@@ -119,14 +111,15 @@ async def test_one_pair_is_one_question_whichever_way_round_it_is_asked() -> Non
     assert forward.prompts == backward.prompts
 
 
-async def test_the_question_is_asked_at_zero_temperature() -> None:
-    # An answer that varied between runs would merge and unmerge claims nobody
-    # edited.
+async def test_the_question_carries_no_sampling_setting() -> None:
+    # Determinism is the model provider's configuration (`temperature: 0`). An
+    # answer that varied between runs would merge and unmerge claims nobody
+    # edited, so the provider the classifier runs on is where it is pinned.
     llm = _Llm()
 
     await ModelPropositionEquivalence(llm).classify(_A, _B)
 
-    assert llm.temperature == 0.0
+    assert llm.call_options == {}
 
 
 async def test_a_model_that_thinks_aloud_is_read_by_its_answer() -> None:

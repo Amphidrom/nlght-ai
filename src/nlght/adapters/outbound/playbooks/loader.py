@@ -15,12 +15,17 @@ logger = logging.getLogger(__name__)
 
 
 def load_playbook_definitions(directory: Path) -> dict[str, PlaybookDefinition]:
-    """Loads all *.yaml / *.yml Playbook definitions from the given directory.
+    """Load playbook definitions from YAML files in a directory.
 
-    Invalid files are skipped with a WARNING — a broken playbook does not
-    block platform startup.
+    Args:
+        directory (Path): Directory containing playbook YAML files.
 
-    Returns a dict {playbook_name: PlaybookDefinition}.
+    Returns:
+        dict[str, PlaybookDefinition]: Valid definitions keyed by playbook name.
+
+    Side Effects:
+        Logs missing directories and invalid files. Invalid files are skipped
+        so one broken playbook does not block platform startup.
     """
     definitions: dict[str, PlaybookDefinition] = {}
 
@@ -64,7 +69,14 @@ def _as_text(value: object) -> str | None:
 
 
 def _normalize_name(name: str) -> str:
-    """Normalizes identifiers: hyphens → underscores (``web-search`` → ``web_search``)."""
+    """Replace hyphens in a playbook identifier with underscores.
+
+    Args:
+        name (str): Identifier to normalize.
+
+    Returns:
+        str: Identifier with each hyphen replaced by an underscore.
+    """
     return name.replace("-", "_")
 
 

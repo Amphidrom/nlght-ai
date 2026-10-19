@@ -52,10 +52,8 @@ def test_a_run_that_never_fanned_out_is_its_execution() -> None:
 
 
 def test_a_distribution_that_handed_work_out_is_not_finished() -> None:
-    # The reported bug: a knowledge ingestion read `succeeded` while most of its
-    # children had not run. The execution really did succeed — it submits and
-    # ends, because waiting would hold a worker for as long as the corpus takes.
-    # The run had not.
+    # Submission succeeds before most children run. The parent execution ends
+    # without waiting for the corpus, so run state must remain incomplete.
     state = run_state(
         _record(ExecutionStatus.SUCCEEDED),
         _summary(total=151, succeeded=12, pending=139),
@@ -103,7 +101,7 @@ def test_failed_children_outrank_cancelled_ones() -> None:
 
 
 def test_a_distribution_that_failed_stays_failed_whatever_its_children_did() -> None:
-    # It may have submitted some children before failing; the run still failed.
+    # It may have submitted some children before failing. The run still failed.
     state = run_state(
         _record(ExecutionStatus.FAILED), _summary(total=3, succeeded=3)
     )

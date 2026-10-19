@@ -13,11 +13,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class MeteringContext:
-    """Per-request metering context — carries the port and all label values.
+    """Per-request metering context carrying the port and label values.
 
     Created by the executor in ``_bind_llm()`` for each step and passed
-    into the model backend.  Not stored on the backend (shared across
-    requests) — always passed per-call.
+    into the model backend. The backend is shared across requests, so the
+    context is passed per call and is not stored on the backend.
     """
 
     port: MeteringPort

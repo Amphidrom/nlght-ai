@@ -20,10 +20,6 @@ from fastapi.testclient import TestClient
 from nlght.adapters.inbound.http.ollama_adapter import OllamaHttpProtocolAdapter
 from nlght.core.model.model_info import ModelInfo, RunningModelInfo
 
-# ---------------------------------------------------------------------------
-# Fake backends
-# ---------------------------------------------------------------------------
-
 
 class _FakeBasicBackend:
     """ModelProviderBackend without running-models or native-proxy capability."""
@@ -48,11 +44,6 @@ class _FakeRunningCapableBackend(_FakeBasicBackend):
         return [
             RunningModelInfo(name="llama3.2:latest", size_vram=4_000_000_000),
         ]
-
-
-# ---------------------------------------------------------------------------
-# GET /api/tags
-# ---------------------------------------------------------------------------
 
 
 def test_tags_returns_ollama_format() -> None:
@@ -88,11 +79,6 @@ def test_tags_returns_503_without_backend() -> None:
     assert resp.status_code == 503
 
 
-# ---------------------------------------------------------------------------
-# GET /api/ps
-# ---------------------------------------------------------------------------
-
-
 def test_ps_returns_running_models_when_capable() -> None:
     adapter = OllamaHttpProtocolAdapter(model_backend=_FakeRunningCapableBackend())
     app = _make_app(adapter)
@@ -123,22 +109,12 @@ def test_ps_returns_empty_list_without_backend() -> None:
     assert resp.json() == {"models": []}
 
 
-# ---------------------------------------------------------------------------
-# Native-proxy endpoints — 501 without NativeProxyCapable
-# ---------------------------------------------------------------------------
-
-
 def test_version_returns_501_without_native_capable_backend() -> None:
     adapter = OllamaHttpProtocolAdapter(model_backend=_FakeBasicBackend())
     app = _make_app(adapter)
     with TestClient(app) as client:
         resp = client.get("/api/version")
     assert resp.status_code == 501
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_app(adapter: OllamaHttpProtocolAdapter):

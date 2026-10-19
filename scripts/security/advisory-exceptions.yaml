@@ -7,7 +7,7 @@
 #
 # Every entry needs all five fields:
 #
-#   - advisory: PYSEC-2026-3552        one concrete id — never a package wildcard
+#   - advisory: PYSEC-2026-3552        one concrete ID, never a package wildcard
 #     package: cryptography            the package the finding is reported against
 #     reason: >                        why this product is not exposed, in prose
 #       The affected API is not reachable: cryptography is used only for Ed25519

@@ -1,13 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Reading a model's answer to the one question it is asked.
+"""Interpret semantic-change classifications without losing review safety.
 
-The answer decides whether a person's approval survives an edit, so what happens
-to a malformed, absent or unreachable one matters as much as the happy path.
-Every one of those is doubt, and doubt is a review — never a silent `rewrite`,
-which would carry an approval across a change nobody looked at.
-"""
+Malformed or missing model answers require review rather than silently
+classifying an edit as a harmless rewrite."""
 
 from __future__ import annotations
 
@@ -26,13 +23,13 @@ class _Llm:
         self.fail = fail
         self.prompts: list[str] = []
 
-    def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):  # noqa: ANN001, ANN201
+    def stream(self, messages, tools=None, tool_choice=None, **kwargs):
         self.prompts.append(str(messages[0]["content"]))
-        self.temperature = temperature
+        self.call_options = kwargs
         if self.fail:
             raise RuntimeError("backend unreachable")
 
-        async def _gen():  # noqa: ANN202
+        async def _gen():
             yield ModelStreamEvent(kind="token", content=self.response)
             yield ModelStreamEvent(kind="done")
 
@@ -56,14 +53,15 @@ async def test_both_sentences_reach_the_model() -> None:
     assert "Requests shall be signed." in llm.prompts[0]
 
 
-async def test_the_question_is_asked_at_zero_temperature() -> None:
-    # A sampled answer would make a corpus nobody edited drift between runs,
-    # which is the defect the whole design removes.
+async def test_the_question_carries_no_sampling_setting() -> None:
+    # Determinism is the model provider's configuration (`temperature: 0`), so
+    # the classifier must not pass one of its own that a provider would ignore
+    # or reject.
     llm = _Llm()
 
     await ModelPropositionClassifier(llm).classify("a", "b")
 
-    assert llm.temperature == 0.0
+    assert llm.call_options == {}
 
 
 async def test_a_model_that_thinks_aloud_is_read_by_its_answer() -> None:
@@ -92,5 +90,5 @@ async def test_an_unreachable_backend_is_doubt_not_agreement() -> None:
     assert await ModelPropositionClassifier(_Llm(fail=True)).classify("a", "b") == AMBIGUOUS
 
 
-async def test_a_recognised_answer_is_still_recognised(caplog) -> None:  # noqa: ANN001
+async def test_a_recognised_answer_is_still_recognised(caplog) -> None:
     assert await ModelPropositionClassifier(_Llm("rewrite")).classify("a", "b") == REWRITE

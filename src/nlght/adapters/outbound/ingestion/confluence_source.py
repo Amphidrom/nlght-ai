@@ -244,7 +244,7 @@ class ConfluenceDocumentSource:
             external_id=external_id,
             path=f"{space_key}/{page_id}.html",
             # Text for the index, markup for the parser. Storing only the text
-            # is what made every page produce zero knowledge units; storing only
+            # is what made every page produce zero knowledge units. Storing only
             # the markup would change what the index contains, which is a
             # separate decision needing a reindex.
             content=text.encode("utf-8"),

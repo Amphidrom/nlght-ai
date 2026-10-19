@@ -20,7 +20,7 @@ from nlght.core.workflow.step import (
 logger = logging.getLogger(__name__)
 
 EMPTY = "empty"
-"""Verdict when a snapshot yielded nothing to process — a normal outcome for an
+"""Verdict when a snapshot yielded nothing to process, a normal outcome for an
 unchanged source, and one a workflow usually routes straight to done."""
 
 MORE_DOCUMENTS = "more"
@@ -46,6 +46,12 @@ class IngestionProcessStep(StepBase):
     """
 
     TYPE = "ingestion.process"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        EMPTY = EMPTY
+        MORE_DOCUMENTS = MORE_DOCUMENTS
 
     @classmethod
     def options(cls) -> list[StepOption]:
@@ -96,11 +102,11 @@ class IngestionProcessStep(StepBase):
             processed_count = len(existing) if isinstance(existing, tuple) else 0
             # Publish the (possibly empty) result even when there was nothing to
             # do. A later step that finds the key missing is entitled to say the
-            # pipeline is misconfigured — "place an ingestion.process step before
-            # it" — and an empty snapshot must not be made to look like that.
+            # pipeline is misconfigured: "place an ingestion.process step before
+            # it", and an empty snapshot must not be made to look like that.
             if not isinstance(existing, tuple):
                 ctx.metadata["ingestion.processed"] = ()
-            return StepResult(ctx=ctx, verdict="DEFAULT" if processed_count else EMPTY)
+            return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if processed_count else self.Verdict.EMPTY)
 
         existing = ctx.metadata.get("ingestion.processed")
         processed: list[ProcessedDocument] = list(existing) if isinstance(existing, tuple) else []
@@ -116,5 +122,5 @@ class IngestionProcessStep(StepBase):
             ctx.correlation_id, batch_end, len(snapshot.documents), chunk_count, len(processed),
         )
         if batch_end < len(snapshot.documents):
-            return StepResult(ctx=ctx, verdict=MORE_DOCUMENTS)
-        return StepResult(ctx=ctx, verdict="DEFAULT" if processed else EMPTY)
+            return StepResult(ctx=ctx, verdict=self.Verdict.MORE_DOCUMENTS)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if processed else self.Verdict.EMPTY)

@@ -35,13 +35,13 @@ class Phase:
     output_example: str | None = None
     max_rounds: int | None = None
     exit: PhaseExitPolicy | None = None
-    execution: str | None = None          # "programmatic" | None (= "llm")
-    query_inputs: dict[str, Any] | None = None      # {tool_param: tag_field} — used when execution="programmatic"
+    execution: str | None = None          # None delegates execution to the model.
+    query_inputs: dict[str, Any] | None = None      # Preserve tag-field binding for programmatic execution.
 
 
 @dataclass(frozen=True)
 class PlaybookDefinition:
-    """Static description of a playbook — loaded from YAML.
+    """Static description of a playbook loaded from YAML.
 
     ``requires`` is a list of OR groups (a list of lists).
     A playbook is available if at least one group is fully
@@ -49,7 +49,7 @@ class PlaybookDefinition:
 
     Example:
         requires: [["web-search"], ["searxng", "langsearch"]]
-        → available if "web-search" OR both "searxng" + "langsearch" are present.
+        Available if "web-search" or both "searxng" and "langsearch" are present.
     """
 
     name: str
@@ -63,15 +63,31 @@ class PlaybookDefinition:
     use_none_only_if: list[str] = field(default_factory=list)
 
     def is_available(self, tool_names: set[str]) -> bool:
-        """True if at least one requires group is fully satisfied."""
+        """Check whether a playbook has a satisfied required group.
+
+        Args:
+            tool_names (set[str]): Names of available tools.
+
+        Returns:
+            bool: True when any required group is available, or none is required.
+        """
         if not self.requires:
             return True
         return any(all(t in tool_names for t in group) for group in self.requires)
 
     def active_tools(self, tool_names: set[str]) -> list[str]:
-        """Required + optional tools that are actually available."""
-        all_required = {t for group in self.requires for t in group}
-        return [t for t in (all_required | set(self.optional)) if t in tool_names]
+        """List configured tools available to this playbook.
+
+        Args:
+            tool_names (set[str]): Names of available tools.
+
+        Returns:
+            list[str]: Distinct names in required-group then optional declaration order.
+        """
+        declared = (name for group in self.requires for name in group)
+        return list(dict.fromkeys(
+            name for name in (*declared, *self.optional) if name in tool_names
+        ))
 
 
 @dataclass

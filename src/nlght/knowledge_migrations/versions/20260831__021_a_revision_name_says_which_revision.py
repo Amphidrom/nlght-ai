@@ -8,8 +8,7 @@ nothing in the schema or the types said so:
 
     the source's fassung      what the source called this version of the file
     the processed fassung     that content plus the classifier, enricher and
-                              chunking that produced the text — chunk offsets
-                              index *this* one
+                              chunking that produced the text indexed by chunk offsets
     a claim's state           the knowledge revision a graph node represents
                               (ADR-0051), not a document revision at all
 
@@ -17,16 +16,16 @@ nothing in the schema or the types said so:
 `content_hash` (the source's) beside `enricher_hash` (the processed one). It
 then stored a third column called `revision_id` holding the processed one again.
 Meanwhile `Provenance.revision_id` carried whichever of the three the carrier
-happened to have, and `passages_from` grouped every carrier by that one field —
-so for an assertion the deduplication of findings ran over a knowledge revision
+happened to have, and `passages_from` grouped every carrier by that one field.
+For an assertion, deduplication of findings ran over a knowledge revision,
 while for a document it ran over a processing revision, silently.
 
 That is the shape of bug that does not announce itself. Every read is plausible,
 every value is a hex string, and the first symptom is a citation pointing at a
 revision that never said it.
 
-So each identity gets its own name and keeps it everywhere — column, domain
-type, index payload and provenance:
+Each identity gets its own name across columns, domain types, index payloads,
+and provenance:
 
     source_revision_id
     processing_revision_id
@@ -44,7 +43,7 @@ checked against, and a hit carries a processing revision to compare it with.
 
 A rename rather than new columns beside the old. There is no production corpus
 to keep compatible, and a compatibility column here would recreate exactly the
-ambiguity the rename exists to remove — two names, both populated, drifting the
+ambiguity the rename exists to remove: two names, both populated, drifting the
 first time one write path forgets one.
 
 Revision ID: 0021

@@ -20,16 +20,16 @@ class CompositePrincipalResolver:
 
     **Not first-wins.** Each resolver is there because the deployment trusts its
     source, so two of them establishing two different principals is a broken
-    deployment — a client certificate for one identity carrying an API key for
-    another — and not a tie to be broken. Preferring one would make the identity
-    a request runs as depend on the order somebody listed them in, which is the
+    deployment. For example, a client certificate and API key identifying
+    different principals conflict. Preferring one would make the identity
+    assigned to a request depend on resolver order, which is the
     kind of thing that is discovered during an incident.
 
     Agreement is fine and expected: two sources establishing the same principal
     is corroboration.
 
     A resolver that establishes nothing simply abstains. Nothing established by
-    anybody is `None` — no identity, which is not the same as a denial.
+    anybody is `None`: no identity has been established, which differs from a denial.
     """
 
     def __init__(self, resolvers: Sequence[PrincipalResolver]) -> None:
@@ -57,7 +57,7 @@ class CompositePrincipalResolver:
             return None
         if len(established) > 1:
             # The ids are named because a deployment cannot be repaired without
-            # knowing which two sources disagreed; nothing else about the call is.
+            # knowing which two sources disagreed. Nothing else about the call is.
             raise PrincipalConflictError(
                 f"trusted sources established different principals for one call: "
                 f"{', '.join(sorted(established))}. Both were configured as trusted, "

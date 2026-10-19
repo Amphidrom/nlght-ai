@@ -8,14 +8,14 @@ The relationship existed only as an equality between two hashes:
     KnowledgeRevision.fingerprint == Knowledge.identity
 
 which is not a relationship. A fingerprint is a content address, and two
-revisions may carry the same one — a revision is new when the *observed wording*
+revisions may carry the same one. A revision is new when the *observed wording*
 moves, and the structured claim it hashes may not have moved at all. So nothing
 said which state a node stood for, and every read that needed one quantified over
 the whole set instead: the deepest revision carrying the hash, or "no revision
 carrying it is current", or "every assertion carrying it is retired". Set logic
 compensating for a missing edge.
 
-`knowledge.revision_id` is that edge. The node names one state; the history stays
+`knowledge.revision_id` is that edge. The node names one state. The history stays
 on the revisions, where it belongs.
 
 **Nullable, and the backfill proves rather than guesses.** A full rebuild of the
@@ -24,9 +24,9 @@ review decisions, the confidence built from independent sightings, metadata and
 legacy payloads, none of which any revision records. Rebuilding it would destroy
 the approvals this whole design exists to protect.
 
-So the pointer is set exactly where it is provable — a fingerprint carried by
-*one* revision and no other, which is an injection and not a resemblance — and
-left NULL everywhere else. In particular the deepest revision carrying a shared
+The pointer is set where it is provable: a fingerprint carried by
+*one* revision and no other. The pointer remains NULL elsewhere. In particular,
+the deepest revision carrying a shared
 fingerprint is **not** chosen: that is precisely the set logic this migration
 removes, and writing its answer into a column would make it permanent.
 
@@ -44,7 +44,7 @@ and collapsing them is how a superseded wording gets handed back to retrieval:
 
 The second is marked `revision_unresolved` and withheld from canonical reads
 until a sighting settles it. Withholding a claim that may be current costs a
-reader one stale gap in a corpus that is being re-ingested anyway; publishing one
+reader one stale gap in a corpus that is being re-ingested anyway. Publishing one
 that is superseded is the failure this relationship was introduced to end.
 
 Both counts are reported, so what could not be proved is visible rather than
@@ -98,7 +98,7 @@ def upgrade() -> None:
 
     # One revision carrying this fingerprint and no other: the node can only have
     # been written by that one. Two or more is not a harder version of the same
-    # question — it is the question this column exists to stop being asked.
+    # question. This column prevents an ambiguous ownership claim.
     op.execute(
         sa.text(
             """
@@ -148,13 +148,13 @@ def upgrade() -> None:
     if unresolved:
         logger.warning(
             "knowledge.migration.0018 | lineage-backed nodes whose state could not be "
-            "proved=%s — withheld from canonical reads until a sighting sets the "
+            "proved=%s: withheld from canonical reads until a sighting sets the "
             "pointer",
             unresolved,
         )
     if lineageless:
         logger.info(
-            "knowledge.migration.0018 | nodes with no lineage at all=%s — unchanged, "
+            "knowledge.migration.0018 | nodes with no lineage at all=%s: unchanged, "
             "still canonical",
             lineageless,
         )

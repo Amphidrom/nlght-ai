@@ -25,7 +25,7 @@ def _slugify(key: str, max_len: int = 64) -> str:
 
 
 class LocalWorkspaceManager(WorkspaceManager):
-    """Local Workspace Manager — provisions directories on the host.
+    """Manage session and ephemeral workspace directories on the host.
 
     Directory structure:
         base_path/
@@ -33,7 +33,7 @@ class LocalWorkspaceManager(WorkspaceManager):
           ephemeral/<uuid>/          # Ephemeral workspaces (deleted on release)
 
     Session workspaces are cached in-memory. At process end, session
-    directories remain on disk (intentional — the next session finds the
+    directories remain on disk so the next session finds the
     same state).
 
     Ephemeral workspaces are deleted asynchronously on release().
@@ -66,9 +66,6 @@ class LocalWorkspaceManager(WorkspaceManager):
                 workspace.workspace_id, workspace.session_key,
             )
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     async def _get_or_create_session(self, session_key: str) -> WorkspaceContext:
         if session_key in self._sessions:

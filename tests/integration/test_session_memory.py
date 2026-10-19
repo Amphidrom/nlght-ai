@@ -1,21 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""UC4 + UC7 — Session Memory and Session Key Extraction
+"""Exercise session ownership and coordinator state across requests.
 
-Tests the contracts documented in configuration/session-memory and
-workflows/custom-steps:
-
-  Session key extraction (UC7):
-  - OpenAI request with `user` field → session key set → coordinator provisioned.
-  - OpenAI request without `user` → coordinator is None.
-
-  StoreCoordinator contract (UC4):
-  - start_task + write(RESULT) + finish_task → atom is promoted.
-  - start_task + write(RESULT) + discard_task → atom is NOT promoted.
-  - set_slot / get_slot → shared across steps in the same run.
-  - Directives written in step A are readable in step B in the same session.
-  - get_recent_turns returns conversation turns added via add_turn.
+The tests cover session-key extraction, result promotion and discard, and
+sharing a generic coordinator slot between workflow steps.
 """
 
 from __future__ import annotations
@@ -41,10 +30,6 @@ _MAPPING = {"chat_completions": "wf"}
 _MSG = [{"role": "user", "content": "hello"}]
 
 
-# ---------------------------------------------------------------------------
-# Shared state buckets (reset per test via autouse fixture)
-# ---------------------------------------------------------------------------
-
 _CAPTURED: dict[str, Any] = {}
 
 
@@ -54,10 +39,6 @@ def _clear_captured():
     yield
     _CAPTURED.clear()
 
-
-# ---------------------------------------------------------------------------
-# Helper step classes
-# ---------------------------------------------------------------------------
 
 class CoordinatorInspectorStep(StepBase):
     """Records whether a coordinator is present."""
@@ -130,14 +111,10 @@ class SlotReaderStep(StepBase):
         return StepResult(ctx=ctx, verdict="done")
 
 
-# ---------------------------------------------------------------------------
-# UC7: Session key extraction
-# ---------------------------------------------------------------------------
-
 async def test_coordinator_provisioned_when_user_field_present(
     session_factory, workflow_repo, resource_repo,
 ):
-    """OpenAI `user` field → session key extracted → coordinator is non-None."""
+    """Provision a session coordinator from the OpenAI user field."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_coord_inspector", "is_start": True, "is_terminal": True},
     ])
@@ -161,7 +138,7 @@ async def test_coordinator_provisioned_when_user_field_present(
 async def test_coordinator_is_ephemeral_without_user_field(
     session_factory, workflow_repo, resource_repo,
 ):
-    """OpenAI request without `user` field → ephemeral coordinator, still non-None."""
+    """Use an ephemeral coordinator when the request has no user field."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_coord_inspector", "is_start": True, "is_terminal": True},
     ])
@@ -175,7 +152,7 @@ async def test_coordinator_is_ephemeral_without_user_field(
     with TestClient(build_test_app(container)) as client:
         resp = client.post(
             "/v1/chat/completions",
-            # no 'user' field → ephemeral coordinator, not persisted
+            # Without a user field, the coordinator has no durable session key.
             json={"model": "test", "messages": _MSG},
         )
 
@@ -183,14 +160,10 @@ async def test_coordinator_is_ephemeral_without_user_field(
     assert _CAPTURED.get("coordinator_present") is True
 
 
-# ---------------------------------------------------------------------------
-# UC4: write + finish_task → promoted
-# ---------------------------------------------------------------------------
-
 async def test_finish_task_promotes_result_atoms(
     session_factory, workflow_repo, resource_repo,
 ):
-    """start_task + write(RESULT) + finish_task → atom appears in get_context results."""
+    """Promote result atoms when their task finishes."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_atom_writer_finish", "is_start": True, "is_terminal": True},
     ])
@@ -210,14 +183,10 @@ async def test_finish_task_promotes_result_atoms(
     assert "promoted content" in _CAPTURED.get("results", [])
 
 
-# ---------------------------------------------------------------------------
-# UC4: write + discard_task → NOT promoted
-# ---------------------------------------------------------------------------
-
 async def test_discard_task_does_not_promote_atoms(
     session_factory, workflow_repo, resource_repo,
 ):
-    """start_task + write(RESULT) + discard_task → atom does NOT appear in results."""
+    """Keep discarded task atoms out of session results."""
     await seed_workflow(session_factory, "wf", steps=[
         {"type": "test_atom_writer_discard", "is_start": True, "is_terminal": True},
     ])
@@ -237,14 +206,10 @@ async def test_discard_task_does_not_promote_atoms(
     assert "discarded content" not in _CAPTURED.get("results", [])
 
 
-# ---------------------------------------------------------------------------
-# UC4: set_slot / get_slot — shared between steps in the same run
-# ---------------------------------------------------------------------------
-
 async def test_slot_written_in_step_a_is_readable_in_step_b(
     session_factory, workflow_repo, resource_repo,
 ):
-    """set_slot in step A → get_slot in step B returns the same value."""
+    """Share a generic coordinator slot across workflow steps."""
     reader_id = uuid.uuid4()
     writer_id = uuid.uuid4()
 

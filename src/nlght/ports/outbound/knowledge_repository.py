@@ -23,22 +23,25 @@ from nlght.core.knowledge import (
 
 
 class KnowledgeRepository(Protocol):
-    """PostgreSQL authority for the knowledge graph.
+    """Persist identity-addressed knowledge and expose canonical graph reads.
 
-    Writes are identity-addressed and idempotent: re-extracting the same
-    assertion reinforces its confidence and records another observation rather
-    than creating a duplicate. A retried workflow step contributes the same
-    observation once, because observations are unique per
-    ``(identity, run_id, source_id)``.
-
-    Reads default to *canonical* knowledge only. An assertion stops being
-    canonical two ways: quarantined by review — still awaiting a decision, or
-    refused — or merged into another assertion. Neither may reach a retrieval
-    path (ADR-0032); a review surface asks for both.
+    Deduplicate observations by ``(identity, run_id, source_id)`` so a retried
+    workflow step cannot reinforce the same evidence twice. Exclude quarantined,
+    refused, and merged assertions from canonical retrieval (ADR-0032).
     """
 
     async def upsert(self, write: KnowledgeWrite) -> KnowledgeObject:
-        """Insert a new assertion, or reinforce and re-observe an existing one."""
+        """Insert or reinforce an assertion and record its observation.
+
+        Args:
+            write (KnowledgeWrite): The identity-addressed knowledge write.
+
+        Returns:
+            KnowledgeObject: The persisted knowledge object.
+
+        Side Effects:
+            Writes the graph and observation records.
+        """
         ...
 
     async def resolve(
@@ -47,7 +50,18 @@ class KnowledgeRepository(Protocol):
         *,
         include_quarantined: bool = False,
     ) -> list[KnowledgeObject]:
-        """Resolve identities to full objects, preserving the given order."""
+        """Resolve identities in the requested order.
+
+        Args:
+            identities (Sequence[str]): Assertion identities in caller order.
+            include_quarantined (bool): Whether pending assertions may be returned.
+
+        Returns:
+            list[KnowledgeObject]: Matching knowledge objects in input order.
+
+        Side Effects:
+            Reads the knowledge graph.
+        """
         ...
 
     async def pending_review(
@@ -56,61 +70,105 @@ class KnowledgeRepository(Protocol):
         limit: int = 50,
         offset: int = 0,
     ) -> list[KnowledgeObject]:
-        """The undecided part of the quarantine, least-confident first.
+        """List undecided quarantined assertions by confidence.
 
-        An assertion is *pending* while it is quarantined and no review has been
-        recorded since it last changed. A decision therefore removes it from the
-        queue even when the decision was to reject — rejection keeps the
-        quarantine, so ``review_required`` alone can never distinguish "nobody
-        has looked at this" from "somebody looked and said no".
+        Args:
+            limit (int): Maximum page size.
+            offset (int): Number of queue entries to skip.
 
-        Fresh evidence reopens it: ``upsert`` bumps the node past its last
-        review, which is the intended behaviour — a rejected assertion seen
-        again in another document deserves a second look.
+        Returns:
+            list[KnowledgeObject]: Page of undecided quarantined assertions.
+
+        Side Effects:
+            Reads the review queue.
         """
         ...
 
     async def pending_review_count(self) -> int:
-        """How many assertions are awaiting a decision, for paging the queue."""
+        """Count assertions awaiting a review decision.
+
+        Returns:
+            int: The pending review count.
+
+        Side Effects:
+            Reads the review queue.
+        """
         ...
 
     async def queue_neighbours(self, identity: str) -> tuple[str | None, str | None]:
-        """The queue entries immediately before and after this one, if any."""
+        """Find the adjacent pending review entries.
+
+        Args:
+            identity (str): The current assertion identity.
+
+        Returns:
+            tuple[str | None, str | None]: Previous and next identities, or None at either boundary.
+
+        Side Effects:
+            Reads the review queue.
+        """
         ...
 
     async def statistics(self) -> KnowledgeStatistics:
-        """Counts and averages over the graph, for the review surface."""
+        """Summarize the graph for the review surface.
+
+        Returns:
+            KnowledgeStatistics: Knowledge counts and averages.
+
+        Side Effects:
+            Reads the knowledge graph.
+        """
         ...
 
     async def canonical_page(
         self, *, limit: int = 200, offset: int = 0
     ) -> list[KnowledgeObject]:
-        """Assertions that may be found: reviewed, approved, not merged away.
+        """Page canonical assertions in identity order.
 
-        What ``knowledge.publish`` copies into the search index. Ordered by
-        identity so paging stays stable while the graph changes under it.
+        Args:
+            limit (int): Maximum page size.
+            offset (int): Number of canonical entries to skip.
+
+        Returns:
+            list[KnowledgeObject]: Reviewed, approved, unmerged assertions.
+
+        Side Effects:
+            Reads the knowledge graph.
         """
         ...
 
     async def withdrawn_page(
         self, *, limit: int = 200, offset: int = 0
     ) -> list[tuple[str, str]]:
-        """Identity and kind of assertions that must not be findable.
+        """Page identities that must leave the search index.
 
-        Quarantined, refused, or merged away. Only the two fields a removal
-        needs — the full object would be work done to then delete it by id.
+        Args:
+            limit (int): Maximum page size.
+            offset (int): Number of withdrawn entries to skip.
+
+        Returns:
+            list[tuple[str, str]]: Assertion identity and kind pairs to remove from search.
+
+        Side Effects:
+            Reads the knowledge graph.
         """
         ...
 
     async def persist(
         self, write: KnowledgeWrite, lineage: LineageWrite | None = None
     ) -> tuple[KnowledgeObject, RecordedLineage | None]:
-        """Write the graph and the lineage of one assertion in one transaction.
+        """Persist an assertion and optional lineage atomically.
 
-        They must not be able to disagree while identity is being migrated, so
-        a failure on either side rolls back both. A `lineage` of `None` is the
-        caller saying this assertion cannot name a business question yet — not a
-        fallback, and never a substitute key invented from its wording.
+        Args:
+            write (KnowledgeWrite): Assertion graph write.
+            lineage (LineageWrite | None): Optional sighting and lineage write.
+
+        Returns:
+            tuple[KnowledgeObject, RecordedLineage | None]: Persisted assertion and any
+                recorded lineage.
+
+        Side Effects:
+            Writes graph and lineage atomically.
         """
         ...
 
@@ -122,41 +180,21 @@ class KnowledgeRepository(Protocol):
         run_id: str,
         classify: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> DocumentOutcome:
-        """Everything one fully observed document says, and what it stopped saying.
+        """Reconcile a fully observed document and its prior claims.
 
-        **Only for a document observed in full.** Retraction is a set operation:
-        a claim is gone because the source no longer contains it, which is
-        knowable only once everything it *does* contain has arrived. A partial
-        observation — the normal case, since an unchanged document is skipped
-        whole and yields nothing — would read as a document that lost
-        everything.
+        Args:
+            document_id (str): Identity of a fully observed document.
+            sections (Sequence[ObservedSection]): Every observed section in the document.
+            run_id (str): Identity of this observation run.
+            classify (Callable[[str, str], Awaitable[str]] | None): Optional classifier
+                for changed claims.
 
-        The container is the document, not the slot. A slot id was a section's
-        position, so inserting a paragraph renumbered every section below it, and
-        slot-scoped retraction then retired each unchanged claim from the slot it
-        used to occupy and re-created it in the one it had moved to. The slot
-        remains what matches a claim; the document is what decides one is gone.
+        Returns:
+            DocumentOutcome: Recorded changes and retractions for the document.
 
-        Each section resolves to a persisted slot where it has something to be
-        found by, and its claims are recorded against that rather than against
-        the ordinal the parser produced. A format with no headings gets no slot
-        and keeps the document as its diff boundary.
-
-        One transaction for the whole document, because writes landing without
-        their retractions leave the corpus asserting and denying the same thing
-        with nothing able to say which half is right — and because deciding
-        retraction per slot made the outcome depend on the order the slots
-        happened to be written in.
-
-        Evidence is never deleted. It answers what document D at revision R
-        asserted, and a claim that stopped being asserted did not stop having
-        been asserted; what is recorded is that the assertion is retired.
-
-        `classify` answers whether a changed body spends its approval, and is
-        asked only for the band nothing else can settle — same quantities,
-        different words. It is called before the transaction opens, never inside
-        it. Without it the deterministic answer stands, which means a reworded
-        rule keeps its approval and a moved quantity does not.
+        Side Effects:
+            May classify before writing. Records claims and retractions atomically
+                without deleting evidence.
         """
         raise NotImplementedError
 
@@ -168,61 +206,120 @@ class KnowledgeRepository(Protocol):
         reason: str | None = None,
         recorded_by: str | None = None,
     ) -> int:
-        """Record that one set of assertions took another's place.
+        """Connect predecessor and successor assertion sets.
 
-        Sets rather than a pair: a rule splits into two, or two fold into one,
-        and both happen routinely. A rewording does not come here — it keeps its
-        assertion and adds a revision. Returns how many edges were written, so a
-        retry that records the same succession again writes none.
+        Args:
+            predecessors (Sequence[str]): Assertions being replaced.
+            successors (Sequence[str]): Assertions that replace them.
+            reason (str | None): Optional explanation of the succession.
+            recorded_by (str | None): Identity of the decision maker, if known.
+
+        Returns:
+            int: Number of newly recorded predecessor-successor edges.
+
+        Side Effects:
+            Writes idempotent supersession links.
         """
         ...
 
     async def supersessions_of(self, assertion_id: str) -> tuple[str, ...]:
-        """What took this assertion's place, in the order it was recorded."""
+        """Resolve an assertion's recorded successors.
+
+        Args:
+            assertion_id (str): Assertion identity.
+
+        Returns:
+            tuple[str, ...]: Successor identities in recording order.
+
+        Side Effects:
+            Reads supersession edges.
+        """
         ...
 
     async def record_lineage(self, write: LineageWrite) -> RecordedLineage:
-        """Place one sighting of one claim: which assertion, case and state.
+        """Record a claim sighting against its identity and case.
 
-        Decides in that order and never by similarity: the entity key resolves
-        the assertion deterministically, the scope resolves the case by the
-        variant ladder, and a fingerprint matching the case's latest state means
-        no new revision — which is what makes a second run over an unchanged
-        source leave the corpus alone.
+        Args:
+            write (LineageWrite): The lineage write with source and claim details.
+
+        Returns:
+            RecordedLineage: The recorded lineage.
+
+        Side Effects:
+            Writes a revision when the case state changes.
         """
         ...
 
     async def extraction_state(self, document_id: str) -> ExtractionState | None:
-        """What is recorded about extracting this document, if anything.
+        """Read a document's latest extraction state.
 
-        ``None`` means never extracted, which is not the same as current: the
-        absent case licenses no skip.
+        Args:
+            document_id (str): Document identity.
+
+        Returns:
+            ExtractionState | None: Recorded extraction state, or None when never extracted.
+
+        Side Effects:
+            Reads extraction records.
         """
         ...
 
     async def record_extraction(self, write: ExtractionStateWrite) -> ExtractionState:
-        """Record that a document has been extracted under a given extraction.
+        """Record a successful document extraction.
 
-        Written after the extraction succeeded, never before — the same
-        ordering the data layer's ``record_indexed`` has, so a crash in between
-        redoes the work rather than losing it.
+        Args:
+            write (ExtractionStateWrite): The completed extraction state write.
+
+        Returns:
+            ExtractionState: The recorded extraction state.
+
+        Side Effects:
+            Writes the extraction record.
         """
         ...
 
     async def similar(self, identity: str, *, limit: int = 5) -> list[KnowledgeObject]:
-        """Other assertions of the same kind and type, quarantined ones included."""
+        """Find same-kind, same-type assertion candidates.
+
+        Args:
+            identity (str): Assertion whose neighbours are requested.
+            limit (int): Maximum number of candidates.
+
+        Returns:
+            list[KnowledgeObject]: Same-kind, same-type candidates, including
+                quarantined assertions.
+
+        Side Effects:
+            Reads the knowledge graph.
+        """
         ...
 
     async def observations(self, identity: str) -> list[Observation]:
-        """Every recorded sighting of an assertion, most recent first.
+        """List an assertion's recorded sightings.
 
-        This is the evidence a reviewer judges: without it the queue only shows
-        the claim, never where it came from.
+        Args:
+            identity (str): Assertion identity.
+
+        Returns:
+            list[Observation]: Observations in descending recency order.
+
+        Side Effects:
+            Reads observation records.
         """
         ...
 
     async def reviews(self, identity: str) -> list[Review]:
-        """The decision history of an assertion, most recent first."""
+        """List an assertion's review decisions.
+
+        Args:
+            identity (str): Assertion identity.
+
+        Returns:
+            list[Review]: Reviews in descending recency order.
+
+        Side Effects:
+            Reads review records.
+        """
         ...
 
     async def record_review(
@@ -238,18 +335,26 @@ class KnowledgeRepository(Protocol):
         merge_into: str | None = None,
         supersede: bool = False,
     ) -> Review:
-        """Audit a review outcome and lift or keep the quarantine accordingly.
+        """Apply and audit a version-guarded review decision.
 
-        Raises ``ReviewConflictError`` when this version of the assertion has
-        already been judged, unless ``supersede`` is set. Without that guard the
-        second of two decisions silently replaces the first.
+        Args:
+            identity (str): Assertion to review.
+            reviewer_id (str): Identity of the reviewer.
+            decision (ReviewDecision): Review decision to record.
+            comment (str | None): Optional decision explanation.
+            changes (dict[str, object] | None): Optional field edits.
+            payload (dict[str, object] | None): Optional replacement payload.
+            confidence (float | None): Optional corrected confidence.
+            merge_into (str | None): Optional target assertion for a merge.
+            supersede (bool): Whether to replace a previous decision on this version.
 
-        ``payload`` and ``confidence`` apply a reviewer's corrections in the
-        same transaction as the audit row, and only for an ``EDITED`` decision.
-        The identity does not move with the content.
+        Returns:
+            Review: Recorded review and applied decision.
 
-        ``merge_into`` belongs to ``MERGED`` and only to it: the source keeps its
-        history, hands its observations to the target, reinforces the target's
-        confidence, and stops being canonical.
+        Raises:
+            ReviewConflictError: This version was already judged and supersede is false.
+
+        Side Effects:
+            Atomically writes review history and allowed corrections. May merge evidence.
         """
         ...

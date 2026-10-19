@@ -1,13 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Core vocabulary for memory extraction.
-
-The classes in this module describe what an extractor found in a user request.
-They intentionally do not depend on a concrete NLP implementation. spaCy/Stanza
-NER, LLM extraction, or a hybrid NLP pipeline can all produce the same
-structures.
-"""
+"""Define memory-extraction vocabulary independent of adapters."""
 
 from __future__ import annotations
 

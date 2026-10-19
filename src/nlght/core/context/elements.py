@@ -1,30 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Retrieved passages as elements a budget can weigh.
-
-The adapter is where retrieval-specific knowledge is allowed to live, and this is
-the last place it appears. After here a passage is a `MentalElement` like any
-other and is weighed against a remembered fact by the same rules — which is the
-point of the whole arrangement (ADR-0054).
-
-Two things it deliberately does not do.
-
-**The fusion rank becomes relevance, never retention.** They answer different
-questions and collapsing them is the mistake this design keeps avoiding:
-
-    rank       how well did this match the question, among the things found
-    retention  what would it cost to lose this
-
-A passage that ranked first is a good match, not an important one. Retention for
-retrieved material is `USEFUL`: it is what a source says about the question, and
-losing it costs a less well-founded answer rather than a broken one.
-
-**No compact form is invented.** There is no honest short version of a passage —
-truncating produces text that ends mid-claim, and pulling out a sentence is a
-judgement about which sentence carries it. A passage is offered whole or not at
-all, which the reduction handles because representation levels are optional.
-"""
+"""Adapt retrieved passages into budgetable mental elements."""
 
 from __future__ import annotations
 
@@ -52,17 +29,15 @@ def passage_elements(
     section: Presentation = SECTION_RETRIEVED,
     retention: Retention = Retention.USEFUL,
 ) -> list[MentalElement]:
-    """Passages as elements, in the order retrieval ranked them.
+    """Adapt ranked passages for shared relevance and budget reduction.
 
-    `relevance` is derived from the fusion position rather than carried as a
-    score, because a position is what fusion actually decided (ADR-0050) and the
-    numbers behind it were never comparable across stores. First place scores
-    highest, and the scale is only ever used to order passages against each other
-    and against whatever else is competing for the same budget.
+    Args:
+        passages (Sequence[ContextPassage]): Ranked context passages.
+        section (Presentation): Presentation section for each element.
+        retention (Retention): Retention policy during budget reduction.
 
-    Provenance travels untouched, so a passage that survives can still say which
-    documents currently carry it (ADR-0053) — and a later citation layer has
-    everything it needs without this one rendering anything.
+    Returns:
+        list[MentalElement]: Full-or-omit elements with positional relevance and provenance.
     """
     total = len(passages)
     elements: list[MentalElement] = []

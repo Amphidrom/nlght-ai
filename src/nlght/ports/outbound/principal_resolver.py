@@ -24,13 +24,12 @@ class PrincipalResolver(Protocol):
     `SessionKeyResolver`. A session key is a *locator*: reading it out of a
     header, a query parameter or a body is fine, because knowing where something
     lives grants nothing. A principal is *authorization-relevant*, so an
-    implementation may only use a source whose trust model is explicit —
-    a gateway the deployment declared trustworthy, a validated token, a
-    certificate, a key resolved against a registry.
+    implementation may only use a source whose trust model is explicit, such
+    as a trusted gateway, validated token, certificate, or registry key.
 
     An implementation that reads an identifier out of an arbitrary request and
     returns it would satisfy this signature and violate its contract. The
-    signature cannot prevent that; the port says it so a reviewer can.
+    signature cannot prevent that. The port says it so a reviewer can.
 
     `None` means no principal was established. It never means "anonymous": a
     caller with no principal owns nothing, which is a different statement from a

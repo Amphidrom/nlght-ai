@@ -47,14 +47,7 @@ def test_the_size_is_fixed_to_the_page_and_not_to_the_neighbourhood() -> None:
 
 
 def test_no_template_pins_its_own_checkbox_size() -> None:
-    """The regression that would undo it, one template at a time.
-
-    An inline `width`, `height` or `font-size` on a checkbox opts that one
-    control out of the shared rule, and it would look correct in the form it was
-    added to. Margins are none of this test's business — the step form sets
-    `margin:0` on purpose, because those checkboxes sit in flex rows that own
-    their spacing.
-    """
+    """Keep checkbox sizing in the shared form style."""
     offenders = [
         (path.relative_to(_TEMPLATES).as_posix(), tag)
         for path in _templates()

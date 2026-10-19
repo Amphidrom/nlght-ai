@@ -8,7 +8,7 @@ the worker that acquired it: serial, bounded by one step machine's hop budget,
 and unable to use a second machine no matter how many are idle. Here the
 acquiring run submits one child execution per document batch and ends. Any
 capable worker claims any child, so the corpus is processed concurrently, and
-the pool — not the run — is the limit.
+the worker pool sets the limit.
 
 A child is an ordinary execution: capability matching, leases, fencing tokens,
 retries, and at-least-once delivery all apply to it unchanged. It differs only in
@@ -17,7 +17,7 @@ findable after it has been spread out.
 
 What travels to a child is the *names* of its documents, never their content. A
 worker that is allowed to run the ingestion workflow can reach the source the
-workflow is configured with — that is what its capability means — so the child
+workflow is configured with. That is what its capability means, so the child
 acquires its own batch from the same source rather than being fed through the
 database. That sentence only holds if the child carries the work flow's declared
 capabilities, so it does: they are required of every child, and the step's own
@@ -32,7 +32,7 @@ works, and no fan-out step anywhere.
 
 That is why there is no switch here: which pipeline is seeded says whether the
 architecture is distributed, so a flow containing this step is a distribution
-flow by construction — with no dead branch for the mode it is not in.
+flow by construction, with no dead branch for the other mode.
 """
 
 from __future__ import annotations
@@ -69,17 +69,22 @@ class IngestionFanOutStep(StepBase):
         capabilities:        capabilities required of a worker *in addition to*
                              those the child workflow declares
 
-    Reads ``ingestion.snapshot``; emits ``ingestion.fan_out.children`` (the child
+    Reads ``ingestion.snapshot``. Emits ``ingestion.fan_out.children`` (the child
     execution ids) and ``ingestion.fan_out.batches``.
 
     On success this step ends the run: it does not wait for its children, because
-    waiting would hold a worker for as long as the corpus takes — and on a
+    waiting would hold a worker for as long as the corpus takes. On a
     single-worker deployment a waiting parent would keep its own children from
     ever being claimed. Whether the corpus is finished is asked of the children,
     through ``ExecutionRepository.fan_out_summary``.
     """
 
     TYPE = "ingestion.fan_out"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_TO_FAN_OUT = NOTHING_TO_FAN_OUT
 
     def __init__(
         self,
@@ -120,12 +125,12 @@ class IngestionFanOutStep(StepBase):
         batch_size = self._batch_size()
 
         # Fanning out means handing work to other processes. Each of these is a
-        # capability this deployment either has or has not; none can be
+        # capability this deployment either has or has not. None can be
         # improvised, so name the missing one rather than silently running the
         # corpus serially here.
         if ctx.execution_id is None:
             raise WorkflowConfigurationError(
-                f"Step '{self.TYPE}' runs only inside a dispatched execution — a workflow "
+                f"Step '{self.TYPE}' runs only inside a dispatched execution. A workflow "
                 f"executed inline in a request has no execution to parent its children to. "
                 f"Submit this workflow through the durable queue."
             )
@@ -156,7 +161,7 @@ class IngestionFanOutStep(StepBase):
         if not documents:
             ctx.metadata["ingestion.fan_out.children"] = ()
             ctx.metadata["ingestion.fan_out.batches"] = 0
-            return StepResult(ctx=ctx, verdict=NOTHING_TO_FAN_OUT)
+            return StepResult(ctx=ctx, verdict=self.Verdict.NOTHING_TO_FAN_OUT)
 
         capabilities = self._capabilities(child_workflow)
         children: list[str] = []
@@ -189,7 +194,7 @@ class IngestionFanOutStep(StepBase):
             "[%s] ingestion.fan_out.done | workflow=%s documents=%d children=%d batch=%d",
             ctx.correlation_id, child_workflow_name, len(documents), len(children), batch_size,
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     def _batch_size(self) -> int:
         try:
@@ -205,18 +210,17 @@ class IngestionFanOutStep(StepBase):
         return batch_size
 
     def _capabilities(self, child_workflow: WorkflowDef) -> tuple[str, ...]:
-        """What a worker must have to claim a child.
+        """Combine the child workflow's and fan-out step's worker requirements.
 
-        The child workflow's own declared capabilities come first, because that
-        is what every other way of submitting it already does — the HTTP and
-        streaming paths both derive `required_capabilities` from
-        `workflow.capabilities`. Reading them only there and not here meant a
-        workflow restricted to particular workers was restricted when a caller
-        submitted it and open to any worker when a fan-out did, which is
-        precisely the machine that cannot reach the source picking up a share.
+        Args:
+            child_workflow (WorkflowDef): Workflow assigned to child executions.
 
-        The step's own `capabilities` narrow that further, for a requirement
-        that belongs to this distribution rather than to the flow itself.
+        Returns:
+            tuple[str, ...]: Sorted, deduplicated required capabilities.
+
+        Raises:
+            WorkflowConfigurationError: Step capabilities are not a list or
+            comma-separated string.
         """
         configured = self.config.get("capabilities", ())
         if isinstance(configured, str):
@@ -239,15 +243,17 @@ class IngestionFanOutStep(StepBase):
         source_id: str,
         external_ids: tuple[str, ...],
     ) -> Trigger:
-        """The child's trigger: which documents of which source are its share.
+        """Build a child trigger for one document share.
 
-        Each child gets its **own** correlation id, derived from the parent's so
-        the lineage stays greppable (``<parent>:fanout:3``). It must not simply
-        inherit the parent's: the runtime treats a correlation id as the identity
-        of one run, and children sharing it would collide on every key built from
-        it — the ingestion snapshot record, the executor's "already running"
-        guard, and the per-run workspace. Deriving it also keeps it deterministic,
-        so a retried fan-out submits the same children rather than new ones.
+        Args:
+            ctx (WorkflowStepContext): Parent execution context.
+            batch_index (int): Stable index of the document share.
+            source_id (str): Source containing the share.
+            external_ids (tuple[str, ...]): Document IDs assigned to the child.
+
+        Returns:
+            Trigger: Child trigger with a deterministic, distinct correlation
+            and request ID derived from the parent and batch index.
         """
         parent_context = ctx.trigger.context
         suffix = f"fanout:{batch_index}"

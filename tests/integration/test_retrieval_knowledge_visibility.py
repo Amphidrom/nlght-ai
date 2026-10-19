@@ -1,21 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Search may only see the knowledge the store is allowed to hand out.
+"""Filter indexed knowledge hits through repository visibility rules.
 
-Part of the search contract, not of context building. If a quarantined or
-retired claim reaches a `RetrievalHit`, slice 1 is already wrong — and a later
-step filtering it out would be compensating for a leak instead of fixing it.
-
-    approved and live       → retrievable
-    awaiting or refused     → not retrievable
-    merged into another     → not retrievable
-    retired by its source   → see below
-
-Against the **real** repository, not another stub. The index is stubbed, because
-an index is an external service and it deliberately knows nothing about
-visibility — it answers with identities, and the repository decides which of them
-a reader may see (ADR-0032). Stubbing the repository would test the mock.
+The index proposes identities. The repository decides which current,
+reviewed claims may become retrieval hits.
 """
 
 from __future__ import annotations
@@ -87,7 +76,7 @@ class _Index:
     identities: list[str] = field(default_factory=list)
     asked: list[str] = field(default_factory=list)
 
-    def search(self, *, index: str, body: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+    def search(self, *, index: str, body: dict[str, Any]) -> dict[str, Any]:
         self.asked.append(index)
         # The shape the store reads: identities live in `_source`, because the
         # index is asked for exactly that field and nothing else.
@@ -109,7 +98,7 @@ async def corpus():
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeBase
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -130,13 +119,17 @@ def _claim(
     text: str, obj: str, *, run: str = "run-1", review: bool = False,
     fingerprint: str | None = None,
 ):
-    """One sighting, as the pipeline would produce it.
+    """Build a graph write and sighting for a test claim.
 
-    The fingerprint addresses the *proposition*, so it moves only when the
-    structured claim does — which is why a rewording that leaves the structure
-    alone keeps one graph node, and a claim whose structure moves leaves a second
-    one behind. The tests that care about the difference say which they mean.
-    """
+    Args:
+        text (str): Observed claim wording.
+        obj (str): Object in the fact proposition.
+        run (str): Run identifier.
+        review (bool): Whether to quarantine the graph record.
+        fingerprint (str | None): Explicit recorded-form address, if needed.
+
+    Returns:
+        tuple[KnowledgeWrite, LineageWrite]: Graph and lineage writes."""
     lineage = LineageWrite(
         entity=entity_key("fact", predicate="requires", subject="spring", object=obj),
         kind="fact", text=text, fingerprint=fingerprint or f"fp:{obj}",
@@ -155,7 +148,7 @@ def _claim(
     return graph, lineage
 
 
-async def _record(repository, claims, *, run: str, texts: list[str]):  # noqa: ANN001
+async def _record(repository, claims, *, run: str, texts: list[str]):
     return await repository.record_document(
         document_id=DOCUMENT,
         sections=[ObservedSection.as_read(
@@ -168,7 +161,16 @@ async def _record(repository, claims, *, run: str, texts: list[str]):  # noqa: A
 
 
 def _store(url: str, connections: StoreConnections, index: _Index) -> KnowledgeStoreTool:
-    """The real activation, reading the real database through its own pg_url."""
+    """The real activation, reading the real database through its own pg_url.
+
+    Args:
+        url (str): Database URL for the store.
+        connections (StoreConnections): Database connection provider.
+        index (_Index): Index name used by the test.
+
+    Returns:
+        KnowledgeStoreTool: Activated knowledge store connected to the test database.
+    """
     tool = KnowledgeStoreTool(
         name="knowledge",
         config={"pg_url": url, "os_url": "http://opensearch:9200"},
@@ -176,7 +178,7 @@ def _store(url: str, connections: StoreConnections, index: _Index) -> KnowledgeS
     )
     # Only the external search service is replaced. The repository behind the
     # tool is the real one, built by the tool from its own configuration.
-    tool._connections.client = lambda *args, **kwargs: index  # type: ignore[assignment]  # noqa: SLF001
+    tool._connections.client = lambda *args, **kwargs: index  # type: ignore[assignment]
     return tool
 
 
@@ -186,11 +188,11 @@ def _step(store: KnowledgeStoreTool) -> RetrievalSearchStep:
     async def _activate(source: str, caller: Any = None) -> Any:  # noqa: ANN401
         return store if source == KNOWLEDGE else None
 
-    step._activate = _activate  # type: ignore[method-assign]  # noqa: SLF001
+    step._activate = _activate  # type: ignore[method-assign]
     return step
 
 
-async def _search(corpus, index_holds: list[str]):  # noqa: ANN001
+async def _search(corpus, index_holds: list[str]):
     url, connections, _ = corpus
     index = _Index(identities=index_holds)
     result = await _step(_store(url, connections, index)).run(_ctx())
@@ -209,12 +211,7 @@ async def test_an_approved_claim_is_retrievable(corpus) -> None:
 
 
 async def test_a_claim_awaiting_review_is_not_retrievable(corpus) -> None:
-    """The index still holds it — the repository is what keeps it out.
-
-    An index is eventually consistent with the graph, so a claim quarantined a
-    second ago is still findable in it. That is exactly why the rule lives in
-    `resolve()` and why this test hands the index the identity anyway.
-    """
+    """Exclude quarantined claims even when the index still returns them."""
     _, _, repository = corpus
     await _record(
         repository,
@@ -285,19 +282,7 @@ async def test_a_corpus_of_only_invisible_claims_returns_nothing(corpus) -> None
 
 
 async def test_a_fingerprint_addresses_a_recorded_form_and_never_the_claim(corpus) -> None:
-    """The guard on what `KnowledgeRevision.fingerprint == Knowledge.identity` means.
-
-    It is the technical address of the graph record a revision wrote, and it must
-    never drift back into meaning *the identity of the claim*. Those are the two
-    things this model has kept apart from the beginning: a claim reworded by the
-    source is one assertion at a new state, and its fingerprint moves while its
-    `assertion_id` does not.
-
-        revision 1  fingerprint P1  "must not exceed 30 seconds"
-        revision 2  fingerprint P2  "must not exceed 60 seconds"
-
-        P1 != P2, and the assertion is the same assertion throughout.
-    """
+    """Keep assertion identity stable while a recorded-form fingerprint changes."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -338,19 +323,7 @@ async def test_a_fingerprint_addresses_a_recorded_form_and_never_the_claim(corpu
 
 
 async def test_a_superseded_state_is_not_retrievable(corpus) -> None:
-    """A claim that moved on does not answer with what it used to say.
-
-    A graph node is addressed by the fingerprint of the revision that wrote it,
-    so a reworded claim leaves a *second* node behind carrying the old wording.
-    Both were canonical, and a search could return
-
-        "Spring Boot requires Java 17."
-        "Spring Boot requires Java 17 or newer."
-
-    as two live answers to one question. A state the corpus has moved past is not
-    what the corpus says (ADR-0032), so only the current one is retrievable —
-    while a review surface, asking for everything, still sees both.
-    """
+    """Exclude superseded graph states from retrieval results."""
     _, _, repository = corpus
     await _record(
         repository,
@@ -364,21 +337,14 @@ async def test_a_superseded_state_is_not_retrievable(corpus) -> None:
         run="run-2", texts=["Spring Boot requires Java 17 or newer."],
     )
 
-    # The index still holds both — it is not the place this is decided.
+    # The index still holds both. The repository decides current visibility.
     hits = await _search(corpus, ["fp:state-1", "fp:state-2"])
 
     assert [item.best.content for item in hits] == ["Spring Boot requires Java 17 or newer."]
 
 
 async def test_a_retired_claim_is_not_retrievable(corpus) -> None:
-    """Retired by its source, and therefore gone from retrieval.
-
-    The source stopped saying it, so a reader must not be handed it. This is the
-    case the graph cannot answer on its own — retirement is recorded on the
-    assertion, and `resolve()` filters on the graph's `review_required` and
-    `merged_into` — so it is worth its own test rather than being assumed to
-    follow from the other two.
-    """
+    """Exclude a claim retired by its source from retrieval results."""
     _, _, repository = corpus
     await _record(
         repository,

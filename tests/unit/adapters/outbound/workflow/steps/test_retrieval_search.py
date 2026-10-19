@@ -1,16 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Layer B — the adapter contract: what each store's answer becomes.
+"""Translate store results into retrieval hits with correct provenance.
 
-The ranking is decided in `core.retrieval` and proved there. What only the step
-can get wrong is the translation and the routing: reading the payload the
-ingestion actually writes, giving each hit the right carrier and provenance,
-asking the stores this platform has, and surviving one of them being down.
-
-The store shapes below are the ones `data_writer` really produces — one
-OpenSearch document per document, one Qdrant point per chunk — so a change to
-the index that this step does not follow shows up here rather than live.
+The core retrieval layer owns ranking; the step owns store routing and payload
+translation.
 """
 
 from __future__ import annotations
@@ -105,13 +99,7 @@ def _document(identity: str = "d1", score: float = 7.2) -> RetrievalHit:
 
 
 class _Lexical:
-    """The data store's keyword capability.
-
-    It answers with findings rather than backend rows, and everything it returns
-    is already on the published revision — the store drops the rest before the
-    step can rank it (ADR-0062). So there is no translation left here to test;
-    that lives with the store, where the payload does.
-    """
+    """A keyword store double that returns findings from published revisions."""
 
     def __init__(self, hits: list[RetrievalHit] | None = None, *, fails: bool = False) -> None:
         self._hits = hits if hits is not None else [_document()]
@@ -182,7 +170,7 @@ class _RulePayload:
 
 
 class _Knowledge:
-    """Only what `resolve()` let through — the quarantine is upstream of here."""
+    """A knowledge store double that returns only claims approved by resolve()."""
 
     def __init__(self) -> None:
         self.kinds: list[str] = []
@@ -226,6 +214,14 @@ def _step(
 
     The resource lookup is plumbing shared with every other step; what this file
     is about is what the retrieval does with what comes back.
+
+    Args:
+        stores (dict[str, object]): Stub stores attached to the step.
+        embedding (_Embedding | None): Embedding stub attached to the step.
+        **config (object): Step configuration overrides.
+
+    Returns:
+        RetrievalSearchStep: Retrieval step wired to the supplied stub stores.
     """
     # Both discovery capabilities come from the one data store activation.
     option = {LEXICAL: "data_store", VECTOR: "data_store", KNOWLEDGE: "knowledge_store"}
@@ -239,7 +235,7 @@ def _step(
         return stores.get(source)
 
     # `_stores` activates once per named resource, so a data store serving both
-    # capabilities is activated once and shared — as it is in production.
+    # capabilities is activated once and shared, matching production wiring.
     async def _activated(caller=None) -> dict[str, object]:
         data = stores.get(VECTOR) or stores.get(LEXICAL)
         activated: dict[str, object] = {}
@@ -251,9 +247,9 @@ def _step(
             activated[KNOWLEDGE] = stores[KNOWLEDGE]
         return activated
 
-    step._stores = _activated  # type: ignore[method-assign]  # noqa: SLF001
+    step._stores = _activated  # type: ignore[method-assign]
 
-    step._activate = _activate  # type: ignore[method-assign]  # noqa: SLF001
+    step._activate = _activate  # type: ignore[method-assign]
     return step
 
 
@@ -288,8 +284,8 @@ async def test_a_lexical_answer_becomes_a_document_with_its_indexed_terms() -> N
 
 
 async def test_a_vector_answer_becomes_a_chunk_that_knows_its_document() -> None:
-    # The document id is what later lets context building see the relationship —
-    # see it, not act on it.
+    # The document ID lets context building relate a chunk to its source.
+    # This step does not collapse related findings.
     step = _step({VECTOR: _Vector()}, embedding=_Embedding(), sources="vector")
 
     [found] = (await step.run(_ctx())).ctx.metadata["retrieval.hits"]
@@ -301,7 +297,7 @@ async def test_a_vector_answer_becomes_a_chunk_that_knows_its_document() -> None
 
 
 async def test_a_claim_is_quoted_in_the_sources_own_words() -> None:
-    # The observed wording is the authority (ADR-0048); nothing is reassembled
+    # The observed wording is the authority (ADR-0048). Nothing is reassembled
     # from the structured fields.
     step = _step({KNOWLEDGE: _Knowledge()}, sources="knowledge")
 
@@ -359,13 +355,7 @@ async def test_semantic_discovery_is_not_asked_when_keyword_answered() -> None:
 
 
 async def test_without_an_embedding_provider_the_other_capabilities_still_answer() -> None:
-    """The store decides whether it can embed, and says so by answering nothing.
-
-    The step used to hold the embedding client and skip the call itself. It
-    embeds nothing now — the store does, because the store owns the collection
-    the vector has to match — so an unembeddable question is an empty semantic
-    answer rather than a route the step declined to take.
-    """
+    """Keep lexical and knowledge results when vector embedding is unavailable."""
     step = _step({LEXICAL: _Lexical(), VECTOR: _Vector(answers=False)}, lexical_floor=5)
 
     result = await step.run(_ctx())

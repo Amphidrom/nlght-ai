@@ -240,3 +240,106 @@ def test_os_runtime_and_coordinator_factory_fallbacks(monkeypatch: pytest.Monkey
         _context(hive_mind_provider=HiveMindProviderRuntime(name="hm", kind="filesystem", enabled=True)),
     )
     assert fallback.__class__.__name__ == "SimpleStoreCoordinatorFactory"
+
+
+def test_build_container_hands_the_registered_action_authorization_to_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nlght.adapters.outbound.tools.action_registry import ActionAuthorizationRegistry
+    from nlght.core.tools.action import ApprovalDecision, ApprovalResult
+
+    class _Policy:
+        async def evaluate(self, review: object) -> object:
+            raise AssertionError("not evaluated during wiring")
+
+    class _Approval:
+        async def approve(self, review: object) -> ApprovalResult:
+            return ApprovalResult(ApprovalDecision.REJECTED, "")
+
+    class StubConfigurationService:
+        async def load_snapshot(self) -> PlatformConfigSnapshot:
+            return PlatformConfigSnapshot()
+
+    class StubCompositionService:
+        def compose(self, snapshot: PlatformConfigSnapshot) -> RuntimeContext:
+            return _context()
+
+    from integration._helpers import StubLicenseAdapter
+
+    captured: dict[str, object] = {}
+
+    def _recording_builder(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    registry = ActionAuthorizationRegistry()
+    policy, approval = _Policy(), _Approval()
+    registry.register_policy(cast(Any, policy))
+    registry.register_approval(cast(Any, approval))
+
+    monkeypatch.setattr(wiring, "FileConfigurationSource", lambda path: None)
+    monkeypatch.setattr(wiring, "ConfigurationService", lambda source: StubConfigurationService())
+    monkeypatch.setattr(wiring, "CompositionService", lambda: StubCompositionService())
+    monkeypatch.setattr(wiring, "_build_license_service", lambda _ctx: StubLicenseAdapter())
+    # A resource repository is what makes the runtime build a tool catalog at all.
+    monkeypatch.setattr(wiring, "_build_repositories", lambda _s: (None, object(), None))
+    monkeypatch.setattr(wiring, "ToolCatalogBuilder", _recording_builder)
+    monkeypatch.setattr(wiring, "action_authorization_registry", registry)
+
+    asyncio.run(wiring.build_container("config/platform.yaml"))
+
+    assert captured["action_policy"] is policy
+    assert captured["action_approval"] is approval
+
+
+def test_build_container_hands_disabled_authorization_to_the_catalog_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from nlght.adapters.outbound.tools.action_policy import DefaultActionPolicy
+    from nlght.adapters.outbound.tools.action_registry import ActionAuthorizationRegistry
+    from nlght.core.config.runtime_context import ActionAuthorizationRuntime
+
+    class StubConfigurationService:
+        async def load_snapshot(self) -> PlatformConfigSnapshot:
+            return PlatformConfigSnapshot()
+
+    class StubCompositionService:
+        def compose(self, snapshot: PlatformConfigSnapshot) -> RuntimeContext:
+            return _context(
+                action_authorization=ActionAuthorizationRuntime(
+                    enabled=False, policy_timeout_seconds=7, approval_timeout_seconds=70,
+                )
+            )
+
+    from integration._helpers import StubLicenseAdapter
+
+    captured: dict[str, object] = {}
+
+    def _recording_builder(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    registry = ActionAuthorizationRegistry()
+    registry.register_policy(DefaultActionPolicy())
+
+    monkeypatch.setattr(wiring, "FileConfigurationSource", lambda path: None)
+    monkeypatch.setattr(wiring, "ConfigurationService", lambda source: StubConfigurationService())
+    monkeypatch.setattr(wiring, "CompositionService", lambda: StubCompositionService())
+    monkeypatch.setattr(wiring, "_build_license_service", lambda _ctx: StubLicenseAdapter())
+    monkeypatch.setattr(wiring, "_build_repositories", lambda _s: (None, object(), None))
+    monkeypatch.setattr(wiring, "ToolCatalogBuilder", _recording_builder)
+    monkeypatch.setattr(wiring, "action_authorization_registry", registry)
+
+    with caplog.at_level(logging.WARNING, logger=wiring.__name__):
+        asyncio.run(wiring.build_container("config/platform.yaml"))
+
+    assert captured["action_authorization_enabled"] is False
+    assert captured["policy_timeout_seconds"] == 7
+    assert captured["approval_timeout_seconds"] == 70
+    warnings = [r.getMessage() for r in caplog.records if "action_authorization" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "disabled" in warnings[0]
+    assert "Ignored registered extensions: DefaultActionPolicy" in warnings[0]

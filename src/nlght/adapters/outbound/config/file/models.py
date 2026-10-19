@@ -12,7 +12,7 @@ class NamedResourceModel:
     """Shared shape for a named, toggleable YAML resource entry.
 
     Subclassed (with no added fields) per resource kind below purely for
-    self-documenting type names — see ``core.config.snapshot.NamedResourceConfig``,
+    self-documenting type names. See ``core.config.snapshot.NamedResourceConfig``,
     which this maps onto.
     """
     name: str
@@ -96,6 +96,13 @@ class ExecutionModel:
 
 
 @dataclass(slots=True)
+class ActionAuthorizationModel:
+    enabled: bool = True
+    policy_timeout_seconds: float = 30.0
+    approval_timeout_seconds: float = 300.0
+
+
+@dataclass(slots=True)
 class EmbeddingModel:
     provider: str = ""
     model: str = ""
@@ -120,6 +127,7 @@ class PlatformFileConfigModel:
     persistence_hive_mind_provider: HiveMindProviderModel | None = None
     licensing: LicensingConfigModel = field(default_factory=LicensingConfigModel)
     execution: ExecutionModel = field(default_factory=ExecutionModel)
+    action_authorization: ActionAuthorizationModel = field(default_factory=ActionAuthorizationModel)
     embedding: EmbeddingModel = field(default_factory=EmbeddingModel)
     #: The `principal:` block, passed through unparsed: `type` selects the
     #: resolver and each resolver needs different keys, so validating them here

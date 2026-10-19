@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Establishing a principal, and refusing to pretend one was established.
+"""Establish principals only from trusted request sources.
 
-The whole value of this boundary is one distinction:
-
-    any request + X-Principal-Id            a claim
-    a request from the configured upstream  an assertion
-      + X-Principal-Id
-
-Most of these tests are about the first case not becoming the second by
-accident — which is exactly what would happen if the resolver simply read the
-header.
-"""
+A caller-provided identity header is a claim. It becomes authoritative only
+when the request came from the configured upstream."""
 
 from __future__ import annotations
 
@@ -26,7 +18,7 @@ from nlght.core.entry.context import PrincipalRef
 from nlght.core.errors.errors import ConfigurationError, PrincipalConflictError
 
 
-async def _resolve(resolver, *, headers=None, client_host=None):  # noqa: ANN001, ANN202
+async def _resolve(resolver, *, headers=None, client_host=None):
     return await resolver.resolve(
         path="/v1/chat/completions", method="POST",
         headers=headers or {}, query_params={},
@@ -34,21 +26,15 @@ async def _resolve(resolver, *, headers=None, client_host=None):  # noqa: ANN001
     )
 
 
-def _gateway(**kwargs):  # noqa: ANN003, ANN202
+def _gateway(**kwargs):
     kwargs.setdefault("header", "x-principal-id")
     return TrustedGatewayPrincipalResolver(**kwargs)
 
 
 # The trust condition is not optional
-# ---------------------------------------------------------------------------
 
 def test_a_resolver_without_a_trust_condition_refuses_to_exist() -> None:
-    """The gap this closes, closed at construction rather than at runtime.
-
-    A resolver that reads the header from anybody is the thing that must not be
-    built, so it is not buildable — rather than built and then relied upon to
-    behave.
-    """
+    """Reject a principal resolver without a configured trust condition."""
     with pytest.raises(ConfigurationError, match="needs a trust condition"):
         TrustedGatewayPrincipalResolver(header="x-principal-id")
 
@@ -97,11 +83,7 @@ async def test_a_shared_secret_can_stand_in_for_a_host_range() -> None:
 
 
 async def test_both_conditions_must_hold_when_both_are_configured() -> None:
-    """A deployment that names both is asking for both.
-
-    Honouring either alone would quietly weaken what it configured — and it
-    would do so in the direction that accepts more.
-    """
+    """Require every configured principal trust condition to hold."""
     resolver = _gateway(
         trusted_hosts=("10.0.0.*",), secret_header="x-gateway-secret", secret="s3cret",
     )
@@ -123,7 +105,6 @@ async def test_a_trusted_upstream_that_asserts_nothing_establishes_nothing() -> 
 
 
 # Several sources, and what disagreement means
-# ---------------------------------------------------------------------------
 
 class _Fixed:
     def __init__(self, principal: PrincipalRef | None) -> None:
@@ -142,13 +123,7 @@ async def test_agreement_between_two_sources_is_corroboration() -> None:
 
 
 async def test_disagreement_is_an_error_and_not_a_tie_to_break() -> None:
-    """Never first-wins.
-
-    Each resolver is configured because its source is trusted, so two of them
-    establishing two different principals is a broken deployment — a certificate
-    for one identity carrying a key for another. Preferring one would make the
-    identity a request runs as depend on the order somebody listed them in.
-    """
+    """Reject conflicting principal identities from trusted resolvers."""
     resolver = CompositePrincipalResolver([
         _Fixed(PrincipalRef("alice")), _Fixed(PrincipalRef("bob")),
     ])
@@ -170,7 +145,6 @@ async def test_nothing_established_by_anybody_is_no_identity() -> None:
 
 
 # The reference itself
-# ---------------------------------------------------------------------------
 
 def test_a_principal_reference_needs_an_id() -> None:
     with pytest.raises(ValueError, match="needs an id"):

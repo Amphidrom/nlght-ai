@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for WebSearchTool — the built-in web search tool."""
+"""Check the built-in web search tool contract."""
 from __future__ import annotations
 
 import json
@@ -13,10 +13,6 @@ from nlght.adapters.outbound.tools.builtin.web_search import (
     _domain,
     _parse_response,
 )
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_tool(config: dict | None = None) -> WebSearchTool:
@@ -31,7 +27,15 @@ def _searxng_response(results: list[dict]) -> dict:
 
 
 def _mock_http(status: int = 200, data: dict | None = None) -> MagicMock:
-    """Return a mock that behaves as ``async with httpx2.AsyncClient() as client``."""
+    """Return a mock that behaves as ``async with httpx2.AsyncClient() as client``.
+
+    Args:
+        status (int): HTTP status returned by the fake client.
+        data (dict | None): Response data returned by the fake client.
+
+    Returns:
+        MagicMock: HTTP client mock with the requested response.
+    """
     response = MagicMock()
     response.status_code = status
     response.json.return_value = data or {}
@@ -43,11 +47,6 @@ def _mock_http(status: int = 200, data: dict | None = None) -> MagicMock:
     client.__aexit__ = AsyncMock(return_value=None)
 
     return client
-
-
-# ---------------------------------------------------------------------------
-# KIND / signatures
-# ---------------------------------------------------------------------------
 
 
 def test_kind_is_web_search() -> None:
@@ -69,11 +68,6 @@ def test_each_signature_has_matching_method() -> None:
         assert hasattr(tool, sig.method_name)
 
 
-# ---------------------------------------------------------------------------
-# helper functions
-# ---------------------------------------------------------------------------
-
-
 def test_clean_collapses_whitespace() -> None:
     assert _clean("  hello   world  ") == "hello world"
 
@@ -84,7 +78,6 @@ def test_domain_extracts_hostname() -> None:
 
 def test_domain_returns_empty_on_invalid_url() -> None:
     assert _domain("not-a-url") == ""
-
 
 
 def test_parse_response_searxng() -> None:
@@ -107,21 +100,11 @@ def test_parse_response_generic_fallback() -> None:
     assert items[0]["title"] == "C"
 
 
-# ---------------------------------------------------------------------------
-# no endpoint → error JSON
-# ---------------------------------------------------------------------------
-
-
 async def test_search_returns_error_when_no_endpoint() -> None:
     tool = WebSearchTool(name="ws", config={})
     result = json.loads(await tool.search(query="test"))
     assert result["result_count"] == 0
     assert "error" in result
-
-
-# ---------------------------------------------------------------------------
-# search — happy path
-# ---------------------------------------------------------------------------
 
 
 async def test_search_returns_results_json() -> None:
@@ -184,12 +167,6 @@ async def test_search_returns_error_on_network_exception() -> None:
     assert result["result_count"] == 0
 
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# langsearch mode
-# ---------------------------------------------------------------------------
-
-
 async def test_langsearch_mode_uses_post() -> None:
     api_data = {"data": {"webPages": {"value": []}}}
     mock_client = _mock_http(data=api_data)
@@ -217,11 +194,6 @@ async def test_langsearch_sends_auth_header() -> None:
 
     _, kwargs = mock_client.post.call_args
     assert kwargs["headers"].get("Authorization") == "Bearer tok123"
-
-
-# ---------------------------------------------------------------------------
-# top_k respected
-# ---------------------------------------------------------------------------
 
 
 async def test_search_top_k_limits_results() -> None:

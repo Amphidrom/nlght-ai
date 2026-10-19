@@ -1,25 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The assessment is the reason for a decision, so it is written before it.
+"""Persist observations and equivalence assessments before continuation.
 
-An audit that is written *after* the merge is not an audit: it is a description
-of the outcome, and a reader cannot tell a judgement that caused a continuation
-from one reconstructed to explain it. So the order is the contract:
-
-    1. the incoming observation is durable
-    2. the candidate observation is durable
-    3. the assessment between them is appended
-    4. and only then may `yes` continue an assertion
-
-The comparison unit is `AssertionObservation` — kind, observed text,
-representation — and not `Proposition`, which is a fact's representation and
-would make three kinds unauditable. `knowledge_propositions` keeps holding the
-structured fact; nothing here replaces it.
-
-An observation is a **sighting, not an identity**. Two runs that see the same
-sentence record it twice, and nothing deduplicates them: an event that happened
-twice happened twice, and collapsing them would lose which run saw what.
+An assessment names both observations and its judge. Only after that audit
+record exists may an affirmative decision continue an assertion.
 """
 
 from __future__ import annotations
@@ -58,7 +43,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -66,13 +51,13 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _rows(repository, model):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
@@ -93,10 +78,6 @@ _NEW = _rule(
     subject="ahead_of_time", rule_property="build_environment",
 )
 
-
-# ---------------------------------------------------------------------------
-# 1-2. An observation is durable, and it is a sighting
-# ---------------------------------------------------------------------------
 
 async def test_an_observation_of_any_kind_is_durable(repository) -> None:
     """Every kind, because three of them have no proposition to be stored as.
@@ -131,11 +112,7 @@ async def test_an_observation_of_any_kind_is_durable(repository) -> None:
 
 
 async def test_the_same_observation_seen_twice_is_two_observations(repository) -> None:
-    """No deduplication. An observation is an event, not a claim's identity.
-
-    Two runs that read one sentence saw it twice, and collapsing them would lose
-    which run saw what — which is the question an audit is asked.
-    """
+    """Record separate observations for separate readings of one claim."""
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeAssertionObservation,
     )
@@ -150,10 +127,6 @@ async def test_the_same_observation_seen_twice_is_two_observations(repository) -
     assert first != second
     assert len(await _rows(repository, KnowledgeAssertionObservation)) == 2
 
-
-# ---------------------------------------------------------------------------
-# 3. The assessment is appended, whatever it says
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("verdict", [SAME, DIFFERENT, AMBIGUOUS, UNJUDGED])
 async def test_every_verdict_is_recorded(repository, verdict: str) -> None:
@@ -227,10 +200,6 @@ async def test_an_unjudged_pair_names_no_model(repository) -> None:
     assert row.classifier is None and row.model is None
 
 
-# ---------------------------------------------------------------------------
-# 4. The order, which is the whole point
-# ---------------------------------------------------------------------------
-
 async def test_the_assessment_outlives_a_merge_that_never_happens(repository) -> None:
     """The proof that it is a reason and not a description.
 
@@ -258,12 +227,7 @@ async def test_the_assessment_outlives_a_merge_that_never_happens(repository) ->
 
 
 async def test_the_kind_boundary_is_not_recorded_as_a_model_judgement(repository) -> None:
-    """A different kind is settled without a model, so no model judged it.
-
-    If the deterministic decision is ever worth auditing it gets its own
-    classifier name. What it must never do is look like a model's opinion —
-    that would put a judgement in the trail that nothing made.
-    """
+    """Keep deterministic cross-kind rejection out of model-judgment records."""
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeEquivalenceAssessment,
     )
@@ -280,24 +244,11 @@ async def test_the_kind_boundary_is_not_recorded_as_a_model_judgement(repository
     assert [row for row in rows if row.classifier == "proposition-equivalence"] == []
 
 
-# ---------------------------------------------------------------------------
-# 5. The kinds that were unauditable
-# ---------------------------------------------------------------------------
-
 async def test_a_reworded_rule_can_be_judged_and_continued(repository) -> None:
-    """The live failure this whole slice came from.
+    """Judge reworded rules and continue the stored assertion when equivalent.
 
-        "…you have to set up the environment when building…"
-        "…the environment must be set up at build time"
-
-    One rule, two wordings, and the model chose different `subject` and
-    `rule_property` for each — so the entity key moved, every rung of the ladder
-    failed, and the corpus opened a second assertion and retired the first. The
-    judgement existed and never ran for a rule, because it took a
-    `Proposition` and a rule has none.
-
-    Now it runs, and the record of it is a row anyone can read.
-    """
+    The rule has a proposition. The model judgment resolves descriptions whose
+    entity-key fields differ despite expressing the same claim."""
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeAssertionObservation,
         KnowledgeEquivalenceAssessment,
@@ -318,7 +269,7 @@ async def test_a_reworded_rule_can_be_judged_and_continued(repository) -> None:
     observations = await _rows(repository, KnowledgeAssertionObservation)
     assert {row.kind for row in observations} == {"rule"}
     # The wording is the source's, and the representation says which assertion
-    # inside it was judged — neither reconstructed from the other.
+    # inside it was judged. Neither is reconstructed from the other.
     assert {row.observed_text for row in observations} == {
         _OLD.observed_text, _NEW.observed_text
     }
@@ -329,7 +280,7 @@ async def test_a_reworded_rule_can_be_judged_and_continued(repository) -> None:
 
 
 async def test_a_fact_keeps_its_proposition_table_as_well(repository) -> None:
-    # The observation is the comparison unit; it does not replace the structured
+    # The observation is the comparison unit. It does not replace the structured
     # fact. `knowledge_propositions` goes on holding what a fact *is*,
     # content-addressed, while an observation records that somebody looked.
     from nlght.adapters.outbound.persistence.knowledge_models import (
@@ -349,10 +300,6 @@ async def test_a_fact_keeps_its_proposition_table_as_well(repository) -> None:
     assert len(await _rows(repository, KnowledgeProposition)) == 1
     assert len(await _rows(repository, KnowledgeAssertionObservation)) == 1
 
-
-# ---------------------------------------------------------------------------
-# 6. An observation is a sighting, not a comparison
-# ---------------------------------------------------------------------------
 
 async def test_comparing_against_many_candidates_records_one_observation(
     repository,
@@ -402,7 +349,7 @@ async def test_comparing_against_many_candidates_records_one_observation(
     observations = await _rows(repository, KnowledgeAssertionObservation)
     assessments = await _rows(repository, KnowledgeEquivalenceAssessment)
 
-    # Four sightings happened, so there are four rows — not four plus three
+    # Four sightings happened, so there are four rows, not four plus three
     # copies made while comparing.
     assert len(observations) == 4
     assert len(assessments) == 3
@@ -418,17 +365,7 @@ async def test_comparing_against_many_candidates_records_one_observation(
 
 
 async def test_assessing_a_sighting_does_not_re_sight_its_candidates(repository) -> None:
-    """The same invariant where it is actually decided.
-
-    `_assess` compares one incoming sighting against every candidate standing in
-    the slot. It must record **one** observation — the incoming one — and reach
-    for the candidates' own historical rows.
-
-    Synthesising the candidate side at comparison time makes a sighting into a
-    sighting per comparison, and stamps it with the run that did the comparing
-    rather than the run that did the seeing. The audit would then be complete
-    and historically false, which is worse than incomplete: it reads as evidence.
-    """
+    """Record one incoming observation while comparing historical candidates."""
     from sqlalchemy.ext.asyncio import AsyncSession as _Session
 
     from nlght.adapters.outbound.persistence.knowledge_models import (
@@ -486,13 +423,13 @@ async def test_assessing_a_sighting_does_not_re_sight_its_candidates(repository)
         for number in range(3)
     ]
 
-    async with _Session(repository._test_engine) as session:  # noqa: SLF001
-        await repository._assess(session, incoming, candidates, None, SLOT)  # noqa: SLF001
+    async with _Session(repository._test_engine) as session:
+        await repository._assess(session, incoming, candidates, None, SLOT)
 
     after = await _rows(repository, KnowledgeAssertionObservation)
 
     assert len(after) - before == 1, (
-        "one sighting was assessed, so one observation may be recorded — "
+        "one sighting was assessed, so one observation may be recorded. "
         "the candidates were seen in an earlier run and already have theirs"
     )
     assert {row.run_id for row in after} == {"run-1", "run-2"}

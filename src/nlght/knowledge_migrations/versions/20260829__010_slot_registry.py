@@ -3,8 +3,8 @@
 
 """Where a claim stands, identified once and findable again.
 
-A slot has been a section's *position* — `source:document:0`, `:1`, `:2` — which
-is why inserting a paragraph renumbered every section below it and retraction had
+A slot used to be a section's *position*: `source:document:0`, `:1`, `:2`. Inserting
+a paragraph renumbered every section below it, so retraction had
 to be widened to the whole document to stop that destroying approvals. The
 position is useful for ordering and useless as identity.
 
@@ -12,10 +12,10 @@ position is useful for ordering and useless as identity.
 the slot has been found by, with how much that path was worth, because the
 strength changes over a slot's life and the change is the part that matters:
 
-    authored → authored    ordinary
-    derived  → authored    an upgrade; very likely the same section
-    derived  → derived     the fallback rungs are doing the work
-    authored → derived     a degradation — do not continue blindly
+    authored to authored    ordinary
+    derived to authored     an upgrade, likely the same section
+    derived to derived      the fallback rungs are doing the work
+    authored to derived     a degradation requiring review
 
 One strength per slot could not express the last row. When an authored id
 disappears and only a heading path is left, a resolver that still believed it
@@ -49,7 +49,7 @@ def upgrade() -> None:
         sa.Column("document_id", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default="live"),
         # What the section last said, hashed. The resolver's recovery rung
-        # compares against it; without it a renamed heading would mint a new slot
+        # compares against it. Without it a renamed heading would mint a new slot
         # and retract everything the old one held.
         sa.Column("content_fingerprint", sa.Text(), nullable=False, server_default=""),
         sa.Column(

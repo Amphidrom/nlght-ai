@@ -1,12 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The renderer as a pure function of what it is handed.
+"""Render model context deterministically from a reduced view.
 
-Its contract is small and worth stating: given a reduced view, framing and
-capabilities, it produces one deterministic string. It adds no knowledge, drops
-none, changes no wording, and leaves everything it was given exactly as it found
-it — which is what lets a caller render, measure, and render again.
+The renderer must preserve supplied wording without adding knowledge or
+mutating its inputs.
 """
 
 from __future__ import annotations
@@ -39,9 +37,9 @@ def _element(element_id: str, text: str, section: str, order: int,
     )
 
 
-def _render(elements, *, ego: str = "Ego.", budget: int = 10_000) -> str:  # noqa: ANN001
+def _render(elements, *, ego: str = "Ego.", budget: int = 10_000) -> str:
     del ego
-    records = ModelContextBuilder()._build_records(  # noqa: SLF001
+    records = ModelContextBuilder()._build_records(
         mental_model=MentalModel(turn_id="t", built_at=datetime.now(UTC)),
         policy=PromptInputPolicy(),
         view=reduce_to_budget(elements, budget=budget),
@@ -69,7 +67,7 @@ def test_rendering_does_not_mutate_what_it_was_given() -> None:
     view = reduce_to_budget(elements, budget=100)
     before = (view.kept, view.forgotten, view.cost, elements[0].representations)
 
-    ModelContextBuilder()._build_records(  # noqa: SLF001
+    ModelContextBuilder()._build_records(
         mental_model=MentalModel(turn_id="t", built_at=datetime.now(UTC)),
         policy=PromptInputPolicy(), view=view, slots=None,
     )
@@ -87,12 +85,7 @@ def test_the_text_of_a_representation_is_never_altered() -> None:
 
 
 def test_grouping_follows_presentation_and_nothing_else() -> None:
-    """Two different kinds under one heading; one kind under two headings.
-
-    Both shapes occur in the corpus today — a session result renders under two
-    different headings depending on a tag — so neither may be an accident of how
-    the renderer is written.
-    """
+    """Group rendered elements by presentation metadata rather than kind."""
     prompt = _render([
         _element("a", "  - from memory", "Shared:", 10, kind="result"),
         _element("b", "  - from a corpus", "Shared:", 10, kind="passage"),
@@ -119,7 +112,7 @@ def test_sections_appear_in_their_stated_order_whatever_order_they_arrive_in() -
 
 
 def test_a_multi_line_entry_is_kept_byte_identical() -> None:
-    # Context content stays opaque; provider serialization escapes it later.
+    # Context content stays opaque. Provider serialization escapes it later.
     prompt = _render([_element("a", "  - first line\nsecond line", "Section:", 10)])
 
     assert "  - first line\nsecond line" in prompt

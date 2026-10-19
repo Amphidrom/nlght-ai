@@ -1,29 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What a run was supposed to do, checked against what it did.
-
-Two snapshots say what *moved*. They cannot say whether that was what anybody
-wanted: "two revisions" is equally consistent with a threshold moving from 30
-seconds to 60 and with it moving to 6000, and "one assertion retired" is as true
-of a claim the source dropped as of one the model lost. So the corpus that
-exercises the pipeline states its expectations, and they are checked.
-
-**Values, not counts.** A case names the claim it is about by a phrase in its
-observed wording — the source's own words, which are authoritative (ADR-0048) and
-are therefore the one handle that does not move when the model rephrases its
-fields. Then it says what must be true of it:
-
-    same assertion, revision 1 -> 2, approved -> needs_review,
-    wording no longer contains "30 seconds" and now contains "60 seconds"
-
-Each of those is checkable, and a failure names which one broke rather than
-reporting that some number is off by one.
-
-An expectation that cannot be evaluated is a **failure**, never a pass. A case
-whose claim is not in the baseline at all usually means the model did not extract
-it, and reporting that as success is how a green run comes to mean nothing.
-"""
+"""Check expected knowledge changes against run results."""
 
 from __future__ import annotations
 
@@ -50,9 +28,8 @@ class ClaimExpectation:
     #: minted per run, so a file that named them could only ever be written after
     #: the run it describes.
     match: str
-    #: `same` — the assertion continued. `different` — a new one opened and the
-    #: matched claim is not it. `gone` — retired. `new` — absent before, present
-    #: after.
+    #: `same`: the assertion continued. `different`: a new one opened and the
+    #: matched claim is not it. `gone`: retired. `new`: absent before, present after.
     assertion: str = SAME
     revision: tuple[int, int] | None = None
     review_state: tuple[str, str] | None = None
@@ -60,7 +37,7 @@ class ClaimExpectation:
     #: change is actually asserted: `30 seconds` out, `60 seconds` in.
     #:
     #: Each needs the side it is about. `text_loses` is a statement about the
-    #: baseline wording — it was there, and it is not any more — so a `new` claim
+    #: baseline wording: it was there and is absent now, so a `new` claim
     #: cannot carry one. `text_gains` is about the wording that arrived, so a
     #: `gone` claim cannot. Naming one anyway is a failure, not a skipped check.
     text_loses: tuple[str, ...] = ()
@@ -69,8 +46,8 @@ class ClaimExpectation:
     #: needs both sides.
     slot: str = ""
     #: The kind this claim must be. A property of a single state rather than a
-    #: comparison, so it holds for a retired claim as well as for a live one —
-    #: which is the case that matters, since a kind change retires and recreates.
+    #: comparison, so it holds for a retired claim as well as for a live one.
+    #: This matters because a kind change retires and recreates the claim.
     kind: str = ""
     #: Documents that must carry **this same assertion**, not merely a claim that
     #: matches. Reinforcement is one claim seen twice, and the only thing that
@@ -81,8 +58,8 @@ class ClaimExpectation:
     #:
     #: Named by document, never by id: `assertion_id` is a surrogate minted per
     #: corpus, so a file pinning one could only be written after the run it
-    #: describes. Each named document is selected with this same expectation —
-    #: kind and phrase — and must arrive at the id the home document did.
+    #: describes. Each named document is selected with this same expectation:
+    #: kind and phrase, and must arrive at the id the home document did.
     supported_by: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -140,7 +117,7 @@ class ExpectationOutcome:
     checked: int = 0
     failures: tuple[Failure, ...] = ()
     #: Cases naming a file no snapshot contains. Their own list, because it means
-    #: the corpus and the expectations have drifted apart — a different fault
+    #: the corpus and the expectations have drifted apart. That is a different fault
     #: from the pipeline misbehaving, and one that would otherwise read as a
     #: cascade of unrelated failures.
     unknown_documents: tuple[str, ...] = ()
@@ -165,10 +142,14 @@ class ExpectationOutcome:
 
 
 def _resolve(report: LineageReport, wanted: str) -> str:
-    """The `document_id` a case's file name refers to.
+    """Map a case file name to a corpus document ID.
 
-    By suffix, so a case says `timeouts.adoc` and does not have to know whether
-    the corpus was mounted at `/corpus`, `test-run-2/` or anywhere else.
+    Args:
+        report (LineageReport): Corpus report containing document identities.
+        wanted (str): Case file name to resolve.
+
+    Returns:
+        str: Matching corpus document ID.
     """
     for document_id, path in report.document_paths.items():
         if path == wanted or path.endswith(f"/{wanted}") or path.endswith(f"\\{wanted}"):
@@ -177,13 +158,14 @@ def _resolve(report: LineageReport, wanted: str) -> str:
 
 
 def _carried_by(states: Sequence[AssertionState], document_id: str) -> list[AssertionState]:
-    """The claims a document carries — all of them, not just the ones it saw last.
+    """Collect claims supported by one document.
 
-    `document_id` on a state is its most recent sighting, so a claim two
-    documents assert appeared under one of them and was invisible to the other.
-    An expectation on the quiet document then reported "in no baseline claim",
-    which reads as the model having failed to extract it and is the opposite of
-    what happened: the claim was there, once, carried by both.
+    Args:
+        states (Sequence[AssertionState]): Assertion states in the report.
+        document_id (str): Document whose supported claims are requested.
+
+    Returns:
+        list[AssertionState]: States of claims supported by the document.
     """
     return [
         state
@@ -193,12 +175,13 @@ def _carried_by(states: Sequence[AssertionState], document_id: str) -> list[Asse
 
 
 def _current(states: Sequence[AssertionState]) -> list[AssertionState]:
-    """The deepest state of each variant, which is the one that holds now.
+    """Select the deepest state of each variant.
 
-    A snapshot carries one row per revision, so a claim that gained a state
-    appears twice. An expectation is about what the claim *is* after the run, and
-    matching against every revision would report it as ambiguous the moment it
-    was reworded — which is precisely the case these files exist to describe.
+    Args:
+        states (Sequence[AssertionState]): Assertion states.
+
+    Returns:
+        list[AssertionState]: Current assertion states.
     """
     latest: dict[str, AssertionState] = {}
     for state in states:
@@ -220,27 +203,14 @@ def _by_match(states: Sequence[AssertionState], phrase: str) -> list[AssertionSt
 def _select(
     states: Sequence[AssertionState], expectation: ClaimExpectation
 ) -> tuple[list[AssertionState], str]:
-    """The claim an expectation is about — by wording **and** kind.
+    """Select a claim by both wording and knowledge kind.
 
-    A phrase is not a claim identity. One sentence may state several assertions
-    and they share their `observed_text` by design (ADR-0049), so a phrase from
-    it names all of them:
+    Args:
+        states (Sequence[AssertionState]): Assertion states to search.
+        expectation (ClaimExpectation): Expected claim wording and kind.
 
-        "Access tokens must not be logged and sessions expire after one hour."
-            -> rule  (the prohibition)
-            -> fact  (the expiry)
-
-    Both carry that wording, and a checker that selected on the phrase alone
-    reported the case as ambiguous — correctly, and uselessly, because the corpus
-    had said which of the two it meant. So `kind` narrows the selection rather
-    than being checked after one was already chosen.
-
-    Where narrowing finds nothing and the phrase names exactly one claim of
-    another kind, that is a kind mismatch and it is said plainly. Reporting "no
-    such claim" there would hide the one thing that went wrong.
-
-    `observed_text` stays the authority on the wording. This only says that one
-    source may hold more than one atomic assertion.
+    Returns:
+        tuple[list[AssertionState], str]: Matching states and the reason for selection.
     """
     hits = _by_match(states, expectation.match)
     if not expectation.kind:
@@ -254,12 +224,15 @@ def _select(
 
 
 def _unevaluable(what: str, side: str, expectation: ClaimExpectation) -> str:
-    """One expectation that had nothing to be checked against.
+    """Explain an expectation with no evaluable claim.
 
-    A failure and never a pass, which is the rule this module opens with. It
-    used to be neither: `new` and `gone` returned before the value checks ran, so
-    a `new` claim could carry `review_state: [approved, needs_review]` — an
-    assertion about a state that does not exist — and the run went green.
+    Args:
+        what (str): Expected property that cannot be evaluated.
+        side (str): Before or after side of the comparison.
+        expectation (ClaimExpectation): Claim expectation being checked.
+
+    Returns:
+        str: Explanation of why the property could not be evaluated.
     """
     return (
         f"{what} cannot be evaluated: a '{expectation.assertion}' claim has no "
@@ -267,31 +240,20 @@ def _unevaluable(what: str, side: str, expectation: ClaimExpectation) -> str:
     )
 
 
-def _check_claim(  # noqa: PLR0912, PLR0915 - one branch per expectation, and each names itself
+def _check_claim(
     expectation: ClaimExpectation,
     before: Sequence[AssertionState],
     after: Sequence[AssertionState],
 ) -> list[str]:
-    """Every way this claim failed to become what it was supposed to.
+    """Find unmet changes to an expected claim.
 
-    Each expectation is checked against the sides this claim actually has, and
-    nothing is paired up to manufacture a side that is missing:
+    Args:
+        expectation (ClaimExpectation): Expected claim change.
+        before (Sequence[AssertionState]): Assertion states before the run.
+        after (Sequence[AssertionState]): Assertion states after the run.
 
-        new             old = none      new = the claim
-        same/different  old = the claim new = the claim
-        gone            old = the claim new = none
-
-    Which side each key needs then follows mechanically. `text_gains` is about
-    the wording that arrived, so it needs the new side. `text_loses` is about
-    wording that was there and went, so it needs the old one. `revision` and
-    `review_state` are pairs and need both. A key whose side is absent is
-    reported as unevaluable rather than skipped.
-
-    What is deliberately *not* done is guessing that a retired claim and a new
-    one are two halves of the same change. Which new claim replaced which old one
-    is a question about identity, and answering it by comparing text or
-    fingerprints here would put a second, private notion of equivalence in the
-    test checker.
+    Returns:
+        list[str]: Descriptions of unmet claim expectations.
     """
     was, was_mismatch = _select(before, expectation)
     now, now_mismatch = _select(after, expectation)
@@ -306,7 +268,7 @@ def _check_claim(  # noqa: PLR0912, PLR0915 - one branch per expectation, and ea
     # Ambiguity next: with more than one candidate on either side, nothing that
     # follows would be about a claim anybody named. Kind has already narrowed the
     # selection, so reaching here means two claims of *one* kind share the
-    # wording — which the expectation language cannot yet separate, and a
+    # wording, which the expectation language cannot yet separate, and a
     # structural selector is what it would take.
     if len(was) > 1:
         return [
@@ -398,8 +360,8 @@ def _check_claim(  # noqa: PLR0912, PLR0915 - one branch per expectation, and ea
             problems.append(_unevaluable("text_loses", "baseline", expectation))
         else:
             for phrase in expectation.text_loses:
-                # A loss is two statements — it was there, and it is not any
-                # more — and only the first can be made when the claim itself is
+                # A loss has two parts: it was there, and it is not any
+                # more, and only the first can be made when the claim itself is
                 # gone. Checking absence alone let a phrase that was never in the
                 # wording pass as successfully removed.
                 if phrase.lower() not in earlier.text.lower():
@@ -413,7 +375,7 @@ def _check_claim(  # noqa: PLR0912, PLR0915 - one branch per expectation, and ea
     # --- expectations about the claim itself --------------------------------
     if expectation.kind:
         # A property of one state rather than a comparison, so it is read off
-        # whichever side this claim has — the current one where there is one, and
+        # whichever side this claim has: the current one where there is one, and
         # the retired one for a claim that is gone. Requiring the current state
         # would make `kind` unpinnable on exactly the movements where kinds drift.
         subject = later if later is not None else earlier
@@ -428,17 +390,15 @@ def _check_claim(  # noqa: PLR0912, PLR0915 - one branch per expectation, and ea
 def _check_support(
     expectation: ClaimExpectation, current: LineageReport, home: str
 ) -> list[str]:
-    """Whether the named documents carry this claim, or one that merely matches.
+    """Check which documents currently support a claim.
 
-    Reinforcement is one claim seen twice. Two documents each holding a claim
-    that matches the phrase is equally true of duplication, so the only thing
-    that separates them is that both sightings resolve to the same
-    `assertion_id` — and a live run passed a reinforcement case while the two
-    documents held two separate assertions of one sentence, because nothing
-    asked.
+    Args:
+        expectation (ClaimExpectation): Expected document support for a claim.
+        current (LineageReport): Current corpus report.
+        home (str): Home document ID for the claim.
 
-    Ids are read, never pinned: `assertion_id` is a surrogate minted per corpus,
-    so the file says which documents must agree and the run says on what.
+    Returns:
+        list[str]: Descriptions of unmet support expectations.
     """
     if not expectation.supported_by:
         return []
@@ -479,7 +439,17 @@ def check_expectations(
     comparison: ReportComparison,
     cases: Sequence[CaseExpectation],
 ) -> ExpectationOutcome:
-    """Hold the run against what the corpus said it should do."""
+    """Compare a run with its declared corpus expectations.
+
+    Args:
+        baseline (LineageReport): Corpus report before the run.
+        current (LineageReport): Corpus report after the run.
+        comparison (ReportComparison): Computed changes between the reports.
+        cases (Sequence[CaseExpectation]): Declared case expectations.
+
+    Returns:
+        ExpectationOutcome: Aggregated expectation verdict and failures.
+    """
     failures: list[Failure] = []
     unknown: list[str] = []
 
@@ -501,7 +471,7 @@ def check_expectations(
             if edited != case.edited:
                 # Both halves, always. The `+` used to bind inside the else
                 # branch, so a document that was edited and should not have been
-                # reported "the document was edited" — a statement of fact that
+                # reported "the document was edited", a statement of fact that
                 # never said what was wanted, and so did not read as a failure.
                 actual = "the document was edited" if edited else "the document was not edited"
                 wanted = "edited" if case.edited else "untouched"
@@ -527,16 +497,13 @@ def check_expectations(
                 fail(f"{added} revision(s) added, expected {case.revisions_added}")
 
         def _carrying(states: Sequence[AssertionState]) -> set[str]:
-            """Slots that hold a live claim.
+            """Find slots carrying a live claim.
 
-            Not "slots that appear": evidence is never deleted, so a slot whose
-            section was removed keeps every sighting it ever had and goes on
-            appearing in both pictures. Comparing appearances made
-            `slots_retired` unable to fire at all — it reported 0 for a section
-            that had genuinely gone, and the pipeline was right while the check
-            was wrong.
+            Args:
+                states (Sequence[AssertionState]): Assertion states.
 
-            Historic evidence is history. Support is a live claim.
+            Returns:
+                set[str]: Set of supporting slot IDs.
             """
             return {
                 state.slot_id
@@ -601,11 +568,13 @@ def check_expectations(
 
 
 def parse_expectations(document: Mapping[str, Any]) -> tuple[CaseExpectation, ...]:
-    """Read the expectations from a plain mapping — a YAML or JSON file.
+    """Parse case expectations from YAML or JSON data.
 
-    Unknown keys are refused rather than ignored. A misspelled expectation that
-    is silently dropped turns into a case that passes without checking anything,
-    which is the failure mode this whole module exists to remove.
+    Args:
+        document (Mapping[str, Any]): Decoded document mapping.
+
+    Returns:
+        tuple[CaseExpectation, ...]: Validated case expectation values.
     """
     cases: list[CaseExpectation] = []
     for raw in document.get("cases") or ():

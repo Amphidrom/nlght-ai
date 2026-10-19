@@ -1,10 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Core Hive-Mind vocabulary: data models, stores, and logic.
-
-No framework dependencies.  No persistence logic.
-"""
+"""Core Hive Mind models, stores, and logic."""
 
 from nlght.core.hive_mind.builder import ContextSnapshot, MentalModelBuilder
 from nlght.core.hive_mind.extraction import (

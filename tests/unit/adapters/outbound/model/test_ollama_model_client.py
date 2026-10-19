@@ -1,11 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for OllamaCloudClient and BoundModelClient.
-
-HTTP calls are intercepted via httpx2.AsyncClient(transport=...) using a
-custom ASGI-style mock transport — no live server required.
-"""
+"""Check Ollama cloud and bound model clients over a mock HTTP transport."""
 from __future__ import annotations
 
 import json
@@ -18,10 +14,6 @@ import httpx2
 from nlght.adapters.outbound.model import OllamaClient, OllamaCloudClient, _has_tool_protocol_messages
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.core.model.model_info import ModelInfo, RunningModelInfo
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_client(
@@ -44,11 +36,6 @@ def _make_client(
         stream_connect_timeout_s=stream_connect_timeout_s,
         stream_read_timeout_s=stream_read_timeout_s,
     )
-
-
-# ---------------------------------------------------------------------------
-# bind()
-# ---------------------------------------------------------------------------
 
 
 def test_bind_returns_bound_client_with_given_model() -> None:
@@ -79,11 +66,6 @@ def test_bind_falls_back_to_default_model_when_model_is_empty() -> None:
     bound = client.bind(model="", emitter=BufferingSignalEmitter(), stream=False)
 
     assert bound._model == "llama3"
-
-
-# ---------------------------------------------------------------------------
-# call() — non-streaming
-# ---------------------------------------------------------------------------
 
 
 async def test_call_non_stream_emits_result_signal() -> None:
@@ -166,13 +148,15 @@ async def test_call_non_stream_handles_empty_content() -> None:
     assert emitter.collected()[0].content == ""
 
 
-# ---------------------------------------------------------------------------
-# call() — streaming
-# ---------------------------------------------------------------------------
-
-
 async def _make_streaming_http_client(lines: list[str]) -> httpx2.AsyncClient:
-    """Returns an AsyncClient mock whose .stream() yields the given SSE lines."""
+    """Returns an AsyncClient mock whose .stream() yields the given SSE lines.
+
+    Args:
+        lines (list[str]): SSE lines returned by the fake HTTP stream.
+
+    Yields:
+        httpx2.AsyncClient: Async client whose stream provides the supplied lines.
+    """
 
     async def _aiter_lines() -> AsyncIterator[str]:
         for line in lines:
@@ -329,11 +313,6 @@ async def test_stream_uses_api_chat_when_tool_history_exists_without_new_tools()
     assert any(event.kind == "token" for event in events)
 
 
-# ---------------------------------------------------------------------------
-# list_models
-# ---------------------------------------------------------------------------
-
-
 def _mock_get_response(body: dict, status_code: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
@@ -371,11 +350,6 @@ async def test_list_models_returns_empty_on_request_error() -> None:
     client = _make_client(http_client)
     models = await client.list_models()
     assert models == []
-
-
-# ---------------------------------------------------------------------------
-# list_running_models
-# ---------------------------------------------------------------------------
 
 
 async def test_list_running_models_returns_running_model_info() -> None:

@@ -21,33 +21,23 @@ class SourceDocument:
     source: str
     external_id: str
     path: str
-    #: What the pipeline consumes: classification, chunking and the search index
-    #: are all derived from this.
+    #: Keep processed content separate from source form so search and markup
+    #: parsing can consume the representation each requires.
     content: bytes
     metadata: dict[str, Any] = field(default_factory=dict)
     source_revision: str | None = None
-    #: The document as the source actually holds it, when acquisition had to
-    #: transform it to produce `content`. Kept *beside* rather than instead,
-    #: because the three consumers want different things and only one of them
-    #: wants text:
-    #:
-    #:     source form   the markup — what a knowledge parser reads
-    #:     search text   markup removed — what the index holds
-    #:     model input   derived from the source form
-    #:
-    #: Conflating the first two cost a whole source type. Confluence stripped its
-    #: HTML at acquisition and stored the result under a path still ending
-    #: `.html`, so the knowledge parser was handed tagless text and looked for
-    #: elements that were no longer there. Every page produced zero units, with
-    #: no error and an empty funnel that read like a page with nothing to say.
-    #:
-    #: `None` where the two coincide, which is every source that hands over what
-    #: it holds.
+    #: Preserve original markup when acquisition transforms it for indexing.
+    #: Parsers need the source form. Otherwise stripped HTML produces no
+    #: structured units. None means source form equals processed content.
     source_form: bytes | None = None
 
     @property
     def markup(self) -> bytes:
-        """The form a parser should read: the source's own, or the content."""
+        """Provide the source form for markup-aware parsing.
+
+        Returns:
+            bytes: Source form when present, otherwise acquired content.
+        """
         return self.source_form if self.source_form is not None else self.content
 
     def __post_init__(self) -> None:
@@ -100,13 +90,13 @@ class ChunkProjection:
 
     The locator travels with the vector rather than beside it. It used to be a
     ``(chunk_id, vector, content)`` tuple with the semantics passed as a second
-    list zipped back on by position — so a chunk's terms were correct only while
+    list zipped back on by position. A chunk's terms were correct only while
     two lists stayed the same length in the same order, and ``position``,
     ``start_offset`` and ``end_offset`` were simply dropped on the way.
 
     Those three are what makes a hit resolvable at all. Without them a chunk
     found in the index names no span of the document it came from, and the only
-    text anyone could show was the payload's own copy — which is a projection,
+    text anyone could show was the payload's own copy, which is a projection,
     not the source of truth.
     """
 

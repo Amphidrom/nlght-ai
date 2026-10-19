@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.core.hive_mind.relevance — RelevanceEngine."""
+"""Check relevance scoring and ranking."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
@@ -22,9 +22,6 @@ from nlght.core.hive_mind.relevance import (
     _volatility_score,
 )
 
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -35,10 +32,6 @@ def _atom(entities: list[str] | None = None) -> WorkingAtom:
 def _result(entities: list[str] | None = None, tags: list[str] | None = None) -> SessionResult:
     return SessionResult(content="data", entities=entities or [], tags=tags or [])
 
-
-# ---------------------------------------------------------------------------
-# _recency_score
-# ---------------------------------------------------------------------------
 
 def test_recency_score_none_timestamp_returns_one() -> None:
     assert _recency_score(None, _now()) == 1.0
@@ -60,10 +53,6 @@ def test_recency_score_naive_datetime_handled() -> None:
     assert 0.0 <= score <= 1.0
 
 
-# ---------------------------------------------------------------------------
-# _proximity_score
-# ---------------------------------------------------------------------------
-
 def test_proximity_score_no_entities_returns_low() -> None:
     score = _proximity_score([], ["python"], "code")
     assert score == 0.1
@@ -81,10 +70,6 @@ def test_proximity_score_intent_fallback() -> None:
     assert score > 0.05
 
 
-# ---------------------------------------------------------------------------
-# _volatility_score
-# ---------------------------------------------------------------------------
-
 def test_volatility_score_zero_mutations() -> None:
     assert _volatility_score(0) == 0.0
 
@@ -95,10 +80,6 @@ def test_volatility_score_grows_with_mutations() -> None:
     assert _volatility_score(5) > _volatility_score(1)
 
 
-# ---------------------------------------------------------------------------
-# _dependency_score
-# ---------------------------------------------------------------------------
-
 def test_dependency_score_in_deps() -> None:
     assert _dependency_score("id1", {"id1", "id2"}) == 1.0
 
@@ -108,10 +89,6 @@ def test_dependency_score_not_in_deps() -> None:
 def test_dependency_score_empty_deps() -> None:
     assert _dependency_score("id1", set()) == 0.0
 
-
-# ---------------------------------------------------------------------------
-# RelevanceEngine — score_atom
-# ---------------------------------------------------------------------------
 
 def test_engine_score_atom_returns_relevance_score() -> None:
     engine = RelevanceEngine()
@@ -126,10 +103,6 @@ def test_engine_score_atom_with_dependency() -> None:
     assert score.dependency == 1.0
 
 
-# ---------------------------------------------------------------------------
-# RelevanceEngine — score_result
-# ---------------------------------------------------------------------------
-
 def test_engine_score_result_returns_relevance_score() -> None:
     engine = RelevanceEngine()
     result = _result(entities=["python"], tags=["code"])
@@ -143,14 +116,10 @@ def test_engine_score_result_volatility_always_zero() -> None:
     assert score.volatility == 0.0
 
 
-# ---------------------------------------------------------------------------
-# RelevanceEngine — ranking, which discards nothing
-# ---------------------------------------------------------------------------
 #
 # These replace four tests that asserted the opposite: that a score threshold and
-# a per-type limit removed candidates here. They did, and that was the defect —
-# a durable fact about the user could be dropped for being the eleventh session
-# result, before anything knew what it would cost to lose it (ADR-0056).
+# a per-type limit removed candidates here. That discarded durable facts
+# before reduction weighed the cost of losing them (ADR-0056).
 
 def test_ranking_atoms_keeps_every_one_of_them() -> None:
     engine = RelevanceEngine()
@@ -184,17 +153,7 @@ def test_a_poorly_matching_candidate_is_ranked_last_and_not_removed() -> None:
 
 
 def test_an_atom_is_scored_on_the_entities_it_carries() -> None:
-    """The signal the caller always supplied and every writer dropped.
-
-    `WriteIntent.entities` has always existed and `memory_ingestion` fills it
-    with real extracted entities; all three `write()` implementations mapped five
-    fields and let it fall. `WorkingAtom` had no field for it, so proximity
-    scored every atom against an empty list and returned the same floor — every
-    atom in the platform scored exactly 0.2558, whatever it said (ADR-0057).
-
-    This test replaces the one that pinned that defect. That one documented
-    something known to be wrong, not a contract, and it goes with the defect.
-    """
+    """Include a working atom's entities in relevance scoring."""
     engine = RelevanceEngine()
     now = _now()
     about_python = WorkingAtom(atom_type=AtomType.RESULT, content="c", task_id="t",
@@ -245,7 +204,7 @@ def test_only_recency_moves_when_only_the_age_differs() -> None:
 
 def test_volatility_stays_zero_because_an_atom_is_never_rewritten() -> None:
     # Honest rather than synthesised: nothing in the platform modifies an atom
-    # after it is written — branches move them, never rewrite them — so this is
+    # after it is written. Branches move them without rewriting them, so this is
     # the same statement `score_result` makes about session results.
     engine = RelevanceEngine()
     atom = WorkingAtom(atom_type=AtomType.RESULT, content="c", task_id="t",
@@ -271,13 +230,7 @@ def test_dependency_stays_neutral_while_nothing_populates_it() -> None:
 
 
 def test_an_atom_and_a_result_with_the_same_signals_score_the_same() -> None:
-    """One definition of relevance, two field mappings onto it.
-
-    `score_result` hardcodes `volatility = 0` because a session result does not
-    mutate. That is an input, and with an atom that has not mutated either the
-    two must agree exactly — if they do not, there are two meanings of relevance
-    again.
-    """
+    """Score an atom and result equally when their signals match."""
     from nlght.core.hive_mind.models import RelevanceInputs
 
     engine = RelevanceEngine()
@@ -296,10 +249,6 @@ def test_an_atom_and_a_result_with_the_same_signals_score_the_same() -> None:
     ).proximity
 
 
-# ---------------------------------------------------------------------------
-# Scoring strategies
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("strategy", [
     ScoringStrategy.LINEAR,
     ScoringStrategy.WEIGHTED_SIGMOID,
@@ -313,13 +262,7 @@ def test_all_strategies_return_valid_score(strategy: ScoringStrategy) -> None:
 
 
 def test_the_signals_survive_a_working_memory_round_trip() -> None:
-    """Both serialisers, because the loss would otherwise return one level later.
-
-    `WorkingMemory.snapshot` uses `asdict` and picks a new field up for free;
-    `pipeline_snapshot` writes an explicit field list and would have dropped it
-    silently. Adding a model field and fixing the production writer is not
-    enough — the same information has to survive every path it is written to.
-    """
+    """Preserve relevance signals through both working-memory snapshots."""
     from nlght.adapters.outbound.hive_mind.pipeline_snapshot import _de_atom, _ser_atom
     from nlght.core.hive_mind.stores import WorkingMemory
 
@@ -351,7 +294,7 @@ def test_the_entities_a_caller_supplies_reach_the_atom() -> None:
         entities=["python", "spring"],
     ))
 
-    written = next(iter(store._working.values()))[0]  # noqa: SLF001
+    written = next(iter(store._working.values()))[0]
     assert written.entities == ["python", "spring"]
 
 
@@ -403,5 +346,5 @@ def test_the_key_a_caller_supplies_reaches_the_atom() -> None:
         key="ssl-keystore-path", kind="fact",
     ))
 
-    written = next(iter(store._working.values()))[0]  # noqa: SLF001
+    written = next(iter(store._working.values()))[0]
     assert (written.key, written.kind) == ("ssl-keystore-path", "fact")

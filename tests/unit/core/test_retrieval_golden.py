@@ -1,21 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Layer C — controlled scenarios with a ranking worked out beforehand.
+"""Check ranked retrieval against hand-calculated examples.
 
-The invariants in the contract file say what must never happen. These say what
-*does* happen, for a corpus small enough to compute by hand:
-
-    score(finding) = Σ weight(source) / (damping + rank in that source)
-
-The expected order below is derived from that formula and written out, not
-observed from a run and pasted back. A golden test that records whatever the
-code did is a change detector; one that records what the contract requires is a
-specification, and only the second is worth keeping when the fusion algorithm is
-replaced.
-
-Each scenario states the arithmetic in its docstring, so a failure is read as
-"the contract says 0.0328 and we got 0.0164" rather than as a list that moved.
+Expected order comes from the weighted reciprocal-rank formula rather than
+from recorded implementation output.
 """
 
 from __future__ import annotations
@@ -40,7 +29,15 @@ K = 60.0
 
 
 def rrf(*ranks: int, weight: float = 1.0) -> float:
-    """The contract, spelled out, so the expectations are computed and not copied."""
+    """The contract, spelled out, so the expectations are computed and not copied.
+
+    Args:
+        *ranks (int): Ranks included in the expected fusion score.
+        weight (float): Rank contribution weight.
+
+    Returns:
+        float: Expected reciprocal-rank-fusion score.
+    """
     return sum(weight / (K + rank) for rank in ranks)
 
 
@@ -65,30 +62,14 @@ def claim(assertion: str, document: str, text: str) -> RetrievalHit:
     )
 
 
-def ranked(*hits: RetrievalHit):  # noqa: ANN201
+def ranked(*hits: RetrievalHit):
     return fuse(rank_within_sources(list(hits)))
 
 
 # --- 1 -----------------------------------------------------------------------
 
 def test_required_java_version() -> None:
-    """Three systems, one topic, and the order the contract requires.
-
-        lexical    1. d1  mentions Java in passing
-                   2. d2  "Spring Boot requires Java 17"
-        vector     1. c2  the relevant passage of d2
-        knowledge  1. a1  the reviewed claim
-
-    Nothing is found twice, so every finding scores its single reciprocal rank:
-
-        a1  1/61 = 0.016393      d1  1/61 = 0.016393
-        c2  1/61 = 0.016393      d2  1/62 = 0.016129
-
-    Three findings tie at the top, which is the honest answer — each system's
-    first choice, and no evidence yet to separate them. The tie is broken by
-    carrier and id so the list is stable, and `d2` comes last because its own
-    store ranked it second.
-    """
+    """Rank the reviewed Java requirement above weaker single-source matches."""
     fused = ranked(
         lexical("d1", "Java is mentioned in passing."),
         lexical("d2", "Spring Boot requires Java 17."),
@@ -156,18 +137,7 @@ def test_a_weighted_knowledge_store_outranks_a_lexical_first_place() -> None:
 # --- 4 -----------------------------------------------------------------------
 
 def test_a_deep_agreement_against_a_shallow_certainty() -> None:
-    """The case that shows what the damping actually decides.
-
-        lexical  1. top      ...  11. deep
-        vector                    10. deep
-
-        deep  1/71 + 1/70 = 0.028370
-        top   1/61        = 0.016393
-
-    At the default damping the two systems agreeing outweigh one system's first
-    place — which is a property of the damping, not of the corpus, and is held
-    in both directions in the contract tests.
-    """
+    """Rank agreement across two sources above one top-ranked result."""
     hits = [
         lexical("top", "the best single answer"),
         *(lexical(f"pad{index}", "filler") for index in range(9)),

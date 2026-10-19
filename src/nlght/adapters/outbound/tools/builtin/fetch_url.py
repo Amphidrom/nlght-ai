@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx2
 
 from nlght.adapters.outbound.tools.builtin.action_semantics import ARBITRARY_NETWORK_READ
+from nlght.core.model.trust import SOURCE_WEB
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ _ACCEPT_LANGUAGES = [
 
 
 def _browser_headers(referer: str | None = None) -> dict[str, str]:
-    # Accept-Encoding is intentionally omitted — httpx manages decompression
+    # Omit Accept-Encoding because httpx manages decompression
     # automatically and only advertises encodings it can actually decode.
     # Manually setting it (e.g. "br") causes garbage output when brotli is not installed.
     headers: dict[str, str] = {
@@ -136,10 +137,11 @@ class FetchUrlTool(ToolBase):
     rather than running a search query.
 
     Configuration:
-      ``timeout_s`` — HTTP timeout in seconds (default ``15``)
+      ``timeout_s``: HTTP timeout in seconds (default ``15``)
     """
 
     KIND: ClassVar[str]     = "fetch_url"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_WEB
     PROVIDER: ClassVar[str] = "http"
 
     @classmethod
@@ -149,7 +151,7 @@ class FetchUrlTool(ToolBase):
                 name="fetch_url",
                 description=(
                     "Fetch the full text content of a specific URL. "
-                    "Use when you have a concrete URL and need the complete page — "
+                    "Use when you have a concrete URL and need the complete page. "
                     "not for discovery; use web_search for that."
                 ),
                 method_name="fetch",
@@ -177,7 +179,7 @@ class FetchUrlTool(ToolBase):
     async def fetch(self, *, url: str = "", candidate_id: str | None = None) -> str:
         url = url.strip()
         if not url.startswith(("http://", "https://")):
-            return json.dumps({"url": url, "error": "Invalid URL — must start with http:// or https://", "content": ""})
+            return json.dumps({"url": url, "error": "Invalid URL: must start with http:// or https://", "content": ""})
 
         try:
             async with httpx2.AsyncClient(timeout=self._timeout()) as client:

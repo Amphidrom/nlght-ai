@@ -39,11 +39,6 @@ def _junit(tmp_path: Path, body: str, name: str = "junit.xml") -> Path:
     return path
 
 
-# ---------------------------------------------------------------------------
-# summarize_junit
-# ---------------------------------------------------------------------------
-
-
 def test_summarize_all_passed_is_green(tmp_path) -> None:
     junit = _junit(tmp_path, '<testsuite tests="10" failures="0" errors="0" skipped="0"/>')
     assert release_badges.summarize_junit([junit]) == ("10/0/10", "green")
@@ -71,11 +66,6 @@ def test_summarize_sums_across_separate_junit_files(tmp_path) -> None:
     unit = _junit(tmp_path, '<testsuite tests="4" failures="0" errors="0" skipped="0"/>', name="unit.xml")
     integration = _junit(tmp_path, '<testsuite tests="6" failures="0" errors="0" skipped="1"/>', name="integration.xml")
     assert release_badges.summarize_junit([unit, integration]) == ("9/1/10", "yellow")
-
-
-# ---------------------------------------------------------------------------
-# inject
-# ---------------------------------------------------------------------------
 
 
 def test_inject_replaces_marker_block(tmp_path) -> None:
@@ -139,11 +129,6 @@ def test_repo_readme_carries_marker_block() -> None:
         assert f"](.github/badges/{filename})" in text
 
 
-# ---------------------------------------------------------------------------
-# generate
-# ---------------------------------------------------------------------------
-
-
 def test_generate_writes_svg(tmp_path) -> None:
     junit = _junit(tmp_path, '<testsuite tests="3" failures="0" errors="0" skipped="0"/>')
     out = tmp_path / "badges" / "tests.svg"
@@ -191,11 +176,6 @@ def test_generate_test_family_writes_one_connected_svg(tmp_path) -> None:
         assert color in svg
 
 
-# ---------------------------------------------------------------------------
-# summarize_coverage / generate_coverage
-# ---------------------------------------------------------------------------
-
-
 def _coverage_xml(tmp_path: Path, line_rate: str) -> Path:
     path = tmp_path / "coverage.xml"
     path.write_text(f'<coverage line-rate="{line_rate}"></coverage>', encoding="utf-8")
@@ -225,11 +205,6 @@ def test_generate_coverage_writes_svg(tmp_path) -> None:
 
     assert out.exists()
     assert "73%" in out.read_text(encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# generate_pypi
-# ---------------------------------------------------------------------------
 
 
 def test_generate_pypi_writes_svg(tmp_path) -> None:

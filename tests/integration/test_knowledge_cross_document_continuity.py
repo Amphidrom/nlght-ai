@@ -1,28 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""One claim asserted by two documents is one assertion, whatever it is called.
+"""Link equivalent claims found in different documents.
 
-A live run found the gap. The same sentence in two files came back as
-
-    {subject: management_server, predicate: uses,      object: application_port}
-    {subject: management_server, predicate: uses_port, object: application_port}
-
-two entity keys, two assertions, and no reinforcement to observe. The claims
-never met: equivalence was asked only of candidates standing in the *same slot*,
-and two documents are two slots by construction. So assertion identity was
-decided by which label the model happened to pick — the one thing `Proposition`
-and the judge exist to prevent.
-
-The guardrail was too narrow rather than wrong. What it protects against is an
-*unbounded* search over every proposition, which would be a merge engine looking
-for pairs. So the reach is opened across documents and bounded twice: same kind,
-and enough shared structure to be a signal rather than a coincidence.
-
-Retrieval decides which pairs are worth asking about. It never decides the
-answer, and it confers no identity of its own — `uses` and `uses_port` are two
-labels until the judge says they are one claim, and nothing normalises one into
-the other.
+Candidate searches remain bounded by kind and other narrowing conditions.
+A matching judgement joins claim continuity without losing each sighting.
 """
 
 from __future__ import annotations
@@ -80,7 +62,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -88,13 +70,20 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
 
 def _pair(fields: dict[str, str], *, document: str, run: str, text: str = SENTENCE):
-    """The graph half and the lineage half of one sighting."""
+    """The graph half and the lineage half of one sighting.
+
+    Args:
+        fields (dict[str, str]): Fields used to build the claim.
+        document (str): Document or document identifier for the test.
+        run (str): Run identifier for the sighting.
+        text (str): Observed source text.
+    """
     lineage = LineageWrite(
         entity=entity_key("fact", **fields),
         kind="fact",
@@ -117,7 +106,7 @@ def _pair(fields: dict[str, str], *, document: str, run: str, text: str = SENTEN
     return graph, lineage
 
 
-async def _record(repository, fields, *, document, run, judge=None, text=SENTENCE):  # noqa: ANN001
+async def _record(repository, fields, *, document, run, judge=None, text=SENTENCE):
     section = ObservedSection.as_read(
         anchor=f"{document}#port",
         anchor_strength=DERIVED_ANCHOR,
@@ -130,11 +119,11 @@ async def _record(repository, fields, *, document, run, judge=None, text=SENTENC
     )
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
+async def _rows(repository, model):
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
@@ -145,12 +134,7 @@ USES_PORT = {
 
 
 async def test_a_second_document_reinforces_rather_than_duplicates(repository) -> None:
-    """The live failure, closed.
-
-    Two labels for one relation, in two documents. The claims share their subject
-    and their object, which is enough to be worth a question — and the judge, not
-    the overlap, decides they are one.
-    """
+    """Join equivalent claims from two documents after the judge confirms them."""
     judge = _Judge(SAME)
 
     first = await _record(repository, USES, document=DOC_A, run="run-1", judge=judge)
@@ -163,7 +147,7 @@ async def test_a_second_document_reinforces_rather_than_duplicates(repository) -
 
 
 async def test_only_a_yes_joins_them(repository) -> None:
-    # Retrieval brings a pair together; it does not decide. A judge that says
+    # Retrieval brings a pair together. It does not decide. A judge that says
     # they are different leaves two assertions, exactly as before.
     judge = _Judge(DIFFERENT)
 
@@ -186,12 +170,7 @@ async def test_the_judgement_is_recorded_whatever_it_said(repository) -> None:
 
 
 async def test_both_propositions_survive_the_merge(repository) -> None:
-    """Joining two claims does not throw one of their readings away.
-
-    The assertion is one; what each document said about it stays exactly as it
-    was extracted. Nothing is normalised into anything — `uses_port` was never
-    rewritten to `uses`, which would be an ontology hidden in a resolver.
-    """
+    """Preserve both observed propositions after equivalent claims are joined."""
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeProposition
 
     judge = _Judge(SAME)
@@ -206,12 +185,7 @@ async def test_both_propositions_survive_the_merge(repository) -> None:
 
 
 async def test_a_claim_sharing_one_term_is_never_offered(repository) -> None:
-    """Bounded, and the bound is a property of the code.
-
-    One shared term is true of half a corpus — every claim about the management
-    server would reach every other. Two is the smallest overlap that is a signal,
-    and below it the judge is not asked at all.
-    """
+    """Require more than one shared term before offering a candidate to the judge."""
     judge = _Judge(SAME)
     await _record(repository, USES, document=DOC_A, run="run-1", judge=judge)
 
@@ -309,9 +283,8 @@ async def test_a_claim_with_too_little_structure_reaches_nothing(repository) -> 
     judge = _Judge(SAME)
     await _record(repository, USES, document=DOC_A, run="run-1", judge=judge)
 
-    # One value once `predicate` is set aside — `exists` and the subject are the
-    # whole of it, and a claim reaching on that would reach everything about the
-    # management server.
+    # With `predicate` excluded, only the subject offers overlap. Searching on
+    # that alone would reach every claim about the management server.
     thin_fields = {"predicate": "exists", "subject": "management_server"}
     thin = LineageWrite(
         entity=entity_key("fact", **thin_fields),

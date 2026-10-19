@@ -31,7 +31,7 @@ from nlght.core.hive_mind.models import (
 from nlght.core.hive_mind.relevance import RelevanceEngine, ScoringStrategy, reduce_to_budget
 
 
-def _built(snapshot: ContextSnapshot, **kwargs):  # noqa: ANN003, ANN202
+def _built(snapshot: ContextSnapshot, **kwargs):
     return MentalModelBuilder(relevance_engine=RelevanceEngine(**kwargs)).build(
         turn_id="t", context=snapshot,
         signal_entities=["keystore"], intents=["configure"],
@@ -39,16 +39,9 @@ def _built(snapshot: ContextSnapshot, **kwargs):  # noqa: ANN003, ANN202
 
 
 # The defect, exactly as it was found
-# ---------------------------------------------------------------------------
 
 def test_a_durable_user_fact_is_not_lost_to_a_count() -> None:
-    """Thirteen results stored, and the important one was the eleventh.
-
-    `max_results = 10` removed it before the adapter could mark it IMPORTANT and
-    before the reduction could decide whether it was worth its room. Twelve task
-    results — merely USEFUL — survived in its place, for no reason except that
-    they were newer and there were more of them.
-    """
+    """Keep a durable user fact available before budget reduction."""
     now = datetime.now(UTC)
     tasks = [
         SessionResult(content=f"task result {n}", entities=["keystore"], created_at=now)
@@ -103,7 +96,7 @@ def test_every_turn_reaches_the_engine() -> None:
 
     assert len(model.recent_turns) == 20
     # The adapter still shows the last three, which is a *presentation* decision
-    # about how much conversation a model reads — not a discard, and reversible
+    # about how much conversation a model reads, not a discard, and reversible
     # without anything having been thrown away.
     assert len(turn_elements(model)) == 3
 
@@ -125,7 +118,6 @@ def test_all_three_sorts_arrive_in_one_pool() -> None:
 
 
 # The selection is type-blind too, now
-# ---------------------------------------------------------------------------
 
 def _element(kind: str, element_id: str) -> MentalElement:
     return MentalElement(

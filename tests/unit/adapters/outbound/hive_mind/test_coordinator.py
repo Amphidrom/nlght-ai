@@ -4,9 +4,12 @@
 """Tests for HiveMindStoreCoordinator and HiveMindStoreCoordinatorFactory."""
 from __future__ import annotations
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
+
+import pytest
 
 from nlght.adapters.outbound.hive_mind.coordinator import (
     HiveMindStoreCoordinator,
@@ -30,15 +33,6 @@ def _session_root() -> Path:
     root.mkdir(parents=True, exist_ok=True)
     return root
 
-
-# ---------------------------------------------------------------------------
-# Directives
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Conversation
-# ---------------------------------------------------------------------------
 
 def _turn(nr: int = 1) -> TurnSummary:
     return TurnSummary(turn_nr=nr, user_input="hi", intent="greet", topic="t")
@@ -73,10 +67,6 @@ def test_get_recent_turns_limited() -> None:
     assert len(c.get_recent_turns(3)) == 3
 
 
-# ---------------------------------------------------------------------------
-# Working Memory + write + task lifecycle
-# ---------------------------------------------------------------------------
-
 def test_write_to_working_memory() -> None:
     c = _coordinator()
     c.open_branch("t1")
@@ -97,9 +87,9 @@ def test_write_promote_immediately_marks_atom() -> None:
         entities=["x"],
     )
     c.write(intent)
-    # close sub-branch → promoted atom moves to turn branch
+    # Closing the sub-branch moves the promoted atom to the turn branch.
     c.close_branch(promote=True)
-    # close turn branch → promoted atoms returned (would go to SessionResultStore in executor)
+    # Closing the turn branch returns promoted atoms for session persistence.
     promoted = c.close_branch(promote=True)
     assert len(promoted) == 1
     assert promoted[0].content == "result"
@@ -203,34 +193,29 @@ def test_finish_task_discards_spec() -> None:
     assert promoted == []
 
 
-def test_discard_task_clears_working_memory() -> None:
+def test_discard_task_clears_working_memory(caplog: pytest.LogCaptureFixture) -> None:
     c = _coordinator()
     c.start_task("t1")
     c.write(WriteIntent(atom_type=AtomType.RESULT, content="data", task_id="t1"))
-    c.discard_task("t1")
+    with caplog.at_level(logging.DEBUG):
+        c.discard_task("t1")
     assert c.working.read_all() == []
+    assert "atoms_dropped=1" in caplog.text
 
 
-def test_fail_task_clears_working_memory() -> None:
+def test_fail_task_clears_working_memory(caplog: pytest.LogCaptureFixture) -> None:
     c = _coordinator()
     c.start_task("t1")
     c.write(WriteIntent(atom_type=AtomType.RESULT, content="data", task_id="t1"))
     c.fail_task("t1")
     assert c.working.read_all() == []
+    assert "atoms_dropped=1" in caplog.text
 
-
-# ---------------------------------------------------------------------------
-# MentalModelCache
-# ---------------------------------------------------------------------------
 
 def test_mental_model_cache_initially_empty() -> None:
     c = _coordinator()
     assert c.mental_model_cache.valid is False
 
-
-# ---------------------------------------------------------------------------
-# Payload promotion
-# ---------------------------------------------------------------------------
 
 def test_promote_payload_stores_result() -> None:
     c    = _coordinator()
@@ -278,10 +263,6 @@ def test_get_payload_none_when_empty() -> None:
     assert c.get_payload(["missing"]) is None
 
 
-# ---------------------------------------------------------------------------
-# resolve_reference
-# ---------------------------------------------------------------------------
-
 def test_resolve_reference_returns_turn() -> None:
     c = _coordinator()
     t = TurnSummary(turn_nr=1, user_input="about python", intent="info",
@@ -291,10 +272,6 @@ def test_resolve_reference_returns_turn() -> None:
     assert result is not None
     assert result.turn_nr == 1
 
-
-# ---------------------------------------------------------------------------
-# get_context / is_known
-# ---------------------------------------------------------------------------
 
 def test_get_context_returns_dict() -> None:
     c   = _coordinator()
@@ -316,12 +293,8 @@ def test_is_known_true_after_promotion() -> None:
     assert c.is_known(["e1"]) is True
 
 
-# ---------------------------------------------------------------------------
-# write conflict detection
-# ---------------------------------------------------------------------------
-
 def test_write_promote_immediately_no_conflict_returned() -> None:
-    # write() no longer detects conflicts — conflict detection only in promote_payload().
+    # Only promote_payload() detects conflicts. write() leaves that decision open.
     # Two writes with promote_immediately=True both return None conflict.
     c = _coordinator()
     c.open_branch("t1")
@@ -336,10 +309,6 @@ def test_write_promote_immediately_no_conflict_returned() -> None:
     assert conflict1 is None
     assert conflict2 is None
 
-
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
 
 def test_factory_creates_new_session() -> None:
     root = _session_root()

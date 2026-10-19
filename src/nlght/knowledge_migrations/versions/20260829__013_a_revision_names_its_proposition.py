@@ -4,27 +4,27 @@
 """A revision names the complete structure it recorded.
 
 `knowledge_propositions` could hold a claim whole and nothing read it, so a fact
-with four roles was stored where retrieval does not look — which is not better
+with four roles was stored where retrieval does not look. That is not better
 than the malformed rejection it replaced, only quieter. This column is the link
 that closes it.
 
 It sits on the **revision** and not on the assertion or the graph node, and that
-is the whole decision. An assertion is continuity; a revision is the form the
+is the whole decision. An assertion is continuity. A revision is the form the
 claim took at one time:
 
     Assertion A
-      Revision 1 → Proposition P1
-      Revision 2 → Proposition P2
+      Revision 1 records Proposition P1
+      Revision 2 records Proposition P2
 
 Two propositions with different fingerprints can continue one assertion when an
 equivalence judgement says they are one claim. A single `proposition_id` on the
-assertion — or on the node — would flatten that into "one proposition per
+assertion or node would flatten that into "one proposition per
 assertion" and overwrite the earlier form of every claim that was ever reworded,
 which is exactly the history this design exists to keep.
 
 Nullable, and it stays that way. Every revision written before propositions
 existed has none and never will: reconstructing one from a payload that could not
-hold it is guessing. `rule`, `pattern` and `decision` have none by design — they
+hold it is guessing. `rule`, `pattern` and `decision` have none by design. They
 are documents of a fixed shape rather than n-ary claims.
 
 `ON DELETE RESTRICT` because a proposition a revision names is what that revision

@@ -49,6 +49,11 @@ class IngestionSourceStep(StepBase):
 
     TYPE = "ingestion.source"
 
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        INCOMPLETE = INCOMPLETE
+
     @classmethod
     def options(cls) -> list[StepOption]:
         return [
@@ -79,7 +84,7 @@ class IngestionSourceStep(StepBase):
         try:
             source = build_source(source_type, self.config, where=f"Step '{self.TYPE}'")
         except SourceConfigurationError as exc:
-            # The factory speaks plainly so both callers can wrap it; a step's
+            # The factory speaks plainly so both callers can wrap it. A step's
             # caller expects a workflow configuration error.
             raise WorkflowConfigurationError(str(exc)) from exc
         snapshot: SourceSnapshot = await source.acquire()
@@ -108,15 +113,21 @@ class IngestionSourceStep(StepBase):
             len(snapshot.documents),
             snapshot.complete,
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT" if snapshot.complete else INCOMPLETE)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if snapshot.complete else self.Verdict.INCOMPLETE)
 
 
 def _requested_share(ctx: WorkflowStepContext) -> tuple[str, ...] | None:
-    """The external ids a fan-out gave this execution, if it is a child.
+    """Read the document share assigned to a fan-out child.
 
-    ``None`` means "acquire the source in full" — the ordinary case. An empty
-    list is not the same thing: it is a child that was given nothing, and
-    acquiring everything instead would have it index the whole corpus.
+    Args:
+        ctx (WorkflowStepContext): Context containing the trigger payload.
+
+    Returns:
+        tuple[str, ...] | None: Assigned external IDs, including an empty
+        tuple for an empty share, or ``None`` for a full-source acquisition.
+
+    Raises:
+        WorkflowConfigurationError: The share is not a list or tuple.
     """
     requested = ctx.trigger.payload.get("external_ids")
     if requested is None:
@@ -130,14 +141,18 @@ def _requested_share(ctx: WorkflowStepContext) -> tuple[str, ...] | None:
 
 
 def _restrict(snapshot: SourceSnapshot, external_ids: tuple[str, ...]) -> SourceSnapshot:
-    """Narrow a snapshot to one share of it, marked incomplete.
+    """Restrict an acquired snapshot to a child's document share.
 
-    A document named but no longer present at the source is simply absent here:
-    it was deleted between the distribution flow's acquisition and this one, and
-    a partial view is exactly the wrong place to conclude anything about
-    deletion. Losing *every* named document is different — that is not attrition
-    but a share that does not line up with what this worker can see, and running
-    on with nothing would report an empty success for work never done.
+    Args:
+        snapshot (SourceSnapshot): Freshly acquired source snapshot.
+        external_ids (tuple[str, ...]): IDs assigned to the child.
+
+    Returns:
+        SourceSnapshot: Matching documents marked as an incomplete observation,
+        so missing documents do not license tombstones.
+
+    Raises:
+        WorkflowConfigurationError: A nonempty share matches no documents.
     """
     wanted = set(external_ids)
     documents = tuple(
@@ -148,7 +163,7 @@ def _restrict(snapshot: SourceSnapshot, external_ids: tuple[str, ...]) -> Source
         raise WorkflowConfigurationError(
             f"Step '{IngestionSourceStep.TYPE}' was given {len(external_ids)} document(s) to "
             f"acquire and found none of them in source '{snapshot.source_id}'. This worker sees "
-            f"{len(available)} document(s) there, so the share does not match what it can reach — "
+            f"{len(available)} document(s) there, so the share does not match what it can reach. "
             f"check that the distribution flow and the work flow name the same roots. "
             f"Asked for e.g. {external_ids[0]!r}; this source offers e.g. "
             f"{available[0] if available else '(nothing)'!r}."

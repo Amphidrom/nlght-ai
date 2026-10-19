@@ -144,3 +144,46 @@ integrations:
 
     with pytest.raises(ValueError, match="supports only one provider"):
         asyncio.run(source.load())
+
+
+def _load(tmp_path: Path, text: str):
+    path = tmp_path / "platform.yaml"
+    path.write_text(text, encoding="utf-8")
+    return asyncio.run(FileConfigurationSource(str(path)).load())
+
+
+def test_a_missing_action_authorization_block_keeps_authorization_on(tmp_path: Path) -> None:
+    settings = _load(tmp_path, "gateways: []\n").action_authorization
+
+    assert settings.enabled is True
+    assert settings.policy_timeout_seconds == 30.0
+    assert settings.approval_timeout_seconds == 300.0
+
+
+def test_the_action_authorization_block_is_read(tmp_path: Path) -> None:
+    settings = _load(
+        tmp_path,
+        "action_authorization:\n  enabled: false\n  policy_timeout_seconds: 5\n"
+        "  approval_timeout_seconds: 60.5\n",
+    ).action_authorization
+
+    assert settings.enabled is False
+    assert settings.policy_timeout_seconds == 5.0
+    assert settings.approval_timeout_seconds == 60.5
+
+
+@pytest.mark.parametrize(
+    ("block", "message"),
+    [
+        # A quoted "false" is a string, and bool("false") would be True.
+        ('  enabled: "false"\n', "enabled must be true or false"),
+        ("  enable: false\n", "unknown key"),
+        ("  policy_timeout_seconds: soon\n", "policy_timeout_seconds must be a number"),
+        ("  approval_timeout_seconds: true\n", "approval_timeout_seconds must be a number"),
+    ],
+)
+def test_a_mistyped_action_authorization_block_is_refused(
+    tmp_path: Path, block: str, message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _load(tmp_path, "action_authorization:\n" + block)

@@ -94,7 +94,7 @@ def _watcher(source, executor, repository, dispatcher=None, **settings) -> Debou
         dispatcher=dispatcher,
         event_id_factory=settings.pop("event_id_factory", lambda: "watch-event-1"),
     )
-    # What start() would inject; the polling loop itself is not under test here.
+    # What start() would inject. The polling loop itself is not under test here.
     watcher._executor = executor
     watcher._repository = repository
     return watcher
@@ -185,7 +185,7 @@ async def test_a_failed_run_is_retried_under_the_same_event_identity() -> None:
         await watcher.poll_once(now=2)
     await watcher.poll_once(now=3)
 
-    # One event, attempted twice — not two events for one change.
+    # One event, attempted twice, not two events for one change.
     assert generated == 1
     assert len(executor.invocations) == 2
     assert {invocation.trigger.context.correlation_id for invocation in executor.invocations} == {

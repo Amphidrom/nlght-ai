@@ -14,9 +14,9 @@ incarnation of an index holds it. Not one of them changes when:
 
 So changing an embedding model reindexed **nothing**. Every document read as
 already current, the run reported success, and the collection went on holding
-vectors produced by a model the queries were no longer embedded with — which
-does not fail, it just quietly answers worse, and there is no error anywhere to
-find. The generation could not catch it either: it rotates when a collection has
+vectors produced by a model the queries were no longer embedded with. Queries
+then return worse answers without an error. The generation could not catch this:
+it rotates when a collection has
 to be *created*, and swapping a model creates nothing.
 
 The missing value is not a property of the document at all, which is why no
@@ -34,7 +34,7 @@ The immediate reason it exists now: chunk payloads gain `position`,
 `start_offset` and `end_offset`, without which a chunk hit names no span of its
 document and nothing can be resolved against the stored revision. That is a
 payload schema change, and every already-indexed document has to be written
-again for it — which is precisely what the three older values cannot express.
+again for it. The three older values cannot express that change.
 
 The alternative was to fold the payload version into `processing_revision_id`,
 where the chunking parameters already sit. It would have worked and it would
@@ -43,7 +43,7 @@ embedding model inside it makes two documents with identical text differ because
 of infrastructure. One value, one meaning.
 
 Existing rows default to the empty string, which matches no fingerprint any
-writer computes, so the next run rewrites them. That is the correct outcome —
+writer computes, so the next run rewrites them. This is the correct outcome:
 they were indexed under a projection nobody recorded, and there is no way to
 find out which.
 

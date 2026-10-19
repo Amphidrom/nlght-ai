@@ -49,7 +49,7 @@ WRITE_RUNTIME = StaticActionSemantics(
 #: Deliberately not `WRITE_RUNTIME`. Reversible means there is a way back, and
 #: the three operations on that constant have one: git tracks a checkout and a
 #: commit, and a created directory can be removed. Writing text over an existing
-#: file has none — the previous content is gone the moment it lands, and the
+#: file has none. The previous content is gone the moment it lands, and the
 #: class has to say so even though today's default policy happens to treat both
 #: write classes the same (ADR-0069).
 OVERWRITING_WRITE_RUNTIME = StaticActionSemantics(
@@ -109,6 +109,7 @@ class ConfiguredNetworkReadSemantics:
             kind=DestinationKind.NETWORK,
             scope=ScopeClass.EXTERNAL,
             value=f"{parsed.scheme}://{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}",
+            target=endpoint,
         )
         return ConcreteAction(
             side_effect=SideEffectClass.NONE,
@@ -136,6 +137,7 @@ class ArbitraryNetworkReadSemantics:
             kind=DestinationKind.NETWORK,
             scope=ScopeClass.EXTERNAL,
             value=f"{parsed.scheme}://{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}",
+            target=url,
         )
         return ConcreteAction(
             side_effect=SideEffectClass.NONE,

@@ -52,14 +52,13 @@ class GenericJsonHttpProtocolAdapter:
     Each endpoint also chooses how it answers, because the two useful shapes
     have opposite requirements and only this adapter sees both:
 
-    - ``sync`` runs the workflow and answers with its result. Right when the
-      caller wants the answer, wrong when the workflow takes minutes — the
-      request is held open for its whole duration.
+    - ``sync`` runs the workflow and answers with its result. The request stays
+      open until completion, so this mode suits short workflows.
     - ``async`` commits the run to the durable queue and answers ``202`` with an
       execution id. The workflow then runs on a worker, survives a gateway
       restart, and the caller is free immediately.
 
-    Both run the same workflow through the same executor; they differ only in
+    Both run the same workflow through the same executor. They differ only in
     who waits for it.
     """
 
@@ -114,7 +113,7 @@ class GenericJsonHttpProtocolAdapter:
 
                 # With a durable dispatcher, sync and async take the same path:
                 # both submit the run to the queue so one executor on a worker
-                # performs it. They differ only in who waits — async answers 202,
+                # performs it. They differ only in who waits. Async answers 202,
                 # sync holds the request open for the terminal result.
                 if dispatcher is not None:
                     record = await self._submit(dispatcher, request, invocation)
@@ -160,7 +159,7 @@ class GenericJsonHttpProtocolAdapter:
         invocation: WorkflowInvocation,
     ) -> ExecutionRecord:
         # A caller that retries a submission must not start the run twice. Their
-        # own Idempotency-Key is honoured first; otherwise the request id stands
+        # own Idempotency-Key is honoured first. Otherwise the request id stands
         # in, which makes a retried *connection* idempotent even when the caller
         # sends no key of its own.
         supplied = request.headers.get("Idempotency-Key", "").strip()
@@ -170,12 +169,12 @@ class GenericJsonHttpProtocolAdapter:
                 workflow_version_id=invocation.version.version_id,
                 trigger=invocation.trigger,
                 idempotency_key=supplied or invocation.trigger.context.request_id,
-                # The workflow states what it needs; workers advertise what they
+                # The workflow states what it needs. Workers advertise what they
                 # have. Nothing here decides which machine runs it.
                 required_capabilities=tuple(invocation.workflow.capabilities or ()),
-                # A blocking workflow runs one execution at a time — enforced at
+                # A blocking workflow runs one execution at a time, enforced at
                 # claim. An identical trigger coalesces onto the running one via
-                # the idempotency key above; a different one queues behind it.
+                # the idempotency key above. A different one queues behind it.
                 exclusive=invocation.workflow.is_blocking,
             )
         )
@@ -190,12 +189,21 @@ class GenericJsonHttpProtocolAdapter:
         dispatcher: ExecutionDispatcher,
         record: ExecutionRecord,
     ) -> JSONResponse:
-        """Hold the request open until the dispatched execution is terminal.
+        """Wait for a submitted execution's durable terminal result.
 
-        The workflow runs on a worker — the local in-process one on a
-        gateway+worker — while this polls the durable record for its outcome, so
-        a sync call is the same durable, claimable, concurrency-governed run as
-        an async one; it just waits for the answer.
+        Args:
+            dispatcher (ExecutionDispatcher): Service used to poll execution status.
+            record (ExecutionRecord): Submitted execution to watch.
+
+        Returns:
+            JSONResponse: Completed workflow result.
+
+        Raises:
+            HTTPException: The record disappears, fails, is cancelled, or
+                exceeds the synchronous wait limit.
+
+        Side Effects:
+            Polls the durable execution record while a worker runs the workflow.
         """
         deadline = time.monotonic() + _SYNC_MAX_WAIT_SECONDS
         while True:
@@ -229,7 +237,15 @@ class GenericJsonHttpProtocolAdapter:
 
 
 def _accepted(record: ExecutionRecord, invocation: WorkflowInvocation) -> JSONResponse:
-    """The async answer: the run is committed, here is its id."""
+    """Build the response for a durably submitted asynchronous run.
+
+    Args:
+        record (ExecutionRecord): Persisted execution record.
+        invocation (WorkflowInvocation): Resolved workflow invocation.
+
+    Returns:
+        JSONResponse: HTTP 202 with execution ID, status, and workflow name.
+    """
     return JSONResponse(
         status_code=202,
         content={
@@ -249,11 +265,19 @@ def _validate_mode(mode: str, where: str) -> str:
     return normalised
 
 
-def _endpoint_of(path: str, value: Any, default_mode: str) -> _Endpoint:  # noqa: ANN401 - raw YAML
-    """One entry of the `workflows` map.
+def _endpoint_of(path: str, value: object, default_mode: str) -> _Endpoint:
+    """Parse one configured generic JSON workflow endpoint.
 
-    A bare string is the common case and stays the short form; a mapping adds
-    the mode for the endpoints that need it.
+    Args:
+        path (str): Endpoint path named in validation errors.
+        value (object): Workflow name or mapping with workflow and mode.
+        default_mode (str): Mode used when the mapping omits one.
+
+    Returns:
+        _Endpoint: Parsed workflow name and response mode.
+
+    Raises:
+        ValueError: The value is invalid or names no workflow.
     """
     if isinstance(value, str):
         return _Endpoint(workflow=value, mode=default_mode)

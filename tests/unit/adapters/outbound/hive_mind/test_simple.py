@@ -25,15 +25,6 @@ def _turn(nr: int = 1) -> TurnSummary:
     return TurnSummary(turn_nr=nr, user_input="hi", intent="greet", topic="t")
 
 
-# ---------------------------------------------------------------------------
-# Directives
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Conversation
-# ---------------------------------------------------------------------------
-
 def test_record_and_get_recent_turns() -> None:
     c = _coordinator()
     c.record_turn(_turn(1))
@@ -53,10 +44,6 @@ def test_get_recent_turns_fewer_than_n() -> None:
     c.record_turn(_turn(1))
     assert len(c.get_recent_turns(10)) == 1
 
-
-# ---------------------------------------------------------------------------
-# Write + task lifecycle
-# ---------------------------------------------------------------------------
 
 def test_write_working_memory() -> None:
     c = _coordinator()
@@ -122,10 +109,6 @@ def test_finish_task_clears_active_task() -> None:
     assert c._active_task is None
 
 
-# ---------------------------------------------------------------------------
-# get_context / is_known
-# ---------------------------------------------------------------------------
-
 def test_get_context_structure() -> None:
     c   = _coordinator()
     ctx = c.get_context(["x"])
@@ -166,10 +149,6 @@ def test_is_known_with_tags_no_match() -> None:
     ))
     assert c.is_known(["python"], tags=["draft"]) is False
 
-
-# ---------------------------------------------------------------------------
-# SimpleStoreCoordinatorFactory
-# ---------------------------------------------------------------------------
 
 def test_factory_creates_session() -> None:
     factory = SimpleStoreCoordinatorFactory()

@@ -1,31 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Which stores get asked, and how far down each list is fetched.
-
-Two separate questions, and conflating them is what made a first attempt refuse
-to run:
-
-    requested   what this workflow wants searched
-    available   what this platform actually has
-
-A search runs over the intersection. A platform with a lexical index and a
-knowledge store but no vectors is a perfectly ordinary platform, and telling its
-operator that they have misconfigured something is inventing an error they did
-not make. A source that is genuinely indispensable to a workflow says so —
-`required` — and then its absence is a real failure.
-
-The three cut-offs are also separate, and were not:
-
-    fetch_k    how deep each store is asked
-    fusion_k   how many of each store's hits take part in the ranking
-    final_k    how many findings leave the step
-
-Setting `fetch_k` to `final_k` looks tidy and quietly destroys evidence. A hit
-the lexical index put 20th and the knowledge store put 1st is exactly the case
-fusion exists to catch, and fetching ten from each throws away the half of it
-that would have made the point.
-"""
+"""Plan retrieval sources and independent result limits."""
 
 from __future__ import annotations
 
@@ -62,15 +38,13 @@ class RetrievalPlan:
     fetch_k: Mapping[str, int] = field(
         default_factory=lambda: {LEXICAL: 50, VECTOR: 50, KNOWLEDGE: 20}
     )
-    #: How many of each store's hits take part in the ranking. `0` means all of
-    #: what was fetched, which is the honest default — cutting before fusing
-    #: discards evidence for no reason but tidiness.
+    #: Keep all fetched hits by default so early trimming cannot discard
+    #: cross-store agreement before fusion.
     fusion_k: int = 0
-    #: How many findings leave the step.
     final_k: int = 20
     kinds: tuple[str, ...] = ("fact", "rule", "pattern", "decision")
-    #: Below the floor or above the ceiling of lexical hits, the vector store is
-    #: worth its model round trip.
+    #: Bound vector calls by lexical coverage so unnecessary embeddings are
+    #: skipped while sparse or overly broad lexical results can be supplemented.
     lexical_floor: int = 1
     lexical_ceiling: int = 100
 
@@ -83,7 +57,11 @@ class RetrievalPlan:
 
     @property
     def sources(self) -> tuple[str, ...]:
-        """What will actually be searched: what was asked for, and exists."""
+        """Select requested sources available on this platform.
+
+        Returns:
+            tuple[str, ...]: Search sources in fixed platform order.
+        """
         return tuple(
             source for source in _ORDER
             if source in self.requested and source in self.available
@@ -91,7 +69,11 @@ class RetrievalPlan:
 
     @property
     def skipped(self) -> tuple[str, ...]:
-        """Asked for and not present. Reported, never an error on its own."""
+        """Identify optional requested sources unavailable here.
+
+        Returns:
+            tuple[str, ...]: Missing source names in fixed platform order.
+        """
         return tuple(
             source for source in _ORDER
             if source in self.requested and source not in self.available
@@ -101,11 +83,13 @@ class RetrievalPlan:
         return max(1, int(self.fetch_k.get(source, 20)))
 
     def wants_vector(self, lexical_hits: int) -> bool:
-        """Whether the vector store is worth embedding the query for.
+        """Decide whether vector search should embed the query.
 
-        Only where it is planned *and* present. Where lexical was not searched
-        there is nothing to judge the call against, so it runs — a plan naming
-        only the vector store means exactly that.
+        Args:
+            lexical_hits (int): Number of hits returned by lexical search.
+
+        Returns:
+            bool: True when vector is available and lexical coverage warrants it.
         """
         if VECTOR not in self.sources:
             return False
@@ -119,7 +103,18 @@ def plan_from_config(
     *,
     available: Sequence[str] = SOURCES,
 ) -> RetrievalPlan:
-    """Read a plan, refusing only what genuinely cannot be honoured."""
+    """Resolve retrieval configuration against available stores.
+
+    Args:
+        config (Mapping[str, object] | None): Optional step retrieval configuration.
+        available (Sequence[str]): Names of the available retrieval sources.
+
+    Returns:
+        RetrievalPlan: Validated plan with independent result limits.
+
+    Raises:
+        RetrievalPlanError: A source name is invalid or a required source is unavailable.
+    """
     values = dict(config or {})
     at_hand = tuple(str(item).strip().lower() for item in available)
     # Naming no sources means "search what this platform has", not "search all

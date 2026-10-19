@@ -1,16 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""End-to-end through the full stack: HTTP → adapter → submit → a real worker
-claims and executes over the durable queue → broker → gateway relay → response.
+"""Exercise durable worker execution through the HTTP gateway.
 
-A real ExecutionWorker polls concurrently with the request, so the database must
-be genuinely shared across connections — a temp file, not ``:memory:`` (whose
-per-connection database breaks once a background worker holds its own
-connection). An ASGI transport keeps the gateway request, the worker, the broker
-and the repository on one event loop, the way the runtime wires them, with a
-tiny emitting step standing in for a model. Validates the unified execution path
-(C1) and streaming through the worker (C2) that unit fakes cannot exercise.
+A worker claims the submitted job while the request waits. The broker relays
+signals back to the gateway, and synchronous generic JSON returns the result.
 """
 from __future__ import annotations
 
@@ -48,7 +42,7 @@ pytestmark = pytest.mark.integration
 
 
 class _EmitStep(StepBase):
-    """A start+terminal step that streams two tokens and a done — no model."""
+    """A terminal step that streams two tokens and a completion signal."""
 
     TYPE = "test.emit"
 

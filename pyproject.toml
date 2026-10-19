@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nlght-ai"
-version = "0.1.3"
+version = "0.1.4"
 description = "The workflow runtime layer between your application and any LLM provider."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -64,14 +64,17 @@ hive-mind = [
 nlp = [
   "spacy>=3.7.0",
 ]
+# Provider SDKs: the floor is the release the adapters were ported to and
+# tested against, the ceiling the next major. A new major is adopted by porting
+# and qualifying it, never by a user's resolver (ADR-0070).
 anthropic = [
-  "anthropic>=0.40.0",
+  "anthropic>=1.11.0,<2",
 ]
 openai = [
-  "openai>=1.50.0",
+  "openai>=3.24.0,<4",
 ]
 google = [
-  "google-genai>=1.0.0",
+  "google-genai>=2.28.0,<3",
 ]
 metrics = [
   "prometheus-client>=0.20.0",
@@ -86,10 +89,10 @@ embedding = [
   "sentence-transformers>=3.0.0",
 ]
 # Which torch build the embedding model runs on. `embedding` alone resolves torch
-# from PyPI, whose default wheel differs per platform — CPU-only on Windows, a
-# CUDA build on Linux — so "install the embedding extra" does not say what you
-# get. These two say it. Each pins torch to one of PyTorch's own indexes; pick
-# one beside `embedding`:
+# from PyPI, whose default wheel differs per platform: CPU-only on Windows and a
+# CUDA build on Linux. "Install the embedding extra" alone does not say what you
+# get. Each extra pins torch to one of PyTorch's indexes. Select one beside
+# `embedding`:
 #
 #   uv sync --extra embedding --extra embedding-cuda
 #   uv sync --extra embedding --extra embedding-cpu
@@ -158,14 +161,14 @@ include = ["nlght*"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-# "." puts the standalone review backend on the path; it is a service beside
+# "." puts the standalone review backend on the path. It is a service beside
 # the package, not part of it.
 pythonpath = ["src", "tests", "."]
 addopts = [
   "-ra",
   "--strict-markers",
   "--strict-config",
-  # local_e2e needs a live local Ollama daemon; external_corpus depends on
+  # local_e2e needs a live local Ollama daemon. external_corpus depends on
   # fixtures outside this repository. Both are opt-in.
   "-m", "not local_e2e and not external_corpus",
 ]
@@ -191,14 +194,13 @@ exclude = [
 ]
 
 [tool.ruff.lint]
-# ANN401: no bare `Any` in signatures (reasoned per-line noqa for dynamic
-# construction seams). PLC0415: imports at file top (reasoned per-line noqa
-# for optional-extra / lazy-import sites).
-select = ["E", "F", "I", "UP", "B", "ANN401", "PLC0415"]
+# ANN401: no bare `Any` in signatures. PLC0415: imports at file top.
+# RUF100: reject suppressions that do not match an active diagnostic.
+select = ["E", "F", "I", "UP", "B", "ANN401", "PLC0415", "RUF100"]
 
 [tool.ruff.lint.per-file-ignores]
 # Function-level imports are idiomatic in tests (importorskip-gated modules,
-# fixture-local heavy imports); the top-level-import rule applies to src only.
+# fixture-local heavy imports). The top-level-import rule applies to src only.
 "tests/**" = ["PLC0415"]
 
 [tool.mypy]
@@ -211,9 +213,9 @@ strict = true
 # above), these are only ever installed via `pip install nlght-ai[extra]`,
 # so we can't require stubs for them without forcing every extra into the
 # dev environment just to typecheck. `follow_imports = "skip"` keeps the
-# result identical whether or not an extra happens to be installed —
+# result identical whether or not an extra happens to be installed.
 # otherwise mypy follows installed packages into their transitive stubs
-# (e.g. spacy → numpy, whose PEP 695 stubs don't parse under
+# (e.g. spacy importing numpy, whose PEP 695 stubs don't parse under
 # python_version 3.11) and the outcome depends on the local venv.
 [[tool.mypy.overrides]]
 module = [
@@ -267,8 +269,8 @@ conflicts = [
 # `explicit = true` keeps them out of resolution for everything else: only the
 # packages pointed at them below may come from here.
 #
-# The CUDA line is part of the URL. Moving to a different one — a newer driver,
-# an older card — is a change to this URL and nothing else.
+# The CUDA version is part of the URL. Select another index URL when targeting
+# a different CUDA build.
 [[tool.uv.index]]
 name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"

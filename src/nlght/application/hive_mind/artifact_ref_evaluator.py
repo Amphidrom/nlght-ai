@@ -1,17 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Inline artifact-reference evaluator.
-
-Resolves ``@artifact-ref(ARTIFACT_ID)`` markers embedded by the LLM in its
-markdown response, replacing them with fenced code blocks whose language tag
-matches the artifact's file extension.
-
-Two modes:
-  - ``evaluate_artifact_refs`` — pure text replacement, no I/O side effects.
-  - ``stream_response`` — streams the full response word-by-word via an
-    emitter, substituting artifact refs with their fenced content inline.
-"""
+"""Resolve artifact references in assistant text."""
 
 from __future__ import annotations
 
@@ -62,7 +52,15 @@ _EXT_TO_LANG: dict[str, str] = {
 
 
 def _fence(content: str, extension: str) -> str:
-    """Wrap *content* in a fenced code block with the appropriate language tag."""
+    """Wrap artifact content in a language-tagged code fence.
+
+    Args:
+        content (str): Artifact text to enclose.
+        extension (str): Filename extension used for the language tag.
+
+    Returns:
+        str: Fenced text with a known language tag when available.
+    """
     lang = _EXT_TO_LANG.get(extension.lower(), "")
     return f"```{lang}\n{content.rstrip()}\n```"
 
@@ -73,14 +71,29 @@ def _iter_words(text: str) -> Iterator[str]:
 
 
 def _validate_artifact_id(artifact_id: str) -> bool:
-    """Accept only well-formed UUIDs to prevent prompt-injection via crafted IDs."""
+    """Restrict artifact lookups to well-formed UUIDs.
+
+    Args:
+        artifact_id (str): Candidate artifact ID.
+
+    Returns:
+        bool: True when the ID matches the UUID syntax guard.
+    """
     return bool(_UUID_RE.match(artifact_id))
 
 
 async def evaluate_artifact_refs(text: str, store: StoreCoordinator) -> str:
-    """Replace every ``@artifact-ref(id)`` in *text* with a fenced code block.
+    """Resolve inline artifact references into fenced content.
 
-    IDs that are not valid UUIDs are rejected; unknown IDs get a bracketed marker.
+    Args:
+        text (str): Assistant text containing references.
+        store (StoreCoordinator): Session store containing referenced artifacts.
+
+    Returns:
+        str: Text with resolved content or explicit invalid/missing markers.
+
+    Side Effects:
+        Reads artifacts from the store and logs lookup failures.
     """
     refs = _REF_RE.findall(text)
     if not refs:
@@ -109,14 +122,20 @@ async def stream_response(
     store: StoreCoordinator,
     emitter: SignalEmitter,
 ) -> str:
-    """Stream *text* word-by-word via *emitter*, resolving ``@artifact-ref(id)`` inline.
+    """Stream assistant text while resolving artifact references.
 
-    Splits the text at artifact-ref markers. Regular segments and fenced artifact
-    content are both emitted as ``kind="token"`` signals, word by word.
+    Args:
+        text (str): Assistant text to stream.
+        store (StoreCoordinator): Session store containing referenced artifacts.
+        emitter (SignalEmitter): Signal emitter for resolved token output.
 
-    Returns the fully resolved text (suitable for TurnSummary storage).
+    Returns:
+        str: Fully resolved text for session storage.
+
+    Side Effects:
+        Reads artifacts, emits token signals, and logs lookup failures.
     """
-    parts = _REF_RE.split(text)   # alternating: segment, id, segment, id, …
+    parts = _REF_RE.split(text)  # Preserve text between reference IDs.
     ids = _REF_RE.findall(text)
     resolved: list[str] = []
 

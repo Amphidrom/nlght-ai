@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Workflow adapter — executor, step loader, and built-in step registry.
+"""Provide the workflow executor, step loader, and built-in step registry.
 
 The ``step_registry`` singleton is the extension point for registering custom steps:
 

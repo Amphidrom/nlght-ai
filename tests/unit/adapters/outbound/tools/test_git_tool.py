@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for GitTool — the built-in git VCS tool."""
+"""Check the built-in Git tool contract."""
 from __future__ import annotations
 
 import json
@@ -19,10 +19,6 @@ from nlght.adapters.outbound.tools.builtin.git import (
 )
 from nlght.core.errors.errors import ToolExecutionError
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
 
 def _make_tool(os_runtime: object = None, config: dict | None = None) -> GitTool:
     return GitTool(name="git", config=config or {}, os_runtime=os_runtime)
@@ -33,11 +29,6 @@ def _mock_runtime(*, default_result: tuple[int, str, str] = (0, "", "")) -> Magi
     rt.exec = AsyncMock(return_value=default_result)
     rt.write_text = AsyncMock(return_value=None)
     return rt
-
-
-# ---------------------------------------------------------------------------
-# KIND / signatures
-# ---------------------------------------------------------------------------
 
 
 def test_kind_is_git() -> None:
@@ -108,11 +99,6 @@ def test_repo_relative_path_accepts_diff_prefixed_relative_path() -> None:
     assert _normalise_repo_relative_path("b/challenges/x.md") == "challenges/x.md"
 
 
-# ---------------------------------------------------------------------------
-# no runtime → ToolExecutionError
-# ---------------------------------------------------------------------------
-
-
 async def test_clone_raises_without_runtime() -> None:
     tool = _make_tool()
     with pytest.raises(ToolExecutionError):
@@ -123,11 +109,6 @@ async def test_status_raises_without_runtime() -> None:
     tool = _make_tool()
     with pytest.raises(ToolExecutionError):
         await tool.status()
-
-
-# ---------------------------------------------------------------------------
-# parse helpers
-# ---------------------------------------------------------------------------
 
 
 def test_parse_status_porcelain_empty() -> None:
@@ -161,11 +142,6 @@ def test_parse_branches_current_marker() -> None:
     assert branches[0] == {"name": "main", "current": True, "remote": False}
     assert branches[1] == {"name": "feature/x", "current": False, "remote": False}
     assert branches[2]["remote"] is True
-
-
-# ---------------------------------------------------------------------------
-# clone
-# ---------------------------------------------------------------------------
 
 
 async def test_clone_builds_correct_command() -> None:
@@ -220,11 +196,6 @@ async def test_clone_does_not_update_workdir_on_failure() -> None:
     assert tool._workdir == "/workspace"
 
 
-# ---------------------------------------------------------------------------
-# checkout
-# ---------------------------------------------------------------------------
-
-
 async def test_checkout_calls_git_checkout() -> None:
     rt = _mock_runtime(default_result=(0, "", ""))
     tool = _make_tool(os_runtime=rt)
@@ -255,11 +226,6 @@ async def test_checkout_raises_on_failure() -> None:
         await tool.checkout(ref="nonexistent")
 
 
-# ---------------------------------------------------------------------------
-# status
-# ---------------------------------------------------------------------------
-
-
 async def test_status_returns_structured_json() -> None:
     rt = MagicMock()
     rt.exec = AsyncMock(side_effect=[
@@ -288,11 +254,6 @@ async def test_status_clean_repo() -> None:
     assert result["clean"] is True
 
 
-# ---------------------------------------------------------------------------
-# diff
-# ---------------------------------------------------------------------------
-
-
 async def test_diff_returns_output() -> None:
     rt = _mock_runtime(default_result=(0, "diff --git a/x.py b/x.py\n...", ""))
     tool = _make_tool(os_runtime=rt)
@@ -319,11 +280,6 @@ async def test_diff_no_changes_returns_placeholder() -> None:
     result = await tool.diff()
 
     assert result == "(no changes)"
-
-
-# ---------------------------------------------------------------------------
-# commit
-# ---------------------------------------------------------------------------
 
 
 async def test_commit_stages_all_and_commits() -> None:
@@ -383,11 +339,6 @@ async def test_commit_author_added_when_configured() -> None:
     assert "Bot <bot@example.com>" in commit_cmd
 
 
-# ---------------------------------------------------------------------------
-# push / pull
-# ---------------------------------------------------------------------------
-
-
 async def test_push_returns_json_with_success_flag() -> None:
     rt = _mock_runtime(default_result=(0, "pushed", ""))
     tool = _make_tool(os_runtime=rt, config={"default_remote": "origin"})
@@ -417,11 +368,6 @@ async def test_pull_rebase_adds_flag() -> None:
     assert "--rebase" in rt.exec.call_args.args[0]
 
 
-# ---------------------------------------------------------------------------
-# branch_list
-# ---------------------------------------------------------------------------
-
-
 async def test_branch_list_returns_json_array() -> None:
     raw = "* main\n  dev\n"
     rt = _mock_runtime(default_result=(0, raw, ""))
@@ -431,11 +377,6 @@ async def test_branch_list_returns_json_array() -> None:
 
     assert isinstance(result, list)
     assert result[0]["current"] is True
-
-
-# ---------------------------------------------------------------------------
-# log
-# ---------------------------------------------------------------------------
 
 
 async def test_log_returns_commit_list() -> None:
@@ -457,11 +398,6 @@ async def test_log_with_count_limit() -> None:
 
     cmd = rt.exec.call_args.args[0]
     assert "-n5" in cmd
-
-
-# ---------------------------------------------------------------------------
-# apply_patch
-# ---------------------------------------------------------------------------
 
 
 async def test_apply_patch_writes_file_then_runs_git_apply() -> None:

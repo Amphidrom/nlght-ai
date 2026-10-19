@@ -1,12 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""A resource is authorized before it is built, or it is not built.
+"""Authorize resources before constructing them.
 
-The property these hold is narrow and load-bearing: *instantiation does not
-happen* for a caller the policy refuses. Not "the instance is discarded", not
-"the call fails afterwards" — the constructor is never reached, so no engine is
-opened and no client is created on behalf of somebody who may not use it.
+A denied caller must not cause a database engine or client to be instantiated.
 """
 
 from __future__ import annotations
@@ -171,7 +168,7 @@ async def test_a_caller_outside_any_workflow_is_still_asked_about() -> None:
 
 
 async def test_without_a_policy_everything_is_allowed() -> None:
-    """An unconfigured policy restricts nothing — the documented default."""
+    """Allow resource activation when no policy is configured."""
     activator = _activator([_resource()], None)
 
     await activator.activate(kind="counting", name="main", caller=_caller())
@@ -189,12 +186,7 @@ async def test_an_unresolvable_address_is_a_configuration_error() -> None:
 
 
 async def test_an_ambiguous_address_is_refused_rather_than_guessed() -> None:
-    """The constraint should make this impossible; if it is missing, say so.
-
-    Taking the first row is what this whole slice removes — an address that two
-    rows answer to cannot carry an authorization decision, and silently picking
-    one is how that stayed invisible.
-    """
+    """Reject a resource address resolved by more than one row."""
     activator = _activator([_resource(), _resource()], _Policy(allow=True))
 
     with pytest.raises(WorkflowConfigurationError, match="matches 2 enabled"):

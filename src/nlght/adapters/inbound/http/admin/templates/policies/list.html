@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Access Policies — nlght Admin{% endblock %}
+{% block title %}Access Policies | nlght Admin{% endblock %}
 {% block content %}
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
   <h2 style="margin:0">Access Policies</h2>
@@ -24,6 +24,6 @@
   </tbody>
 </table>
 {% else %}
-<p>No policies yet — all tools, models, and playbooks are unrestricted. <a href="/admin/policies/new">Create one →</a></p>
+<p>No policies yet. Tools, models, and playbooks are unrestricted. <a href="/admin/policies/new">Create one</a></p>
 {% endif %}
 {% endblock %}

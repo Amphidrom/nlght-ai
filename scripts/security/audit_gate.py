@@ -1,17 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Turn a pip-audit report into a build decision.
+"""Gate builds on dependency findings and approved exceptions.
 
-Scanner output establishes which dependency is affected. It cannot establish
-whether this product is exposed — that judgement is made by a person, written
-down, and given a date by which it must be made again (ADR-0070).
-
-    python scripts/security/audit_gate.py \\
-        --audit results/security/pip-audit.json \\
-        --exceptions scripts/security/advisory-exceptions.yaml
-
-Exit codes: 0 clean or fully excepted, 1 a finding or a stale exception.
+The gate reads the audit report and exception file, then exits with the build decision.
 """
 
 from __future__ import annotations
@@ -64,7 +56,15 @@ def load_findings(report: dict[str, Any]) -> list[Finding]:
 
 
 def load_exceptions(raw: dict[str, Any] | None) -> tuple[list[Exception_], list[str]]:
-    """Parse the exception list, refusing anything that is not a decision."""
+    """Validate and load fully specified advisory exceptions.
+
+    Args:
+        raw (dict[str, Any] | None): Parsed exception document or ``None``.
+
+    Returns:
+        tuple[list[Exception_], list[str]]: Valid exceptions and validation
+        problems for invalid entries.
+    """
     problems: list[str] = []
     parsed: list[Exception_] = []
     entries = (raw or {}).get("exceptions") or []
@@ -108,7 +108,16 @@ def evaluate(
     exceptions: list[Exception_],
     today: dt.date,
 ) -> tuple[list[str], list[str]]:
-    """Return (failures, notes)."""
+    """Compare findings with unexpired advisory exceptions.
+
+    Args:
+        findings (list[Finding]): Dependency findings from the audit report.
+        exceptions (list[Exception_]): Reviewed advisory exceptions.
+        today (dt.date): Date used to evaluate exception expiry.
+
+    Returns:
+        tuple[list[str], list[str]]: Blocking failures and informational notes.
+    """
     failures: list[str] = []
     notes: list[str] = []
 
@@ -116,7 +125,7 @@ def evaluate(
         if exception.expires <= today:
             failures.append(
                 f"expired exception: {exception.advisory} ({exception.package}) "
-                f"lapsed {exception.expires}; owner {exception.owner}. "
+                f"lapsed {exception.expires}. Owner: {exception.owner}. "
                 "Re-review it or fix the dependency."
             )
 

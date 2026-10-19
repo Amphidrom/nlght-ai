@@ -14,6 +14,7 @@ from nlght.core.config.runtime_context import (
     PersistenceSubsystemRuntime,
 )
 from nlght.core.config.snapshot import (
+    ActionAuthorizationConfig,
     ExecutionConfig,
     ExecutionStreamConfig,
     ExecutionWorkerConfig,
@@ -247,4 +248,78 @@ def test_compose_rejects_invalid_stream_config(
     with pytest.raises(ValueError, match=message):
         CompositionService().compose(
             PlatformConfigSnapshot(execution=ExecutionConfig(stream=stream))
+        )
+
+
+def _compose_provider(kind: str, config: dict[str, object]) -> object:
+    snapshot = PlatformConfigSnapshot(
+        integrations=IntegrationsSnapshot(
+            model_providers=[ModelProviderConfig(name="p", kind=kind, enabled=True, config=dict(config))],
+        ),
+    )
+    return CompositionService().compose(snapshot).model_providers[0]
+
+
+@pytest.mark.parametrize("kind", ["ollama", "ollama-cloud", "ollama-local", "openai", "google"])
+def test_compose_carries_a_configured_provider_temperature(kind: str) -> None:
+    runtime = _compose_provider(kind, {"default_model": "m", "temperature": 0.3})
+
+    assert runtime.temperature == 0.3  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("kind", ["ollama", "ollama-local", "openai", "google"])
+def test_compose_keeps_an_explicit_zero_temperature(kind: str) -> None:
+    # 0 is a pin, not "unset": it must survive composition as a value.
+    runtime = _compose_provider(kind, {"default_model": "m", "temperature": 0})
+
+    assert runtime.temperature == 0.0  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("kind", ["ollama", "ollama-local", "openai", "google"])
+def test_compose_leaves_an_unconfigured_temperature_unset(kind: str) -> None:
+    runtime = _compose_provider(kind, {"default_model": "m"})
+
+    assert runtime.temperature is None  # type: ignore[attr-defined]
+
+
+def test_compose_rejects_temperature_on_anthropic() -> None:
+    with pytest.raises(ValueError, match="does not support 'temperature'"):
+        _compose_provider("anthropic", {"default_model": "claude-sonnet-4-6", "temperature": 0.0})
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("warm", "must be a number"),
+        (True, "must be a number"),
+        (-0.1, "must not be negative"),
+    ],
+)
+def test_compose_rejects_an_invalid_provider_temperature(value: object, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        _compose_provider("openai", {"default_model": "m", "temperature": value})
+
+
+def test_compose_carries_the_action_authorization_settings() -> None:
+    runtime = CompositionService().compose(
+        PlatformConfigSnapshot(
+            action_authorization=ActionAuthorizationConfig(
+                enabled=False, policy_timeout_seconds=5, approval_timeout_seconds=60,
+            )
+        )
+    ).action_authorization
+
+    assert (runtime.enabled, runtime.policy_timeout_seconds, runtime.approval_timeout_seconds) == (
+        False, 5, 60,
+    )
+
+
+@pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
+@pytest.mark.parametrize("key", ["policy_timeout_seconds", "approval_timeout_seconds"])
+def test_compose_refuses_a_timeout_that_is_not_a_positive_finite_number(
+    key: str, seconds: float,
+) -> None:
+    with pytest.raises(ValueError, match=f"action_authorization.{key}"):
+        CompositionService().compose(
+            PlatformConfigSnapshot(action_authorization=ActionAuthorizationConfig(**{key: seconds}))
         )

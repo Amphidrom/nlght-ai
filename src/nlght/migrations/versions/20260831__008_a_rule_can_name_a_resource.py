@@ -4,7 +4,7 @@
 """`resource` becomes a subject a rule can name.
 
 The table has allowed three subject types since it was created: tool, model,
-playbook. Two of those name what they authorize. The third did not — a rule with
+playbook. Two of those name what they authorize. The third did not. A rule with
 `subject_type = 'tool'` was evaluated against `resource.name`, so it authorized
 an entire configured resource: every operation it offers, and its use inside a
 workflow step where no tool call happens at all. The name said one signature and
@@ -14,7 +14,7 @@ Splitting them needs a fourth value, and the CHECK constraint has to admit it
 before any rule can carry it.
 
 **Existing `tool` rows are not migrated, and this is deliberate.** An old rule
-holds a bare name — `shell` — which under the new meaning matches no signature
+holds a bare name such as `shell`, which under the new meaning matches no signature
 (`shell` offers nine, all called `shell_*`) and under `resource` would need an
 address whose kind the row does not record. Guessing `local/shell` from a bare
 `shell` is exactly the kind of inference that produces a rule nobody wrote. With
@@ -23,9 +23,10 @@ new meaning instead, and any row that predates this is left to be re-stated by
 whoever wrote it.
 
 The consequence is stated rather than hidden: after this migration, an existing
-`tool` rule matches a signature name and almost certainly matches nothing. Under
-allowlist semantics a rule that matches no subject restricts nothing, so such a
-row is inert rather than dangerous — but it is also not doing what its author
+`tool` rule is compared against a qualified resource and signature address. It
+almost certainly matches nothing. Under allowlist semantics, a rule that matches
+no subject restricts nothing, so such a
+row is inert rather than dangerous. It is also not doing what its author
 intended, and it should be rewritten.
 
 Revision ID: 0008
@@ -51,9 +52,9 @@ _NEW = "subject_type IN ('resource', 'tool', 'model', 'playbook')"
 
 
 def upgrade() -> None:
-    # Offline (`--sql`) there is no connection to count rows on; `execute()`
-    # returns None. The warning is diagnostic only — the DDL below is the same
-    # either way — so it is simply not available when rendering a script.
+    # Offline (`--sql`) has no connection for counting rows. `execute()`
+    # returns None. The warning is diagnostic only because the DDL below is the same
+    # either way, so it is simply not available when rendering a script.
     if not context.is_offline_mode():
         _warn_about_stale_tool_rules()
 
@@ -68,7 +69,7 @@ def _warn_about_stale_tool_rules() -> None:
     ).scalar_one()
     if stale:
         logger.warning(
-            "access.migration.0008 | tool rules written under the old meaning=%s — "
+            "access.migration.0008 | tool rules written under the old meaning=%s: "
             "they were compared against a resource name and are now compared "
             "against '<kind>/<name>::<signature>'. They match nothing and "
             "restrict nothing; rewrite them as 'resource' or 'tool' rules.",

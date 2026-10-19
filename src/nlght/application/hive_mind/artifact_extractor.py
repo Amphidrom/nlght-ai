@@ -1,21 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Artifact extractor — Stage 2 of the memory extraction pipeline.
-
-Two-tier detection:
-  1. Structural (fast, free): recognises backtick-fenced blocks with a
-     derivable label.  O(n) line-by-line state machine, no regex.
-  2. LLM fallback (only when structural finds nothing): a single LLM call
-     asks the model to identify and extract any file/artifact content
-     verbatim — handles raw pastes, triple-quote docs, unlabelled blocks,
-     or any other format the structural parser misses.
-
-Inject ``client`` to enable the fallback:
-    ArtifactExtractor(client=ctx.llm)
-
-Without a client only backtick-fenced blocks are recognised.
-"""
+"""Extract artifacts from message text using structural parsing and a model fallback."""
 
 from __future__ import annotations
 
@@ -38,37 +24,31 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# LLM system prompt — fallback path only
-# ---------------------------------------------------------------------------
 
 _FALLBACK_SYSTEM_PROMPT = """\
 You are a file and artifact extractor. Given a user message, identify any file content, \
-code snippets, scripts, or named documents — whether wrapped in fences, quotes, \
+code snippets, scripts, or named documents, whether wrapped in fences, quotes, \
 triple-quotes, or pasted raw without any delimiter.
 
-Return ONLY valid JSON — no explanation, no markdown.
+Return ONLY valid JSON. Include no explanation or markdown.
 
 Schema:
 {
   "artifacts": [
     {
       "label": "filename or short descriptive name",
-      "content": "verbatim content exactly as it appears — do not modify or summarise"
+      "content": "verbatim content exactly as it appears. Do not modify or summarise"
     }
   ]
 }
 
 Rules:
 - label: use the filename when mentioned (e.g. "debug_runner.py"); otherwise a short name
-- content: copy verbatim — preserve indentation, line breaks, and all characters
+- content: copy verbatim, preserving indentation, line breaks, and all characters
 - Only include clearly intentional file/code content, not every inline snippet
 - Return [] if no distinct file or artifact content is present
 """
 
-# ---------------------------------------------------------------------------
-# Structural helpers
-# ---------------------------------------------------------------------------
 
 _LABEL_STRIP_PREFIXES = (
     "hier hast du ",
@@ -99,12 +79,13 @@ class _ParsedBlock:
 
 
 def _parse_fence_header(rest: str) -> tuple[str, str]:
-    """Parse the part after ``` — returns (language, inline_label).
+    """Parse language and optional quoted label after a code fence.
 
-    Handles:
-      ```python                 → ("python", "")
-      ```python "service.py"   → ("python", "service.py")
-      ```"service.py"          → ("", "service.py")
+    Args:
+        rest (str): Fence-opening text after the backticks.
+
+    Returns:
+        tuple[str, str]: Lowercase language and optional inline label.
     """
     rest = rest.strip()
     label = ""
@@ -122,7 +103,15 @@ def _parse_fence_header(rest: str) -> tuple[str, str]:
 
 
 def _label_from_preceding(lines: list[str], fence_idx: int) -> str:
-    """Derive a label from the nearest non-empty line before the fence."""
+    """Derive an artifact label from preceding message text.
+
+    Args:
+        lines (list[str]): Message lines preceding the code fence.
+        fence_idx (int): Index of the opening fence line.
+
+    Returns:
+        str: Cleaned nearest nonempty line, or empty text.
+    """
     for j in range(fence_idx - 1, -1, -1):
         raw = lines[j].strip()
         if not raw:
@@ -140,7 +129,14 @@ def _label_from_preceding(lines: list[str], fence_idx: int) -> str:
 
 
 def _parse_fenced_blocks(text: str) -> list[_ParsedBlock]:
-    """Line-by-line state machine — O(n), no regex backtracking."""
+    """Extract labeled fenced blocks without regex backtracking.
+
+    Args:
+        text (str): Message text.
+
+    Returns:
+        list[_ParsedBlock]: Parsed blocks with label, language, and content.
+    """
     result: list[_ParsedBlock] = []
     lines = text.split("\n")
     n = len(lines)
@@ -213,10 +209,6 @@ def _build_result(blocks: list[_ParsedBlock]) -> ExtractionResult:
     )
 
 
-# ---------------------------------------------------------------------------
-# LLM fallback helpers
-# ---------------------------------------------------------------------------
-
 def _parse_llm_json(raw: str) -> dict[str, Any]:
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -247,10 +239,6 @@ def _blocks_from_llm(raw: dict[str, Any]) -> list[_ParsedBlock]:
         blocks.append(_ParsedBlock(label=label, language="", content=content))
     return blocks
 
-
-# ---------------------------------------------------------------------------
-# Extractor
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ArtifactExtractor:

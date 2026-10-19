@@ -1,15 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The documented way to run knowledge review has to be the one that exists.
+"""Keep the knowledge review page aligned with the distributed image.
 
-The page's premise — that review ships as an image rather than as source — is
-only true while `review` is stripped from the public snapshot. Put it back and
-the page still reads correctly while telling people the wrong thing about where
-the code is, which is the kind of drift nobody notices.
-
-Which tag the page shows is an editorial decision and is not asserted here.
-"""
+The source is absent from the public snapshot, so the page must not direct
+readers to build it locally."""
 
 from __future__ import annotations
 
@@ -36,7 +31,7 @@ def test_the_review_source_is_kept_out_of_the_public_snapshot() -> None:
 def test_the_page_does_not_offer_a_build_a_reader_cannot_run() -> None:
     text = REFERENCE.read_text(encoding="utf-8")
 
-    # `review/Dockerfile` may be named — it is how the image is built, and
+    # `review/Dockerfile` may be named because it defines the image build, and
     # somebody with the development repository can use it. What it must not be
     # is the instruction inside a shell block a public reader is meant to paste.
     for block in re.findall(r"```bash\n(.*?)```", text, re.S):

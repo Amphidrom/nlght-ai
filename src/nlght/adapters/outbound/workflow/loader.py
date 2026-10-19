@@ -21,9 +21,9 @@ class StepLoader:
     added without modifying the executor.
 
     Some steps need a platform capability that cannot travel in JSON step config
-    — a repository, an embedding client. ``bind()`` supplies those, mirroring
+    such as a repository or embedding client. ``bind()`` supplies those, mirroring
     how ``ToolLoader.instantiate`` forwards runtime dependencies into a tool.
-    They are passed as keyword arguments to the step constructor; a step that
+    They are passed as keyword arguments to the step constructor. A step that
     does not declare them absorbs them through ``StepBase.__init__``.
     """
 
@@ -36,11 +36,17 @@ class StepLoader:
         logger.debug("step.registered | type=%s", step_cls.TYPE)
 
     def bind(self, **runtime_deps: object) -> StepLoader:
-        """A loader sharing this registry but carrying these dependencies.
+        """Bind runtime dependencies to a loader sharing this registry.
 
-        Returns a new loader rather than mutating this one, so the global
-        ``step_registry`` singleton stays free of per-container state and two
-        containers in one process cannot see each other's wiring.
+        Args:
+            **runtime_deps (object): Dependencies passed to loaded steps.
+
+        Returns:
+            StepLoader: New loader with the shared registry and merged dependencies.
+
+        Side Effects:
+            Shares the registry by reference. Keeps per-container dependencies
+            out of the global ``step_registry`` singleton.
         """
         bound = StepLoader({**self._runtime_deps, **runtime_deps})
         bound._registry = self._registry

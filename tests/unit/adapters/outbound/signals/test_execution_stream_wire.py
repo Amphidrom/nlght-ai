@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+
+import pytest
 
 from nlght.adapters.outbound.signals.execution_stream_wire import (
     StreamFrameAssembler,
@@ -21,7 +24,15 @@ def _sig(content: str, kind: str = "token") -> Signal:
 
 
 def _roundtrip(signal: Signal, budget: int = _BUDGET) -> Signal | None:
-    """Encode, decode, and reassemble a signal the way a receiving node does."""
+    """Encode, decode, and reassemble a signal the way a receiving node does.
+
+    Args:
+        signal (Signal): Signal to encode and reassemble.
+        budget (int): Maximum encoded frame size.
+
+    Returns:
+        Signal | None: Reassembled signal, or ``None`` when decoding rejects it.
+    """
     origin, execution_id = uuid.uuid4(), uuid.uuid4()
     assembler = StreamFrameAssembler()
     complete = None
@@ -75,8 +86,8 @@ def test_an_oversized_signal_is_fragmented_and_rejoined() -> None:
 
 
 def test_fragments_respect_the_budget_even_when_escaping_expands_content() -> None:
-    # A control character escapes to six bytes (\u0007) on the wire — the worst
-    # case, which a naive character-count split would overflow.
+    # A control character escapes to six bytes (\u0007) on the wire. A split
+    # based on character count would overflow this case.
     content = "\u0007" * 4000
 
     assert _roundtrip(_sig(content)) == _sig(content)
@@ -86,6 +97,21 @@ def test_a_tiny_budget_still_produces_deliverable_frames() -> None:
     assert _roundtrip(_sig("abcdefghijklmnopqrstuvwxyz"), budget=200) == _sig(
         "abcdefghijklmnopqrstuvwxyz"
     )
+
+
+def test_a_budget_smaller_than_a_fragment_header_is_rejected() -> None:
+    with pytest.raises(ValueError, match="frame budget"):
+        encode_signal(
+            uuid.uuid4(), uuid.uuid4(), _sig("x" * 100), message_id=1, budget=1
+        )
+
+
+def test_fragmented_signals_require_a_positive_message_id() -> None:
+    with pytest.raises(ValueError, match="positive message ID"):
+        encode_signal(
+            uuid.uuid4(), uuid.uuid4(), _sig("x" * 10_000), message_id=0,
+            budget=_BUDGET,
+        )
 
 
 def test_an_incomplete_fragment_set_yields_nothing() -> None:
@@ -126,3 +152,27 @@ def test_unreadable_payloads_are_dropped_rather_than_raising() -> None:
     assert decode_frame('{"o":"nope","e":"nope","t":"s"}') is None
     unknown_kind = f'{{"o":"{uuid.uuid4().hex}","e":"{uuid.uuid4().hex}","t":"?"}}'
     assert decode_frame(unknown_kind) is None
+
+
+@pytest.mark.parametrize(
+    "fragment",
+    [
+        {"m": "bad", "i": 0, "n": 2},
+        {"m": True, "i": 0, "n": 2},
+        {"m": 0, "i": 0, "n": 2},
+        {"m": 1, "i": "bad", "n": 2},
+        {"m": 1, "i": -1, "n": 2},
+        {"m": 1, "i": 2, "n": 2},
+        {"m": 1, "i": 0, "n": 0},
+        {"m": 1, "i": 0, "n": 4097},
+    ],
+)
+def test_malformed_fragment_metadata_is_dropped(fragment: dict[str, object]) -> None:
+    frame = json.loads(
+        encode_signal(
+            uuid.uuid4(), uuid.uuid4(), _sig("x"), message_id=1, budget=_BUDGET
+        )[0]
+    )
+    frame.update(fragment)
+
+    assert decode_frame(json.dumps(frame)) is None

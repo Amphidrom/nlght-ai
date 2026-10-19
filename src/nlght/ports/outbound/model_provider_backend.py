@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ModelProviderBackend(Protocol):
-    """Unbound provider backend — factory for bound ModelClients and model catalogue.
+    """Unbound provider backend for model discovery and bound clients.
 
     Implemented by all provider backend classes (OllamaModelClient,
     AnthropicModelClient, OpenAICloudModelClient, GoogleModelClient).
@@ -21,7 +21,14 @@ class ModelProviderBackend(Protocol):
     """
 
     async def list_models(self) -> list[ModelInfo]:
-        """Return the models available from this provider."""
+        """Discover models available from this provider.
+
+        Returns:
+            list[ModelInfo]: Available model information records.
+
+        Side Effects:
+            May query the provider endpoint.
+        """
         raise NotImplementedError
 
     def bind(
@@ -32,19 +39,43 @@ class ModelProviderBackend(Protocol):
         stream: bool,
         token_budget: TokenBudget | None = None,
     ) -> ModelClient:
-        """Return a request-scoped BoundModelClient."""
+        """Bind a provider to one model request.
+
+        Args:
+            model (str | None): Model selected for this request.
+            emitter (SignalEmitter): Signal emitter for streamed output.
+            stream (bool): Whether the request streams output.
+            token_budget (TokenBudget | None): Optional budget override.
+
+        Returns:
+            ModelClient: Bound model client.
+
+        Side Effects:
+            May initialize request-scoped client state.
+        """
         raise NotImplementedError
 
     async def token_budget(
         self, model: str | None = None, *, client_max_tokens: int | None = None
     ) -> TokenBudget:
-        """Return a TokenBudget for the given model."""
+        """Resolve the model's usable context budget.
+
+        Args:
+            model (str | None): Optional model name.
+            client_max_tokens (int | None): Optional output-token cap.
+
+        Returns:
+            TokenBudget: Budget for the selected model.
+
+        Side Effects:
+            May query or cache provider metadata.
+        """
         raise NotImplementedError
 
 
 @runtime_checkable
 class RunningModelsCapable(Protocol):
-    """Optional capability — provider can report which models are currently loaded.
+    """Optional capability for reporting currently loaded models.
 
     Only ``OllamaModelClient`` implements this. The ``OllamaHttpProtocolAdapter``
     checks ``isinstance(backend, RunningModelsCapable)`` to decide whether to
@@ -57,7 +88,7 @@ class RunningModelsCapable(Protocol):
 
 @runtime_checkable
 class NativeProxyCapable(Protocol):
-    """Optional capability — provider exposes a native HTTP endpoint for passthrough.
+    """Optional capability for native HTTP passthrough.
 
     Used by ``OllamaHttpProtocolAdapter`` for Ollama-only endpoints
     (``/api/generate``, ``/api/show``, ``/api/version``) that have no

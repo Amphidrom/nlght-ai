@@ -1,18 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""PipelineSnapshot — full pipeline state capture for step-level replay.
-
-Captures both the persistent session state (SessionSnapshot) and the
-transient in-memory slot state (MentalModel) after any workflow step.
-
-Usage::
-
-    from nlght.adapters.outbound.hive_mind.pipeline_snapshot import (
-        PipelineSnapshot, SlotState,
-        _ser_mental_model, _de_mental_model,
-    )
-"""
+"""Capture persistent and transient state for step-level replay."""
 
 from __future__ import annotations
 
@@ -32,10 +21,8 @@ from nlght.core.hive_mind.models import (
     _ser_result,
     _ser_turn,
 )
+from nlght.core.model.trust import origin_from_json, origin_to_json
 
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
 
 @dataclass
 class _DeltaSnapshot:
@@ -103,10 +90,6 @@ class PipelineSnapshot:
         )
 
 
-# ---------------------------------------------------------------------------
-# RelevanceScore
-# ---------------------------------------------------------------------------
-
 def _ser_score(s: RelevanceScore) -> dict[str, Any]:
     return {
         "recency":    s.recency,
@@ -127,10 +110,6 @@ def _de_score(d: dict[str, Any]) -> RelevanceScore:
     )
 
 
-# ---------------------------------------------------------------------------
-# WorkingAtom
-# ---------------------------------------------------------------------------
-
 def _ser_atom(a: WorkingAtom) -> dict[str, Any]:
     return {
         "id":               a.id,
@@ -143,6 +122,7 @@ def _ser_atom(a: WorkingAtom) -> dict[str, Any]:
         "kind":             a.kind,
         "promote_to_parent": a.promote_to_parent,
         "created_at":       a.created_at.isoformat(),
+        "origin":           origin_to_json(a.origin),
     }
 
 
@@ -156,15 +136,12 @@ def _de_atom(d: dict[str, Any]) -> WorkingAtom:
         key               = d.get("key", ""),
         kind              = d.get("kind", ""),
         promote_to_parent = d.get("promote_to_parent", False),
+        origin            = origin_from_json(d.get("origin")),
     )
     a.id         = d["id"]
     a.created_at = datetime.fromisoformat(d["created_at"])
     return a
 
-
-# ---------------------------------------------------------------------------
-# ScoredAtom / ScoredResult
-# ---------------------------------------------------------------------------
 
 def _ser_scored_atom(sa: ScoredAtom) -> dict[str, Any]:
     return {
@@ -174,16 +151,17 @@ def _ser_scored_atom(sa: ScoredAtom) -> dict[str, Any]:
 
 
 def _de_scored_atom(d: dict[str, Any]) -> ScoredAtom:
-    """A scored atom, ignoring a `depth` an older snapshot may still carry.
+    """Deserialize a scored atom from a stored snapshot.
 
-    It was a second, score-derived idea of how fully to render something,
-    computed from the relevance total and read only by this dump. The real
-    answer is an element's representations and the reduction that chooses
-    between them (ADR-0054), and keeping both invited somebody to reach for the
-    shortcut and bypass retention and budget entirely.
+    Args:
+        d (dict[str, Any]): Snapshot entry containing atom and score data.
 
-    Unread rather than rejected: the key was optional on the way in before it was
-    removed, so a snapshot written by any version deserialises either way.
+    Returns:
+        ScoredAtom: Restored atom and score.
+
+    Notes:
+        Ignore the obsolete optional ``depth`` key so older snapshots remain
+        readable. Representation reduction now determines display depth.
     """
     return ScoredAtom(
         atom  = _de_atom(d["atom"]),
@@ -205,10 +183,6 @@ def _de_scored_result(d: dict[str, Any]) -> ScoredResult:
     )
 
 
-# ---------------------------------------------------------------------------
-# MentalModel.delta (open type — preserved via duck-typed proxy)
-# ---------------------------------------------------------------------------
-
 def _ser_delta(delta: object | None) -> dict[str, Any] | None:
     if delta is None:
         return None
@@ -226,10 +200,6 @@ def _de_delta(d: dict[str, Any] | None) -> _DeltaSnapshot | None:
         confidence    = d.get("confidence"),
     )
 
-
-# ---------------------------------------------------------------------------
-# MentalModel
-# ---------------------------------------------------------------------------
 
 def _ser_mental_model(m: MentalModel) -> dict[str, Any]:
     return {
@@ -252,7 +222,7 @@ def _de_mental_model(d: dict[str, Any]) -> MentalModel:
         built_at      = datetime.fromisoformat(d["built_at"]),
         is_valid      = d.get("is_valid", True),
         # A cached mental model reaches the model as untrusted context and never
-        # as an instruction — ADR-0066 removed that path, and nothing here
+        # as an instruction. ADR-0066 removed that path, and nothing here
         # restores it. What this filter adds is the second layer: a value that
         # did not parse is not carried at all, so it is not even quoted data
         # (ADR-0067).

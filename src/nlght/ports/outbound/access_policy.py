@@ -17,11 +17,11 @@ class ResourceAccessPolicy(Protocol):
     A resource is authorized as a whole: whether this caller may activate it.
     That is the only question for a resource used inside a workflow step, where
     no tool call happens, and the first of two for one whose signatures a model
-    may call — ``ToolAccessPolicy`` decides the second, and cannot overrule this
+    may call. ``ToolAccessPolicy`` decides the second and cannot overrule this
     one.
 
     ``model`` is the effective model of the request (None when no model is bound
-    yet); ``caller`` may be None for internal invocations without a request
+    yet). ``caller`` may be None for internal invocations without a request
     context.
 
     If no policy is configured every resource is accessible (default behaviour).
@@ -39,13 +39,13 @@ class ResourceAccessPolicy(Protocol):
 class ToolAccessPolicy(Protocol):
     """Controls which single operations of an authorized resource are offered.
 
-    Checked per ``ToolSignature`` during catalog construction; a signature for
+    Checked per ``ToolSignature`` during catalog construction. A signature for
     which this returns False is left out of the request-scoped catalog, so a
     model is never told it exists.
 
     It decides *within* a resource the caller may already use. It is asked only
     after ``ResourceAccessPolicy`` allowed the resource, and allowing a signature
-    of a resource that was denied is not expressible — which is the point of
+    of a resource that was denied is not expressible. This is the purpose of
     having two.
 
     Wire concrete implementations via
@@ -85,9 +85,9 @@ class ModelAccessPolicy(Protocol):
 class PlaybookAccessPolicy(Protocol):
     """Controls which callers may invoke a given playbook.
 
-    Checked by PlaybookCatalogBuilder.build() — playbooks for which this
+    Checked by ``PlaybookCatalogBuilder.build()``. Playbooks for which this
     returns False are excluded from the request-scoped catalog. ``model`` is
-    the effective model of the request; ``caller`` may be None for internal
+    the effective model of the request. ``caller`` may be None for internal
     invocations without a request context.
 
     Wire a concrete implementation via PlaybookCatalogBuilder(access_policy=...).

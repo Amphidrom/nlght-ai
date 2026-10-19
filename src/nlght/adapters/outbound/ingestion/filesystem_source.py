@@ -160,8 +160,8 @@ class FilesystemDocumentSource:
             return None
         patterns: list[str] = []
         # `parents` of the *relative* path are themselves relative (e.g. `src`,
-        # `src/foo`); rejoin them onto `root` so every link in the chain is
-        # absolute — the loop below calls `current.relative_to(root)`, which
+        # `src/foo`). Rejoin them onto `root` so every link in the chain is
+        # absolute. The loop below calls `current.relative_to(root)`, which
         # fails on a bare relative path once the walk descends two levels.
         intermediate = reversed(directory.relative_to(root).parents[:-1])
         chain = [root, *(root / parent for parent in intermediate)]

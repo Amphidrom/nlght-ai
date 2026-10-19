@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""LLM-backed entity extractor — Stage 1 of the memory extraction pipeline.
-
-One LLM call → list[ExtractedEntity].
-No artifact markers, no MIME detection, no relations, no intent classification.
-Those are separate pipeline stages.
-"""
+"""Extract entity candidates through a model client."""
 
 from __future__ import annotations
 
@@ -28,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
 You are an entity extractor. Identify all meaningful named entities in the user text.
-Return ONLY valid JSON — no explanation, no markdown.
+Return ONLY valid JSON. Include no explanation or markdown.
 
 Schema:
 {

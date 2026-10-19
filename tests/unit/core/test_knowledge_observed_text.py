@@ -1,22 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The wording is observed, never assembled — and that holds for every kind.
+"""Keep observed wording separate from structured knowledge fields.
 
-    observed_text  is authoritative for the wording
-    structure      is never authoritative for the wording
-
-Structure may enrich a claim. It may not restate one. A claim is quoted back to
-a person — in a review queue, in a citation, in a diff — and quoting it from the
-fields shows them a sentence their source does not contain.
-
-Parametrised across `fact`, `rule`, `decision` and `pattern` on purpose. The
-defect was easiest to see on a fact, where `subject`/`predicate`/`object` cannot
-even attempt a sentence and the old code joined them into "requires spring_boot
-java_17". But it was never a fact problem: `rule` and `decision` carry prose in
-their fields, and reassembling *from those* is the same substitution, only
-harder to notice because the result reads well.
-"""
+The source wording is preserved for citations across all knowledge kinds.
+Structure may enrich a claim but cannot reconstruct its quotation."""
 
 from __future__ import annotations
 
@@ -88,14 +76,7 @@ def test_the_wording_does_not_depend_on_how_the_fields_are_ordered(kind: str) ->
 
 @pytest.mark.parametrize("kind", _KINDS)
 def test_no_wording_is_no_wording_rather_than_an_assembled_one(kind: str) -> None:
-    """The substitution this exists to prevent.
-
-    `_assertion_text` used to pick the first non-empty of
-    `rule_text`/`decision`/`description`/`object` and otherwise join every value.
-    For a candidate with no observed wording that produced a sentence out of the
-    fields — well-formed, quotable, and in no document. Empty is the honest
-    answer, and the persist step counts it.
-    """
+    """Leave missing observed wording empty instead of assembling field values."""
     _, content = _CASES[kind]
     item = ExtractedItem(kind=kind, type="t", content=content, confidence=0.9)
 
@@ -125,8 +106,8 @@ def test_wording_that_is_not_in_the_source_is_not_observed(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", _KINDS)
 def test_rewrapping_a_line_is_not_a_different_wording(kind: str) -> None:
-    # A parser may reflow; that changes no word. Folding whitespace is the only
-    # tolerance — anything fuzzier would admit the paraphrase above.
+    # A parser may reflow. That changes no word. Folding whitespace is the only
+    # tolerance because a fuzzier match would admit the paraphrase above.
     wording, _ = _CASES[kind]
     head, _, tail = wording.partition(" ")
 
@@ -134,13 +115,7 @@ def test_rewrapping_a_line_is_not_a_different_wording(kind: str) -> None:
 
 
 def test_a_fact_is_the_case_that_cannot_be_faked() -> None:
-    """Named on its own because it is where the rule is unarguable.
-
-    `subject`/`predicate`/`object` are not a sentence in any order. The old join
-    produced "spring_boot requires java_17", which is not what the document says
-    and never was — so for a fact there is no version of "derive it from the
-    fields" that is merely imperfect.
-    """
+    """Keep fact role fields from being presented as a source quotation."""
     item = _item("fact")
 
     assert _assertion_text(item) == "Spring Boot requires Java 17."
@@ -150,26 +125,11 @@ def test_a_fact_is_the_case_that_cannot_be_faked() -> None:
     }
 
 
-# ---------------------------------------------------------------------------
-# The rule, as a property of the code rather than of one call
-# ---------------------------------------------------------------------------
-
 def test_the_citation_text_is_read_and_not_assembled() -> None:
-    """Rule 3, as a property of the function rather than of one call.
+    """Read citation wording from observed text without a field-value fallback."""
+    import inspect
 
-    `_assertion_text` is what a reviewer, a citation and a diff all quote. It
-    used to pick the first non-empty of four fields and otherwise join every
-    value, and each half looked reasonable on its own — what made it a defect is
-    that a reader cannot tell an assembled sentence from an observed one.
-
-    Asserted over the source because the fallback is what would come back: a
-    later "a candidate with no wording should still show something" would
-    reintroduce exactly this, and would pass every behavioural test above by
-    firing only where they do not look.
-    """
-    import inspect  # noqa: PLC0415
-
-    from nlght.adapters.outbound.workflow.steps.knowledge.persist import (  # noqa: PLC0415
+    from nlght.adapters.outbound.workflow.steps.knowledge.persist import (
         _assertion_text,
     )
 
@@ -183,16 +143,11 @@ def test_the_citation_text_is_read_and_not_assembled() -> None:
 
 
 def test_the_only_field_assembled_from_values_is_the_search_bag() -> None:
-    """Rules 3 and 5 together: a bag is allowed, and a bag is not a claim.
+    """Limit field-value concatenation to the search bag."""
+    import inspect
 
-    Two places build a string out of a mapping's values — the writer's fallback
-    and the enrichment step — and both are the BM25 bag. Named here rather than
-    exempted silently, so a third has to be argued for instead of appearing.
-    """
-    import inspect  # noqa: PLC0415
-
-    from nlght.adapters.outbound.stores import knowledge_writer  # noqa: PLC0415
-    from nlght.adapters.outbound.workflow.steps.knowledge import (  # noqa: PLC0415
+    from nlght.adapters.outbound.stores import knowledge_writer
+    from nlght.adapters.outbound.workflow.steps.knowledge import (
         persist,
         refine,
     )
@@ -202,6 +157,12 @@ def test_the_only_field_assembled_from_values_is_the_search_bag() -> None:
 
         The enclosing name is the point: a line reads the same whether it makes a
         search bag or a citation, and only where it sits says which.
+
+        Args:
+            module (object): Module whose source is scanned.
+
+        Returns:
+            list[tuple[str, str]]: Source locations that assemble strings from mappings.
         """
         found, enclosing = [], ""
         for line in inspect.getsource(module).splitlines():

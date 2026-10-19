@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Knowledge graph schema — a database of its own.
+"""Knowledge graph schema in a separate database.
 
 Deliberately on a separate declarative base from the platform models: the
 knowledge graph is not platform metadata and does not live in the runtime's
@@ -55,34 +55,34 @@ class Knowledge(KnowledgeBase):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     review_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     review_reason: Mapped[str | None] = mapped_column(Text)
-    # Set when a reviewer merged this assertion into another. The row stays —
-    # deleting it would cascade away its observations and its decision history,
-    # which is the trail a later disagreement needs — but it is no longer
+    # Set when a reviewer merged this assertion into another. Keep the row
+    # because deletion would cascade away observations and decision history.
+    # The row is no longer
     # canonical and never reaches a retrieval path. RESTRICT, so a merge target
     # cannot be deleted out from under the assertions pointing at it.
     merged_into: Mapped[str | None] = mapped_column(
         Text, ForeignKey("knowledge.identity", ondelete="RESTRICT")
     )
-    #: Which state of the claim this node represents — a relationship, and the
+    #: Which state of the claim this node represents. This is a relationship, and the
     #: only one there is between the graph and the lineage.
     #:
     #: It used to be inferred from `KnowledgeRevision.fingerprint == identity`,
     #: which is not a relationship: a fingerprint is a content address, several
-    #: revisions may legitimately carry the same one — a revision is new when the
-    #: *observed wording* moves, and the structured claim may not have — and
+    #: revisions may legitimately carry the same one. A revision is new when the
+    #: *observed wording* moves, even if the structured claim has not changed. Also,
     #: nothing said which of them the node stood for. Every read that needed one
     #: therefore quantified over the set and hoped it answered.
     #:
     #: **Which node's pointer may move, and when.** A write reaches the node its
-    #: own state addresses — the arriving revision's fingerprint *is* the
-    #: identity looked up — so the two cases stay apart by construction:
+    #: own state addresses. The arriving revision's fingerprint *is* the
+    #: identity looked up, so the two cases stay apart by construction:
     #:
-    #:     R1, R2 hash to one P    one node P, and its pointer moves R1 → R2:
+    #:     R1, R2 hash to one P    one node P. Its pointer moves from R1 to R2:
     #:                             the same structured state, in its latest
     #:                             recorded form (a corrected full stop is the
     #:                             plain case)
     #:
-    #:     R1→P1, R2→P2            two nodes. P1 keeps R1 and is never re-aimed:
+    #:     R1 maps to P1, R2 to P2. P1 keeps R1 and is never re-aimed:
     #:                             a record whose content is P1 claiming to
     #:                             represent R2 would be a lie about itself. It
     #:                             stops being canonical because R1 is no longer
@@ -90,18 +90,18 @@ class Knowledge(KnowledgeBase):
     #:                             fact about the lineage and not about the node.
     #:
     #: NULL means this node names no state, and there are two ways to arrive at
-    #: it — see `revision_unresolved`, which is what tells them apart.
+    #: it. `revision_unresolved` distinguishes the two cases.
     revision_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("knowledge_revisions.revision_id", ondelete="RESTRICT"),
     )
     #: Set by migration `0018` on a node that **has** lineage whose exact state
-    #: could not be proved — several revisions carried its fingerprint, and
+    #: could not be proved. Several revisions carried its fingerprint, and
     #: picking the deepest is the set logic `revision_id` exists to remove.
     #:
     #: Without this, one NULL would mean two different things:
     #:
-    #:     no revision, none ever      not a withdrawal, not a supersession —
+    #:     no revision, none ever      not a withdrawal or supersession:
     #:                                 absence of a record is not evidence, and
     #:                                 this node stays canonical as it always was
     #:
@@ -196,7 +196,7 @@ class KnowledgeAssertion(KnowledgeBase):
 
     The surrogate the whole design rests on. `assertion_id` is minted once and
     never computed from content, so a rewording changes what the assertion says
-    without changing which assertion it is — and a faulty matcher cannot
+    without changing which assertion it is. A faulty matcher cannot
     retroactively decide what this database considers identity.
 
     `entity_key` says which quantity it is, and `entity_key_version` says which
@@ -207,7 +207,7 @@ class KnowledgeAssertion(KnowledgeBase):
 
     __tablename__ = "knowledge_assertions"
     #: Indexed, not unique. The key describes an assertion and does not identify
-    #: one — two may legitimately carry the same description, because an
+    #: one. Two may legitimately carry the same description because an
     #: ambiguous match mints a new assertion rather than choosing between equally
     #: plausible candidates, and a claim asserted again after being dropped is a
     #: new decision rather than an undo.
@@ -234,11 +234,11 @@ class KnowledgeAssertionLineage(KnowledgeBase):
     splits into two, or two collapse into one, and a `superseded_by` field can
     say neither:
 
-        A → B          a claim replaced
-        A → B, C       one split into two
-        A, B → C       two folded into one
+        A replaced by B          a claim replaced
+        A split into B and C     one split into two
+        A and B folded into C    two folded into one
 
-    A rewording is *not* recorded here — that keeps its assertion and adds a
+    A rewording keeps its assertion and adds a
     revision. This is the other case: propositions that say different things,
     where one took the other's place rather than arriving beside it. Whether it
     did cannot be read off the words, so it is written down with who or what
@@ -268,7 +268,7 @@ class KnowledgeAssertionLineage(KnowledgeBase):
     #: Why, in whatever terms the recorder had. A succession nobody can account
     #: for later is one nobody can undo either.
     reason: Mapped[str | None] = mapped_column(Text)
-    #: Who or what recorded it — a reviewer, a run, a repair.
+    #: Identify whether a reviewer, run, or repair recorded this succession.
     recorded_by: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
@@ -281,7 +281,7 @@ class KnowledgeAssertionObservation(KnowledgeBase):
     The comparison unit of the equivalence audit, and the reason it exists at
     all: a judgement has to point at the two things it was about, and both must
     be durable *before* the decision they justify. Every other candidate for
-    that role is downstream of the decision — `knowledge_evidence` hangs off a
+    that role is downstream of the decision. `knowledge_evidence` hangs off a
     revision, and the revision is created only once the matcher and the judge
     have already answered.
 
@@ -295,7 +295,7 @@ class KnowledgeAssertionObservation(KnowledgeBase):
 
     **A sighting, not an identity.** Nothing here is deduplicated: two runs that
     read one sentence saw it twice, and collapsing them would lose which run saw
-    what — the question an audit is asked. That is also why this is not
+    what. That is the question an audit is asked. It is also why this is not
     content-addressed the way `knowledge_propositions` is: that table holds what
     a claim *is*, this one holds that somebody looked.
     """
@@ -307,7 +307,7 @@ class KnowledgeAssertionObservation(KnowledgeBase):
     )
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     observed_text: Mapped[str] = mapped_column(Text, nullable=False)
-    #: The kind's own structured shape — a `Proposition`'s fields for a
+    #: Preserve the kind's structured shape: a `Proposition`'s fields for a
     #: fact, the payload for the others. Stored as it arrived rather than folded
     #: into one universal form, because no invariant asks for one.
     representation: Mapped[dict[str, Any]] = mapped_column(_JSON, nullable=False)
@@ -328,10 +328,8 @@ class KnowledgeEquivalenceAssessment(KnowledgeBase):
 
     Append-only, with **no unique key on the pair**. The same judge asked twice
     can answer differently, and a constraint permitting one row would delete
-    exactly the evidence that a model is unstable — the thing anyone auditing
-    this would most want to see. Reusing an answer rather than asking again is a
-    cache: a different table, with a different key, added when there is a reason
-    to.
+    exactly the evidence an audit needs to detect an unstable model. Reusing an
+    answer would require a separate cache with a different key.
 
     It replaces `knowledge_proposition_equivalence`, which compared the wrong
     unit. That table was keyed on fact propositions, so three of the four kinds
@@ -365,7 +363,7 @@ class KnowledgeEquivalenceAssessment(KnowledgeBase):
         nullable=False,
     )
     verdict: Mapped[str] = mapped_column(Text, nullable=False)
-    #: `None` where nothing decided — which is what `unjudged` means, and is not
+    #: `None` where nothing decided, which is what `unjudged` means, and is not
     #: the same as a judge having looked and found them different.
     classifier: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(Text)
@@ -386,7 +384,7 @@ class KnowledgeProposition(KnowledgeBase):
 
     `fingerprint` addresses content and nothing more: same fingerprint means
     byte-identical after normalisation, and *different* fingerprints say nothing
-    about whether the claims are one — that is the question being asked.
+    about whether the claims are one. That is the question being asked.
     `fingerprint_version` says which scheme produced it, because normalisation
     will change and an old value must not look like it lives in the new
     namespace.
@@ -420,7 +418,7 @@ class KnowledgeSlot(KnowledgeBase):
     The third surrogate in the model, for the same reason as the other two. Two
     runs compare one slot's assertions against the same slot's, so a slot that
     loses its identity retracts and recreates everything inside it and takes the
-    approvals with them. The id is minted and never derived — a slot keyed on its
+    approvals with them. The id is minted and never derived. A slot keyed on its
     position renumbered every section below an inserted paragraph, and a slot
     keyed on its heading would move whenever somebody renamed one.
 
@@ -438,7 +436,7 @@ class KnowledgeSlot(KnowledgeBase):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="live")
     #: A hash of what this section last said. The recovery rung of the resolver
     #: compares against it, and without it that rung could never fire from the
-    #: database — which is the rung that catches a renamed heading, so a rename
+    #: database, which is the rung that catches a renamed heading, so a rename
     #: would mint a new slot and retract everything the old one held.
     #:
     #: A hash rather than the text: the registry is about where a claim stands,
@@ -454,7 +452,7 @@ class KnowledgeSlot(KnowledgeBase):
 class KnowledgeSlotObservation(KnowledgeBase):
     """What one run saw in one slot: the parser input it was given.
 
-    `KnowledgeSlot.content_fingerprint` is a *current state* — the resolver
+    `KnowledgeSlot.content_fingerprint` is a *current state*. The resolver
     overwrites it every run so the recovery rung can match against what the
     section says now. That makes it useless for the question a report has to
     answer: whether the section a claim stood in was actually edited between two
@@ -472,7 +470,7 @@ class KnowledgeSlotObservation(KnowledgeBase):
     waves through a claim that moved in a section nobody touched.
 
     Written per run and per slot, so it is a log of readings rather than of
-    changes — a run that changed nothing still records that it looked, which is
+    changes. A run that changed nothing still records that it looked, which is
     what tells "unchanged" from "not observed".
     """
 
@@ -491,7 +489,7 @@ class KnowledgeSlotObservation(KnowledgeBase):
     #: stood. Emphatically *not* the value the resolver's recovery rung matches
     #: on: that one is normalised, because a reflowed section is still the same
     #: section, and this one must be able to say that a section was edited at
-    #: all — a sentence given a full stop is a different question to the model.
+    #: all. A sentence given a full stop is a different question to the model.
     parser_input_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     #: Which revision of the document this reading came from, so a comparison can
     #: be anchored to the same provenance the rest of the report uses.
@@ -507,10 +505,10 @@ class KnowledgeSlotAnchor(KnowledgeBase):
     The strength belongs **here** and not on the slot, because it changes over a
     slot's life and the change is the interesting part:
 
-        authored → authored    ordinary
-        derived  → authored    an upgrade; very likely the same section
-        derived  → derived     the fallback rungs are doing the work
-        authored → derived     a degradation — do not continue blindly
+        authored to authored    ordinary
+        derived to authored     an upgrade, likely the same section
+        derived to derived      the fallback rungs are doing the work
+        authored to derived     a degradation that requires review
 
     The last row is why one strength per slot would not do. When `[[expenses]]`
     disappears and only the heading path is left, a resolver that still believed
@@ -536,7 +534,7 @@ class KnowledgeSlotAnchor(KnowledgeBase):
     )
     #: What the source gave: an authored id taken unchanged, or a heading path.
     anchor: Mapped[str] = mapped_column(Text, nullable=False)
-    #: `authored` or `derived`. `none` never reaches here — a section nothing can
+    #: `authored` or `derived`. `none` never reaches here because a section nobody can
     #: find again gets no slot, because an id that cannot be resolved back to is
     #: a number claiming to be an identity.
     strength: Mapped[str] = mapped_column(Text, nullable=False)
@@ -554,7 +552,7 @@ class KnowledgeVariant(KnowledgeBase):
     """One simultaneously valid case of an assertion.
 
     CHF 500 for employees and CHF 5000 for executives are both true, and
-    revisions are a sequence of states — so two values true at once cannot be
+    revisions are a sequence of states. Two values true at once cannot be
     revisions of one thing. They are variants.
 
     `scope` is stored but is not the identity: a variant id is a surrogate,
@@ -591,12 +589,12 @@ class KnowledgeRevision(KnowledgeBase):
     and not to the continuity:
 
         Assertion A
-          Revision 1 → Proposition P1
-          Revision 2 → Proposition P2
+          Revision 1 records Proposition P1
+          Revision 2 records Proposition P2
 
     Two propositions with different fingerprints can continue one assertion when
     an equivalence judgement says they are one claim. Hanging a single
-    proposition on the assertion — or on the graph node — would flatten that
+    proposition on the assertion or graph node would flatten that
     history into "one proposition per assertion" and lose the earlier form of
     every claim that was ever reworded.
     """
@@ -620,7 +618,7 @@ class KnowledgeRevision(KnowledgeBase):
     supersedes: Mapped[int | None] = mapped_column(Integer)
     #: The sighting this revision came from. Without it there is no way back
     #: from a claim in the corpus to the observation that recorded it, and an
-    #: equivalence judgement would have to synthesise the candidate's side —
+    #: equivalence judgement would have to synthesize the candidate's side,
     #: making a sighting into a sighting per comparison, stamped with the run
     #: that compared rather than the run that saw.
     observation_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -631,7 +629,7 @@ class KnowledgeRevision(KnowledgeBase):
     )
     #: The complete extracted structure this revision recorded. Null for the
     #: kinds that have no proposition and for everything extracted before
-    #: propositions existed — nothing is backfilled, because reconstructing one
+    #: propositions existed. Nothing is backfilled because reconstructing one
     #: from a payload that could not hold it is guessing.
     proposition_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -653,7 +651,7 @@ class KnowledgeEvidence(KnowledgeBase):
     Provenance and never identity: a renamed document is the same document, so
     the path may move without opening an assertion or writing a revision, and no
     slot resolves by it. It is here rather than looked up because the obvious
-    place to look — `ingestion_documents` — is empty for a knowledge-only flow,
+    place to look, `ingestion_documents`, is empty for a knowledge-only flow,
     and joining the two lifecycles to borrow a string is a decision of its own.
     """
 
@@ -661,7 +659,7 @@ class KnowledgeEvidence(KnowledgeBase):
     __table_args__ = (
         # The slot is part of what makes a sighting distinct. Two sections of one
         # document saying the same thing are two sightings, and without the slot
-        # only the first was recorded — which left the support view unable to say
+        # only the first was recorded, which left the support view unable to say
         # which section stopped carrying a claim, because it never knew both had.
         # A retry still records nothing twice: run, document and slot are all the
         # same on a retry.
@@ -701,11 +699,11 @@ class KnowledgeDocumentSupport(KnowledgeBase):
     `KnowledgeEvidence` is append-only and answers "was observed here". That is
     the right shape for an audit and the wrong one for a citation: a document
     that has since removed the sentence is still in it forever, so an answer
-    built from evidence would send a reader to a file that no longer says it —
+    built from evidence would send a reader to a file that no longer says it,
     while the claim itself is perfectly alive, held up by a second document.
 
     So currency is recorded rather than inferred from absence. Nothing here
-    reinterprets or deletes a sighting; this is a second, smaller relation that
+    reinterprets or deletes a sighting. This is a second, smaller relation that
     says what is true today, and it is replaced from what a run saw rather than
     accumulated.
 
@@ -713,12 +711,12 @@ class KnowledgeDocumentSupport(KnowledgeBase):
     provenance and lifecycle (ADR-0044): a section can be renamed, split or lose
     its heading without the document ceasing to assert anything. So a row
     disappears only when a *complete* observation of its document no longer
-    produces its state — never because a section moved. The `slot_id` on the row
+    produces its state, never because a section moved. The `slot_id` on the row
     is where it was seen, and takes part in no removal decision of its own.
 
     Maintained only by `record_document`, which is only called for a document
     observed in full. A partial run cannot say what a document currently carries
-    — it did not see all of it — so it writes evidence and leaves this alone.
+    because it did not see all of it. It writes evidence and leaves this alone.
     That is the same gate retraction uses, deliberately: two mechanisms deciding
     currency differently is how a corpus starts contradicting itself.
     """
@@ -742,7 +740,7 @@ class KnowledgeDocumentSupport(KnowledgeBase):
         ForeignKey("knowledge_revisions.revision_id", ondelete="CASCADE"),
         nullable=False,
     )
-    #: The document revision this state was last **extracted** at — not
+    #: The document revision this state was last **extracted** at, not
     #: necessarily the revision the document is at now.
     #:
     #: The two come apart whenever a section the stable-slot guard protected was
@@ -777,7 +775,7 @@ class KnowledgeExtractionState(KnowledgeBase):
 
     The knowledge counterpart to the data layer's `ingestion_index_state`, and
     it exists for the same reason: without it every run redoes every document.
-    On the data side that costs an embedding; here it costs a model call whose
+    On the data side that costs an embedding. Here it costs a model call whose
     answer is phrased slightly differently each time, so redoing an unchanged
     document is what makes assertions drift.
 

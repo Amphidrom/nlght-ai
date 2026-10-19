@@ -1,28 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Whether two complete propositions say the same thing.
+"""Specify equivalence decisions between complete propositions.
 
-A judgement, and only that. Nothing here produces a canonical form, stores
-anything, or hands back a merged proposition — a "canonical" anything would be a
-data model chosen by the side that was only supposed to compare, which is the
-move this slice keeps having to undo.
-
-    yes         one proposition, said differently
-    no          a judge looked and said they are different
-    ambiguous   a judge looked and could not tell
-    unjudged    nobody was asked
-
-The last three all mean *do not merge*, and they stay four states rather than
-two. Recording "nobody was asked" as `no` would let the trail claim later that
-something decided these were different claims, when the truth is that no
-classifier was configured — an audit trail that cannot tell those apart is worse
-than none, because it reads as evidence.
-
-The conservative direction is deliberately *not* the one `semantic_change` takes.
-There, doubt sends a revision to review, because a review nobody needed costs a
-minute. Here, doubt refuses to merge, because two claims wrongly joined lose one
-of them and nothing afterwards shows which. The safe direction follows the harm.
+Only an affirmative judgement permits a merge. Rejection, ambiguity, and the
+absence of a judgement remain distinct outcomes.
 """
 
 from __future__ import annotations
@@ -43,18 +25,16 @@ from nlght.core.knowledge.equivalence import (
 
 
 def _p(**fields: object) -> AssertionObservation:
-    """A fact's claim, which is what the judge and `settled` compare.
+    """Build an observation from proposition fields.
 
-    Facts keep `Proposition` as their representation; the `Claim` around it
-    carries the kind — a judgement never crosses one — and the sentence it was
-    read from, which is context and never the thing being compared.
+    Args:
+        **fields (object): Named proposition fields.
+
+    Returns:
+        AssertionObservation: Observation containing the proposition.
     """
     return AssertionObservation.of(Proposition(fields))
 
-
-# ---------------------------------------------------------------------------
-# Decidable without knowing what the words mean
-# ---------------------------------------------------------------------------
 
 def test_the_same_fields_are_the_same_proposition() -> None:
     assert equivalent(
@@ -100,10 +80,6 @@ def test_a_judgement_cannot_talk_a_moved_quantity_into_being_one_claim() -> None
     ) == DIFFERENT
 
 
-# ---------------------------------------------------------------------------
-# Only meaning can decide
-# ---------------------------------------------------------------------------
-
 def test_active_and_passive_are_one_claim_when_the_judgement_says_so() -> None:
     """"Spring requires Maven" and "Maven is required by Spring"."""
     assert equivalent(
@@ -115,7 +91,7 @@ def test_active_and_passive_are_one_claim_when_the_judgement_says_so() -> None:
 
 def test_renamed_roles_are_one_claim_when_the_judgement_says_so() -> None:
     # `key/value/origin` against `data_key/data_value/property_source` is a
-    # difference in extraction labels, not in the claim — and *that* is what
+    # difference in extraction labels, not in the claim, and *that* is what
     # ADR-0043 removed from identity, arriving here where it can be decided
     # rather than assumed.
     assert equivalent(
@@ -128,13 +104,7 @@ def test_renamed_roles_are_one_claim_when_the_judgement_says_so() -> None:
 
 
 def test_swapped_roles_are_two_claims_when_the_judgement_says_so() -> None:
-    """And this is why the swap is delegated rather than settled.
-
-    A swap and a rename are indistinguishable over the structure — both admit a
-    bijection of field names carrying one to the other — and they must end
-    opposite. Only knowing that `sender` and `recipient` are different roles,
-    while `sender` and `actor` are the same one, separates them.
-    """
+    """Keep swapped roles distinct when the judge rejects equivalence."""
     assert equivalent(
         _p(predicate="transfers", sender="Alice", recipient="Bob"),
         _p(predicate="transfers", sender="Bob", recipient="Alice"),
@@ -148,7 +118,7 @@ def test_a_swap_and_a_rename_are_the_same_shape() -> None:
     If a rule over the structure could tell these apart, the swap would be
     decidable and no judgement would be needed for it.
     """
-    from itertools import permutations  # noqa: PLC0415
+    from itertools import permutations
 
     def renaming_exists(left: dict[str, str], right: dict[str, str]) -> bool:
         names = list(left)
@@ -164,17 +134,8 @@ def test_a_swap_and_a_rename_are_the_same_shape() -> None:
     assert renaming_exists(*rename)
 
 
-# ---------------------------------------------------------------------------
-# What doubt does
-# ---------------------------------------------------------------------------
-
 def test_doubt_never_merges() -> None:
-    """`ambiguous` is an answer, and it is not a quiet `yes`.
-
-    Two claims wrongly joined lose one of them, and nothing afterwards shows
-    which — which is why the safe direction here is the opposite of the one
-    `semantic_change` takes with the same word.
-    """
+    """Keep ambiguous equivalence decisions from merging claims."""
     assert equivalent(
         _p(predicate="transfers", sender="Alice", recipient="Bob"),
         _p(predicate="transfers", actor="Alice", target="Bob"),
@@ -210,13 +171,7 @@ def test_all_three_ways_of_not_being_yes_leave_the_claims_apart() -> None:
 
 
 def test_a_decision_is_about_a_pair_and_says_who_made_it() -> None:
-    """It is a statement about A *and* B, so it is not a field on either.
-
-    Hanging it on A would make a statement about a relationship look like a
-    property of a thing, and the next reader would use it as one. And a verdict
-    without its judge cannot be revisited when the judge changes — which it will,
-    because the undecidable band is answered by a model whose version moves.
-    """
+    """Record an equivalence decision for a pair with its judge."""
     left = Proposition({"predicate": "transfers", "sender": "Alice", "recipient": "Bob"})
     right = Proposition({"predicate": "transfers", "actor": "Alice", "target": "Bob"})
 
@@ -231,13 +186,7 @@ def test_a_decision_is_about_a_pair_and_says_who_made_it() -> None:
 
 
 def test_a_pair_is_stored_one_way_round() -> None:
-    """"X is equivalent to Y" is the same decision as "Y is equivalent to X".
-
-    Storing both would let the corpus hold two answers to one question. That says
-    nothing about whether `transfers(A, B)` equals `transfers(B, A)` — the claims
-    are directed and the *equivalence relation between claims* is symmetric, and
-    confusing the two is the mistake this slice keeps stepping around.
-    """
+    """Store each unordered comparison pair once."""
     left = Proposition({"predicate": "transfers", "sender": "Alice", "recipient": "Bob"})
     right = Proposition({"predicate": "transfers", "actor": "Alice", "target": "Bob"})
 
@@ -257,15 +206,9 @@ def test_an_unjudged_decision_names_no_judge() -> None:
 
 
 def test_a_fingerprint_refers_to_a_structure_and_is_not_an_identity() -> None:
-    """Which is the distinction the whole module rests on.
-
-    Same fingerprint means byte-identical after normalisation. *Different*
-    fingerprints say nothing about whether the claims are one — that is the
-    question being asked, and a fingerprint that answered it would be the
-    canonical form this refuses to build.
-    """
+    """Treat a fingerprint as a structural key, not claim identity."""
     # The fingerprint belongs to the proposition, which is a *fact's*
-    # representation — not to the claim wrapper the judge is handed.
+    # representation, not to the claim wrapper the judge is handed.
     same_words = Proposition(
         {"subject": "spring", "predicate": "requires", "object": "maven"}
     )
@@ -284,38 +227,20 @@ def test_a_fingerprint_refers_to_a_structure_and_is_not_an_identity() -> None:
 
 
 def test_nothing_canonical_is_produced() -> None:
-    """The guard on the whole module.
-
-    A canonical form would be a data model chosen by the side that was only
-    supposed to compare — and where a proposition is stored is a separate,
-    undecided question.
-    """
-    import nlght.core.knowledge.equivalence as equivalence  # noqa: PLC0415
+    """Keep equivalence judgement separate from canonicalisation."""
+    import nlght.core.knowledge.equivalence as equivalence
 
     exported = {name for name in dir(equivalence) if not name.startswith("_")}
 
     assert not exported & {"canonical", "canonicalise", "merge", "normal_form", "unify"}
 
 
-# ---------------------------------------------------------------------------
-# The contract: one question, for every kind
-# ---------------------------------------------------------------------------
-
-def _observed(kind: str, text: str, **representation: object):  # noqa: ANN201
+def _observed(kind: str, text: str, **representation: object):
     return AssertionObservation(kind=kind, observed_text=text, representation=representation)
 
 
 def test_the_same_assertion_said_differently_may_continue() -> None:
-    """The case a live run found missing.
-
-        "…you have to set up the environment when building…"
-        "…the environment must be set up at build time"
-
-    Same rule, two wordings, and the model chose different fields for each — so
-    the entity key moved, every rung of the matching ladder failed, and the
-    corpus opened a second assertion and retired the first. Only a judgement
-    over the two observations can join them.
-    """
+    """Continue an assertion across different wordings when judged equivalent."""
     old = _observed("rule", "you have to set up the environment when building the application",
                     subject="aot_conditions", rule_property="environment_setup")
     new = _observed("rule", "the environment must be set up at build time",
@@ -338,15 +263,7 @@ def test_a_different_assertion_does_not_continue() -> None:
 
 
 def test_one_sentence_carrying_two_assertions_is_not_one_assertion() -> None:
-    """`observed_text` is authoritative for the wording and is not an identity.
-
-        "When shutdown is enabled, the application waits for requests
-         and rejects new requests."
-
-    Two assertions, one sentence. A judgement made on the sentence alone would
-    merge them, so the sentence is never what is compared — the representation
-    says which assertion inside it is being asked about.
-    """
+    """Keep two assertions from one sentence distinct."""
     sentence = (
         "When shutdown is enabled, the application waits for requests "
         "and rejects new requests."
@@ -377,7 +294,7 @@ def test_two_kinds_are_settled_without_a_model() -> None:
 
     assert settled(rule, fact) == DIFFERENT
     assert not may_merge(equivalent(rule, fact))
-    # Even a judge saying yes cannot join them — it is never consulted.
+    # The judge is never consulted, so even an affirmative verdict cannot join them.
     assert not may_merge(equivalent(rule, fact, verdict=SAME))
 
 

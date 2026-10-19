@@ -1,17 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Keeping a claim whole, and keeping it apart from what was decided about it.
+"""Verify stored propositions and their relationship to assertion revisions.
 
-`knowledge_propositions` holds what a *fact* says — content-addressed, so one
-claim seen twice is one row. What was judged about a pair of assertions lives in
-`knowledge_equivalence_assessments` and is tested beside it, because the two pull
-in opposite directions: content addressing wants one row per claim, while an
-audit must be able to hold two different answers to one question.
-
-The judgement half used to be keyed on propositions and is not any more — a fact
-is the only kind that has one, so three kinds could never be audited. It compares
-observations now (`test_knowledge_equivalence_audit.py`).
+Content addressing deduplicates identical structures. Equivalence decisions
+remain separate audit records because hashing cannot establish claim identity.
 """
 
 from __future__ import annotations
@@ -45,7 +38,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -53,7 +46,7 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
@@ -62,15 +55,15 @@ def _p(**fields: object) -> Proposition:
     return Proposition(fields)
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _rows(repository, model):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
 _TRANSFER = _p(predicate="transfers", sender="Alice", amount="CHF 500", recipient="Bob")
 
 #: Held equal across the sightings below on purpose. These are tests of where a
-#: proposition is *stored*, not of what continues an assertion — letting the key
+#: proposition is *stored*, not of what continues an assertion. Letting the key
 #: move would turn every one of them into a test of the matcher.
 _ENTITY = entity_key("fact", predicate="transfers", subject="alice")
 
@@ -98,10 +91,6 @@ def _lineage(
         proposition=proposition,
     )
 
-
-# ---------------------------------------------------------------------------
-# The claim
-# ---------------------------------------------------------------------------
 
 async def test_a_four_role_claim_is_stored_whole(repository) -> None:
     """The claim this whole slice began with.
@@ -131,7 +120,7 @@ async def test_nested_structure_and_list_order_survive_the_database(repository) 
 
 
 async def test_the_same_claim_seen_twice_is_one_row(repository) -> None:
-    # Content addressing. Not identity — that is the next test.
+    # This checks content addressing. The next test checks identity.
     first = await repository.record_proposition(_TRANSFER)
     second = await repository.record_proposition(_TRANSFER)
 
@@ -140,11 +129,9 @@ async def test_the_same_claim_seen_twice_is_one_row(repository) -> None:
 
 
 async def test_one_claim_said_two_ways_is_two_rows(repository) -> None:
-    """The property that keeps this table from becoming identity again.
+    """Keep differently worded propositions separate until equivalence is judged.
 
-    These may well be one claim. Whether they are is a *judgement*, recorded in
-    the other table — and a store that merged them here would have decided it by
-    hashing, which is the content-derived identity four ADRs went into removing.
+    The proposition store must not merge claims based on a content hash.
     """
     await repository.record_proposition(_p(predicate="transfers", sender="Alice"))
     await repository.record_proposition(_p(predicate="transfers", actor="Alice"))
@@ -154,7 +141,7 @@ async def test_one_claim_said_two_ways_is_two_rows(repository) -> None:
 
 async def test_a_fingerprint_carries_the_scheme_that_made_it(repository) -> None:
     # Normalisation will change, and an old value must not look like it lives in
-    # the new namespace — the same reason `entity_key_version` is its own column.
+    # the new namespace for the same reason `entity_key_version` has its own column.
     await repository.record_proposition(_TRANSFER)
 
     [row] = await _rows(repository, KnowledgeProposition)
@@ -162,16 +149,10 @@ async def test_a_fingerprint_carries_the_scheme_that_made_it(repository) -> None
     assert row.fingerprint != str(row.proposition_id)
 
 
-# ---------------------------------------------------------------------------
-# Who owns a proposition
-# ---------------------------------------------------------------------------
-
 async def test_a_revision_names_the_structure_it_recorded(repository) -> None:
-    """The link that makes a stored claim readable, and where it hangs.
+    """Store each observed structure on the revision that recorded it.
 
-    On the revision, because a revision is one *state* of a claim. Reaching it
-    from the graph node instead would have needed a `proposition_id` on the node,
-    and a node has one — so the next test could not hold.
+    A graph node cannot represent every historical structure of an assertion.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeRevision
 
@@ -183,23 +164,10 @@ async def test_a_revision_names_the_structure_it_recorded(repository) -> None:
 
 
 async def test_one_assertion_keeps_the_structure_of_every_revision(repository) -> None:
-    """The cardinality, as the thing that breaks if it is wrong.
+    """Keep distinct proposition structures readable across revisions.
 
-        Assertion A
-          Revision 1 → Proposition P1
-          Revision 2 → Proposition P2
-
-    One assertion, two states, two structures — and both still readable. A single
-    `proposition_id` on the assertion or on the graph node would pass every other
-    test here and lose exactly this: the earlier form of every claim that was
-    ever reworded, overwritten by the later one.
-
-    The rows are written directly rather than through `record_lineage`, and that
-    is the point of the test rather than a shortcut around it. Driving it through
-    the resolver would have made it depend on *why* P1 and P2 landed on one
-    assertion — today's matching semantics — and this asks only whether the store
-    can hold the shape at all. Why two structures may continue one assertion is
-    an equivalence judgement, and it gets its own test when it is wired.
+    The test writes rows directly to verify storage cardinality independent of
+    resolver matching decisions.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeRevision,
@@ -212,7 +180,7 @@ async def test_one_assertion_keeps_the_structure_of_every_revision(repository) -
     )
     assert first != second
 
-    async with AsyncSession(repository._test_engine) as session, session.begin():  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session, session.begin():
         session.add(
             KnowledgeAssertion(assertion_id="a-1", kind="fact", entity_key="k", entity_key_version="1")
         )
@@ -245,15 +213,10 @@ async def test_one_assertion_keeps_the_structure_of_every_revision(repository) -
 
 
 async def test_every_kind_carries_one(repository) -> None:
-    """A proposition is a property of a knowledge assertion, not of facts.
+    """Store a proposition for each knowledge kind.
 
-    It was fact-only, and the asymmetry produced a special path everywhere it
-    touched: a rule had no structured form, so equivalence could not judge one,
-    and a revision could name a fact's structure and nothing else's.
-
-    Generalising it invents nothing, which is why it is safe. `fields` never had
-    privileged roles — no subject, no predicate — so a rule's fields are a
-    rule's, and the platform reads none of them as meaning anything.
+    Rule, pattern, and decision fields retain their own structure without the
+    platform assigning special semantic roles to those fields.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeRevision
 
@@ -269,16 +232,20 @@ async def test_every_kind_carries_one(repository) -> None:
     assert stored.fields["rule_text"] == "Expenses above CHF 500 require approval."
 
 
-# ---------------------------------------------------------------------------
-# A verdict may not outlive the premise it was reached under
-# ---------------------------------------------------------------------------
-
 _OTHER = _p(predicate="transfers", actor="Alice", amount="CHF 500", beneficiary="Bob")
 _OTHER_ENTITY = entity_key("fact", predicate="transfers", actor="alice")
 
 
-async def _standing_in(repository, slot_id: str) -> str:  # noqa: ANN001
-    """One assertion already recorded, in the slot named."""
+async def _standing_in(repository, slot_id: str) -> str:
+    """One assertion already recorded, in the slot named.
+
+    Args:
+        repository (Any): Repository used by the test.
+        slot_id (str): Identifier of the claim slot.
+
+    Returns:
+        str: Identifier of the assertion currently occupying the slot.
+    """
     placed = await repository.record_lineage(
         _lineage(_TRANSFER, text="Alice transfers CHF 500 to Bob", slot_id=slot_id)
     )
@@ -286,27 +253,15 @@ async def _standing_in(repository, slot_id: str) -> str:  # noqa: ANN001
 
 
 async def test_a_verdict_applies_only_where_its_candidate_still_stands(repository) -> None:
-    """The window between judging and writing, closed.
+    """Apply an equivalence verdict only to the slot it assessed.
 
-    The judgement is formed outside the transaction, against the slot this
-    section is *expected* to resolve to; the authoritative placement happens
-    inside it and can land elsewhere — the registry moved between the two, or
-    recovery answered differently.
-
-        pre-resolution     → slot A, and the judge is asked about slot A's claims
-        verdict            → yes
-        authoritative      → slot B
-        applied?           → no
-
-    Otherwise a verdict reached about one slot continues an assertion standing in
-    another, which is precisely what scoping the question to a slot was for. The
-    assessment stays in the audit either way: the judge really was asked and
-    really did answer, and **judged yes is not applied yes**.
+    The authoritative slot can change between judgment and persistence. Keep
+    the judgment in the audit even when its verdict cannot be applied.
     """
     standing = await _standing_in(repository, "slot-a")
     judge = Judge(classifier="proposition-equivalence", model="m", version="1")
     # The judgement is about two *observations*, which is the unit every kind
-    # has — the proposition beside it is only a fact's representation.
+    # has. The proposition beside it is a representation of that fact.
     left = await repository.record_observation(
         AssertionObservation.of(_TRANSFER, observed_text="Alice transfers CHF 500 to Bob"),
         run_id="run-1", document_id="doc-transfers", slot_id="slot-a",
@@ -356,31 +311,13 @@ async def test_a_verdict_does_apply_where_its_candidate_still_stands(repository)
     assert len(await _rows(repository, KnowledgeAssertion)) == 1
 
 
-# ---------------------------------------------------------------------------
-# Every stored claim is reachable
-# ---------------------------------------------------------------------------
-
 async def test_a_claim_with_no_revision_is_refused_rather_than_stored_silently(
     repository,
 ) -> None:
-    """The invariant, as the thing that makes it impossible to violate.
+    """Reject a fact whose structure has no revision to attach to.
 
-    A fact keeps its structure on the revision a sighting produces. Written
-    without lineage it produced a graph row with no payload, no proposition and
-    no revision — a node asserting nothing, which is a quieter failure than
-    losing the claim rather than a milder one.
-
-    Measured before it was closed:
-
-        knowledge               rows=1     ← a node that says nothing
-        knowledge_facts         rows=0
-        knowledge_revisions     rows=0
-        knowledge_propositions  rows=0     ← the claim is nowhere
-
-    By the time a write reaches the repository this is a programming error and
-    not a data condition: extraction rejects a fact that cannot name what it
-    claims, and the persist step counts and skips one whose evidence names no
-    document. So it raises rather than storing something unreachable.
+    Without lineage, the graph node would contain no readable proposition or
+    payload. Treat this as a programming error.
     """
     from nlght.core.knowledge import KnowledgeWrite
 
@@ -404,13 +341,9 @@ async def test_a_claim_with_no_revision_is_refused_rather_than_stored_silently(
 async def test_a_kind_without_a_proposition_still_stores_without_lineage(
     repository,
 ) -> None:
-    """And the guard stops exactly there.
+    """Allow non-fact legacy claims without lineage or propositions.
 
-    `rule`, `pattern` and `decision` *are* their payloads, so one written without
-    lineage is still completely readable — it has no structure that needs a
-    revision to live on. A corpus written before entity keys existed is full of
-    them, and refusing those would be taking knowledge back to fix a problem
-    they do not have.
+    Rule, pattern, and decision payloads remain readable without a revision.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeRule
     from nlght.core.knowledge import KnowledgeWrite, RulePayload
@@ -432,22 +365,11 @@ async def test_a_kind_without_a_proposition_still_stores_without_lineage(
     assert len(await _rows(repository, KnowledgeRule)) == 1
 
 
-# ---------------------------------------------------------------------------
-# Retrieval reads one thing, not four
-# ---------------------------------------------------------------------------
-
 async def test_retrieval_answers_from_the_proposition_for_every_kind(repository) -> None:
-    """Otherwise the model is unified and the reading is not.
+    """Read current claims from their revision propositions across all kinds.
 
-    Before, retrieval reached the proposition for a fact that had no legacy row
-    and the kind-specific table for everything else — so what a caller got back
-    depended on which kind it asked about and whether that kind's projection had
-    survived. Four tables, four answers, one of them the whole claim and three
-    of them a shape.
-
-    A revision names its proposition for every kind now, so that is what
-    retrieval reads. The kind-specific tables remain for consumers that want one
-    of those shapes; they are not where the claim lives.
+    Kind-specific tables remain projections for consumers that need their
+    particular shapes.
     """
     from nlght.core.knowledge import entity_key
 
@@ -477,7 +399,7 @@ async def test_retrieval_answers_from_the_proposition_for_every_kind(repository)
         stored, placed = await repository.persist(
             KnowledgeWrite(
                 identity=f"fp-{kind}",
-                # The projection, derived — absent for a claim it cannot hold.
+                # The derived projection is absent for a claim it cannot hold.
                 payload=legacy_payload(kind, proposition),
                 _kind=kind,
                 proposition=proposition,
@@ -495,10 +417,6 @@ async def test_retrieval_answers_from_the_proposition_for_every_kind(repository)
         [stored] = await repository.resolve([identity], include_quarantined=True)
         assert stored.payload == fields, f"{kind} did not come back whole"
 
-
-# ---------------------------------------------------------------------------
-# What happens to the revisions that predate the symmetry
-# ---------------------------------------------------------------------------
 
 async def test_a_new_revision_without_a_proposition_is_refused(repository) -> None:
     """Every revision created from now on has one, for every kind.
@@ -523,23 +441,10 @@ async def test_a_new_revision_without_a_proposition_is_refused(repository) -> No
 async def test_a_historical_revision_stays_readable_through_its_payload(
     repository,
 ) -> None:
-    """The 19 rows a live corpus already has, and what is owed to them.
+    """Read historical revisions without propositions from their stored payloads.
 
-    They were written before every kind had a proposition, so their
-    `proposition_id` is `NULL` and always will be. Retrieval falls back to the
-    kind's payload for those, which still holds everything they ever said.
-
-    What must **never** happen is a backfill from that payload. Not because the
-    payload lost something — a stored projection *is* lossless — that is
-    what `Represented | NotRepresentable` guarantees, and a payload that could
-    not hold the whole claim was never written. What is not guaranteed is the
-    inverse: reading a payload back does not reproduce the proposition a past run
-    actually produced. The same three columns can be reached from more than one
-    structure, and the run that wrote them is gone.
-
-    So a backfilled proposition is a plausible guess wearing the clothes of an
-    observation. A missing proposition is a gap; a fabricated one is a lie in an
-    audit.
+    A backfill would guess at an observation the original extraction never
+    recorded. Retrieval preserves the old data without fabricating provenance.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import (
         Knowledge,
@@ -566,7 +471,7 @@ async def test_a_historical_revision_stays_readable_through_its_payload(
 
     # Simulate the historical state: the revision loses its proposition, exactly
     # as the rows written before this change have it.
-    async with AsyncSession(repository._test_engine) as session, session.begin():  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session, session.begin():
         for revision in (await session.execute(select(KnowledgeRevision))).scalars():
             revision.proposition_id = None
 
@@ -584,10 +489,10 @@ def test_nothing_derives_a_proposition_from_a_payload() -> None:
     way, and nothing may: a payload is a lossy shape, so a proposition built from
     one is a structure nobody extracted.
     """
-    import inspect  # noqa: PLC0415
+    import inspect
 
-    from nlght.adapters.outbound.persistence import knowledge_repository  # noqa: PLC0415
-    from nlght.core.knowledge import legacy  # noqa: PLC0415
+    from nlght.adapters.outbound.persistence import knowledge_repository
+    from nlght.core.knowledge import legacy
 
     for module in (legacy, knowledge_repository):
         source = inspect.getsource(module)

@@ -148,13 +148,13 @@ def _fake_torch(
 def test_an_explicit_device_is_passed_through_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Naming cuda:1 is how a deployment keeps the other card free; the client
+    # Naming cuda:1 is how a deployment keeps the other card free. The client
     # must not second-guess it.
     #
     # What torch reports is *stated* here rather than inherited from whatever
     # wheel the machine happens to have. Left to the machine, this exact
-    # assertion passed on a GPU box and failed on a laptop — the client refuses a
-    # CUDA device it cannot provide, correctly — which is a test of the hardware
+    # assertion passed on a GPU box and failed on a laptop. The client refuses a
+    # CUDA device it cannot provide, correctly, which is a test of the hardware
     # wearing the name of a test of the pass-through.
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda=True, mps=False, devices=2))
     loader = _RecordingLoader()
@@ -168,7 +168,7 @@ def test_a_device_index_that_does_not_exist_fails_loudly(
 ) -> None:
     # `is_available()` answers "is there a GPU", not "is there *that* GPU", so a
     # single-card machine accepted `cuda:1` and failed deep inside model loading
-    # — past the point this check exists to fail at. Off by one is the ordinary
+    # after the intended validation point. Off by one is the ordinary
     # way to get an index wrong.
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda=True, mps=False, devices=1))
 
@@ -286,7 +286,7 @@ def test_a_loader_without_the_keywords_still_works() -> None:
 #
 # The keywords are negotiated against the installed signature rather than
 # discovered by being refused. Catching TypeError from the call and retrying as
-# `factory(name)` meant one unsupported keyword dropped *all* of them — so a
+# `factory(name)` meant one unsupported keyword dropped *all* of them, so a
 # named CUDA device became the CPU, a cache directory became the default one,
 # and `offline: always` reached the network on an air-gapped machine. Each is
 # the failure its own setting exists to prevent, arriving through a
@@ -361,7 +361,7 @@ def test_auto_offline_on_such_a_library_loads_once_and_not_twice() -> None:
 def test_a_device_chosen_by_auto_is_allowed_to_be_dropped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Nobody asked for this device; the library picking its own is not a broken
+    # Nobody asked for this device. The library picking its own is not a broken
     # promise. Only a *configured* one may not be silently discarded.
     monkeypatch.setitem(sys.modules, "torch", _fake_torch(cuda=True, mps=False))
     loader = _NameOnlyLoader()
@@ -396,7 +396,7 @@ def test_a_cpu_only_torch_build_is_named_as_the_reason(
 def test_a_cuda_build_with_no_visible_device_reads_differently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The other cause, and it needs a different action — the machine, not the wheel.
+    # This failure belongs to the machine rather than the installed wheel.
     from nlght.adapters.outbound.embedding.sentence_transformers import resolve_device
 
     monkeypatch.setitem(
@@ -447,18 +447,7 @@ def test_a_configured_cpu_is_never_second_guessed(
 
 
 def test_the_packaging_offers_a_torch_build_per_accelerator() -> None:
-    """The property, not the CUDA release it currently points at.
-
-    "Install the embedding extra" must not leave which torch build you get up to
-    the platform's default wheel — that is what the two extras are for, and each
-    has to reach its own explicit index.
-
-    Which CUDA line that index carries is deliberately *not* asserted. pyproject
-    says moving to a newer driver is "a change to this URL and nothing else", and
-    a test naming `pytorch-cu124` made that false: bumping the URL would have
-    failed a test about packaging structure, for a reason that has nothing to do
-    with the structure. Names are read out of the sources rather than typed in.
-    """
+    """Offer explicit PyTorch builds for each supported accelerator."""
     import tomllib
     from pathlib import Path
 
@@ -489,11 +478,11 @@ def test_the_packaging_offers_a_torch_build_per_accelerator() -> None:
         # move.
         assert "download.pytorch.org" in indexes[index]["url"], index
 
-    # One machine has one torch build; without this the lock cannot be solved.
+    # One machine has one torch build. Without this the lock cannot be solved.
     assert [{"extra": "embedding-cuda"}, {"extra": "embedding-cpu"}] in uv["conflicts"]
 
     # An accelerator build is a property of the machine, not a capability, so it
-    # must stay out of the everything-extra — which would otherwise drag a
+    # must stay out of the everything-extra, which would otherwise drag a
     # multi-gigabyte CUDA wheel onto every machine without a GPU.
     assert "embedding-cuda" not in extras["all"][0]
     assert "embedding-cpu" not in extras["all"][0]

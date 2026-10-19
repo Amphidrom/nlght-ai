@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from nlght.core.errors.errors import (
     ToolActionDeniedError,
@@ -23,11 +24,11 @@ from nlght.core.tools.action import (
     ActionDecisionResult,
     ActionExecutionContext,
     ActionResolutionContext,
+    ActionReview,
     ApprovalDecision,
     ConcreteAction,
     ExecutionCapabilities,
     JsonValue,
-    PendingAction,
     ToolArgumentBinder,
     action_fingerprint,
 )
@@ -91,7 +92,16 @@ def _matches_type(value: object, expected: str) -> bool:
 
 
 def _validate_json_schema(value: object, schema: Mapping[str, Any], path: str) -> None:
-    """Validate the deterministic JSON-Schema subset exposed by ToolParameter."""
+    """Check a value against the supported tool-parameter schema subset.
+
+    Args:
+        value (object): Value to validate, including nested values.
+        schema (Mapping[str, Any]): Supported JSON Schema keywords and values.
+        path (str): Argument path used in validation errors.
+
+    Raises:
+        ToolArgumentsError: The value or schema violates the supported subset.
+    """
     expected = schema.get("type")
     if expected is not None:
         if not isinstance(expected, str) or not _matches_type(value, expected):
@@ -142,7 +152,20 @@ def bind_tool_arguments(
     parameters: list[ToolParameter],
     proposed: Mapping[str, Any],
 ) -> dict[str, JsonValue]:
-    """Validate once and return the exact JSON arguments that may execute."""
+    """Bind declared defaults and validate the arguments passed to a tool.
+
+    Args:
+        parameters (list[ToolParameter]): Declared tool parameters.
+        proposed (Mapping[str, Any]): Arguments proposed by the caller.
+
+    Returns:
+        dict[str, JsonValue]: Independent JSON-compatible argument snapshot
+        used for both authorization and execution.
+
+    Raises:
+        ToolArgumentsError: An argument is missing, unknown, invalid, or cannot
+            be represented as finite JSON.
+    """
     declared = {parameter.name: parameter for parameter in parameters}
     unknown = sorted(set(proposed) - set(declared))
     if unknown:
@@ -182,17 +205,68 @@ def bind_tool_arguments(
     return effective
 
 
+_T = TypeVar("_T")
+
+
+class _DeadlineExceeded(Exception):
+    """The decision arrived after its deadline, or not at all."""
+
+
+async def _before_deadline(seconds: float, call: Awaitable[_T]) -> _T:
+    """Reject a policy or approval answer received after its deadline.
+
+    Args:
+        seconds (float): Allowed time measured on the event loop clock.
+        call (Awaitable[_T]): Policy or approval call to await.
+
+    Returns:
+        _T: Answer received within the deadline.
+
+    Raises:
+        _DeadlineExceeded: The call times out or answers after the deadline.
+
+    Notes:
+        A late answer remains invalid if the implementation swallows
+        cancellation or blocks the event loop (ADR-0073).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    try:
+        async with asyncio.timeout_at(deadline):
+            result = await call
+    except TimeoutError:
+        # A TimeoutError of the implementation's own before the deadline is
+        # an ordinary failure, not this deadline.
+        if loop.time() >= deadline:
+            raise _DeadlineExceeded from None
+        raise
+    if loop.time() > deadline:
+        raise _DeadlineExceeded
+    return result
+
+
 class ActionGate:
-    """Authorizes and invokes model-callable contracts through one final path."""
+    """Authorizes and invokes model-callable contracts through one final path.
+
+    With ``enabled=False`` the policy and the approval adapter are never asked
+    and every bound action executes. Validation, binding and execution of the
+    bound snapshot are unchanged (ADR-0073).
+    """
 
     def __init__(
         self,
         *,
         policy: ActionPolicy,
         approval: ActionApprovalPort | None = None,
+        enabled: bool = True,
+        policy_timeout_seconds: float = 30.0,
+        approval_timeout_seconds: float = 300.0,
     ) -> None:
         self._policy = policy
         self._approval = approval
+        self._enabled = enabled
+        self._policy_timeout_seconds = policy_timeout_seconds
+        self._approval_timeout_seconds = approval_timeout_seconds
 
     def prepare(
         self,
@@ -249,7 +323,22 @@ class ActionGate:
         )
 
     async def execute(self, prepared: PreparedToolInvocation) -> object:
-        decision = await self._decide(prepared)
+        if not self._enabled:
+            self._log(
+                prepared,
+                ActionDecisionResult(ActionDecision.ALLOW, ActionDecisionReason.AUTHORIZATION_DISABLED),
+            )
+            return await self._invoke(prepared)
+
+        # One review for both: the policy and the approval adapter judge the
+        # same immutable snapshot that executes below.
+        review = ActionReview(
+            context=prepared.context,
+            action=prepared.action,
+            action_fingerprint=prepared.fingerprint,
+            effective_arguments_json=prepared.effective_arguments_json,
+        )
+        decision = await self._decide(review)
         approval_id: str | None = None
 
         if decision.decision == ActionDecision.DENY:
@@ -271,14 +360,20 @@ class ActionGate:
                     prepared.context.tool_subject,
                     denied.reason.value,
                 )
-            pending = PendingAction(
-                context=prepared.context,
-                action=prepared.action,
-                action_fingerprint=prepared.fingerprint,
-                effective_arguments_json=prepared.effective_arguments_json,
-            )
             try:
-                approval = await self._approval.approve(pending)
+                approval = await _before_deadline(
+                    self._approval_timeout_seconds, self._approval.approve(review),
+                )
+            except _DeadlineExceeded:
+                denied = ActionDecisionResult(
+                    ActionDecision.DENY,
+                    ActionDecisionReason.APPROVAL_TIMEOUT,
+                )
+                self._log(prepared, denied)
+                raise ToolActionDeniedError(
+                    prepared.context.tool_subject,
+                    denied.reason.value,
+                ) from None
             except Exception as exc:
                 denied = ActionDecisionResult(
                     ActionDecision.DENY,
@@ -312,17 +407,31 @@ class ActionGate:
                 )
 
         self._log(prepared, decision, approval_id=approval_id)
+        return await self._invoke(prepared)
+
+    @staticmethod
+    async def _invoke(prepared: PreparedToolInvocation) -> object:
         arguments = json.loads(prepared.effective_arguments_json)
         return await prepared.contract._execute_bound(arguments)
 
-    async def _decide(self, prepared: PreparedToolInvocation) -> ActionDecisionResult:
+    async def _decide(self, review: ActionReview) -> ActionDecisionResult:
         try:
-            result = await self._policy.evaluate(prepared.action, prepared.context)
+            result = await _before_deadline(
+                self._policy_timeout_seconds, self._policy.evaluate(review),
+            )
+        except _DeadlineExceeded:
+            logger.warning(
+                "action.policy_timeout | request_id=%s tool=%s timeout_s=%s",
+                review.context.request_id,
+                review.context.tool_subject,
+                self._policy_timeout_seconds,
+            )
+            return ActionDecisionResult(ActionDecision.DENY, ActionDecisionReason.POLICY_TIMEOUT)
         except Exception as exc:
             logger.warning(
                 "action.policy_error | request_id=%s tool=%s error_type=%s",
-                prepared.context.request_id,
-                prepared.context.tool_subject,
+                review.context.request_id,
+                review.context.tool_subject,
                 type(exc).__name__,
             )
             return ActionDecisionResult(ActionDecision.DENY, ActionDecisionReason.POLICY_ERROR)
@@ -342,7 +451,8 @@ class ActionGate:
         logger.info(
             "action.decision | request_id=%s correlation_id=%s workflow=%s principal=%s "
             "tool=%s side_effect=%s egress=%s scope=%s execution=%s decision=%s "
-            "reason=%s action_id=%s approval_id=%s external_untrusted_input=%s",
+            "reason=%s action_id=%s approval_id=%s external_untrusted_input=%s "
+            "untrusted_sources=%d",
             context.request_id,
             context.correlation_id,
             context.workflow,
@@ -357,4 +467,5 @@ class ActionGate:
             prepared.fingerprint,
             approval_id,
             context.has_external_untrusted_input,
+            len(context.exposure.untrusted_sources),
         )

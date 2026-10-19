@@ -33,10 +33,10 @@ class ExecutionSubmission:
     source_config_revision: str | None = None
     max_attempts: int = 3
     # Snapshot of the workflow's concurrency policy at submission. When true, at
-    # most one execution of this workflow runs at a time — enforced at claim.
+    # most one execution of this workflow runs at a time, enforced at claim.
     exclusive: bool = False
     # The execution that fanned this one out, if any. A child is an ordinary
-    # execution — claimed, leased, and retried like any other — and the link
+    # execution that is claimed, leased, and retried like any other. The link
     # exists so the work of one logical run remains findable once it has been
     # spread across workers.
     parent_execution_id: uuid.UUID | None = None
@@ -89,8 +89,8 @@ class ExecutionRecord:
 class FanOutSummary:
     """How far the children of one fanned-out run have got.
 
-    The run that fanned them out has long finished — it submits and ends rather
-    than holding a worker while its children queue behind it — so this is how
+    The run that fanned them out has long finished. It submits and ends rather
+    than holding a worker while its children queue behind it. This is how
     anyone asks whether the logical run is done.
     """
 
@@ -116,16 +116,19 @@ class FanOutSummary:
 
     @property
     def settled(self) -> bool:
-        """Whether every child reached a terminal state."""
+        """Detect a completed nonempty fan-out.
+
+        Returns:
+            bool: True when at least one child exists and none is pending.
+        """
         return self.total > 0 and self.pending == 0
 
     @property
     def finished_at(self) -> datetime | None:
-        """When the fanned-out work actually ended, or None while it has not.
+        """Report completion time only after all children settle.
 
-        Deliberately not the maximum completion seen so far: with children still
-        queued, the latest one to finish is not the last one, and showing it as
-        a finish time is how a run half done reads as a run over.
+        Returns:
+            datetime | None: Latest completion timestamp, or None while work remains.
         """
         return self.last_completed_at if self.settled else None
 

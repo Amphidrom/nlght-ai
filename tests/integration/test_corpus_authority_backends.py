@@ -105,7 +105,11 @@ async def connections():
 
 @pytest.fixture
 def target() -> str:
-    """A fresh collection and index per test, so tests cannot see each other."""
+    """A fresh collection and index per test, so tests cannot see each other.
+
+    Returns:
+        str: Isolated collection and index name for this test.
+    """
     return f"it-{uuid.uuid4().hex[:12]}"
 
 
@@ -222,7 +226,18 @@ async def _ingest(
     snapshot: str,
     fingerprint: str | None = None,
 ) -> str:
-    """One document through the real write path, corpus record included."""
+    """One document through the real write path, corpus record included.
+
+    Args:
+        repository (SqlAlchemyIngestionRepository): Repository used by the test.
+        writer (DataIndexWriterTool): Knowledge writer used by the test.
+        document (Any): Document or document identifier for the test.
+        snapshot (str): Document snapshot to ingest.
+        fingerprint (str | None): Projection fingerprint for the write.
+
+    Returns:
+        str: Identifier of the ingested document revision.
+    """
     await repository.commit_snapshot(
         SnapshotCommit(
             snapshot_key=snapshot,
@@ -260,14 +275,9 @@ async def _ingest(
             projection_fingerprint=mark,
         )
     )
-    # Documents are written with refresh=False; a search would otherwise race it.
+    # Documents are written with refresh=False. A search would otherwise race it.
     writer.observed_counts()
     return generation
-
-
-# ---------------------------------------------------------------------------
-# PostgreSQL: the corpus holds the text, and knows which revision is published
-# ---------------------------------------------------------------------------
 
 
 async def test_a_revision_round_trips_through_a_real_driver(
@@ -305,16 +315,11 @@ async def test_the_published_revision_is_what_the_corpus_says_it_is(
 
     assert published == {first.document_id: second.processing_revision_id}
     assert first.processing_revision_id != second.processing_revision_id
-    # The older revision is still stored — history is kept, it is just not current.
+    # The older revision remains stored as history but is no longer current.
     stored = await repository.read_revision_contents(
         [(first.document_id, first.processing_revision_id)]
     )
     assert stored[(first.document_id, first.processing_revision_id)] == BODY
-
-
-# ---------------------------------------------------------------------------
-# Qdrant: the locator survives a real upsert and a real search
-# ---------------------------------------------------------------------------
 
 
 async def test_a_chunk_locator_survives_a_real_upsert_and_search(
@@ -341,11 +346,6 @@ async def test_a_chunk_locator_survives_a_real_upsert_and_search(
     # And the span the locator names is really that chunk's text.
     original = next(c for c in document.chunks if c.chunk_id == hit.carrier_id)
     assert BODY[hit.provenance.start_offset : hit.provenance.end_offset] == original.content
-
-
-# ---------------------------------------------------------------------------
-# The reindex decision, against the real recorded state
-# ---------------------------------------------------------------------------
 
 
 async def test_a_changed_projection_fingerprint_forces_a_real_rewrite(
@@ -393,28 +393,18 @@ async def test_a_changed_projection_fingerprint_forces_a_real_rewrite(
     assert after is not None and after.projection_fingerprint == "projection-B"
 
 
-# ---------------------------------------------------------------------------
-# End to end: what a model would be shown
-# ---------------------------------------------------------------------------
-
-
 async def test_a_superseded_candidate_never_leaves_the_store(
     target: str,
     repository: SqlAlchemyIngestionRepository,
     writer: DataIndexWriterTool,
     store: DataStoreTool,
 ) -> None:
-    """The real version of the write-then-prune window.
-
-    The corpus is moved to a new revision while the index still holds the old
-    one's chunks — which is exactly the state a rewrite passes through. Nothing
-    on the old revision may reach a ranking.
-    """
+    """Filter stale index candidates before they leave the store."""
     document = _process("Stale.java", BODY, "r1", target)
     await _ingest(repository, writer, document, snapshot=f"snap-{uuid.uuid4()}")
 
     # Publish a new revision *without* touching the index, leaving the index on
-    # the old one — the window, held open.
+    # the old one while the write-and-prune window is held open.
     moved = _process("Stale.java", BODY + "\nnewly added", "r2", target)
     await repository.commit_snapshot(
         SnapshotCommit(
@@ -437,17 +427,12 @@ async def test_the_answer_is_cut_from_postgresql_and_not_from_the_payload(
     writer: DataIndexWriterTool,
     store: DataStoreTool,
 ) -> None:
-    """The whole contract, end to end, on real backends.
-
-    The corpus is then edited underneath the index — same revision id, different
-    stored text — so payload and corpus disagree by construction. Whatever comes
-    back has to be the corpus's version, or the index is still the authority.
-    """
+    """Read answer text from the corpus when index payload text disagrees."""
     document = _process("Answer.java", BODY, "r1", target)
     await _ingest(repository, writer, document, snapshot=f"snap-{uuid.uuid4()}")
 
     marked = BODY.replace("keystore password", "KEYSTORE-FROM-POSTGRES")
-    engine = store._connections.engine(PG_URL, pool_pre_ping=True)  # noqa: SLF001
+    engine = store._connections.engine(PG_URL, pool_pre_ping=True)
     from sqlalchemy import text as sql
 
     async with engine.begin() as conn:
@@ -465,7 +450,7 @@ async def test_the_answer_is_cut_from_postgresql_and_not_from_the_payload(
     for hit in hits:
         assert "KEYSTORE-FROM-POSTGRES" in hit.content, (
             "the answer came from the index payload, which still says 'keystore "
-            "password' — the projection is being used as the authority"
+            "password'. The projection is being used as the authority"
         )
 
     # And a chunk's answer is the span, not the whole document.
@@ -489,7 +474,7 @@ async def test_a_revision_the_corpus_cannot_answer_is_not_faked(
     document = _process("Empty.java", BODY, "r1", target)
     await _ingest(repository, writer, document, snapshot=f"snap-{uuid.uuid4()}")
 
-    engine = store._connections.engine(PG_URL, pool_pre_ping=True)  # noqa: SLF001
+    engine = store._connections.engine(PG_URL, pool_pre_ping=True)
     from sqlalchemy import text as sql
 
     async with engine.begin() as conn:

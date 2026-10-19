@@ -70,7 +70,7 @@ def _writer(client: _FakeOpenSearch, monkeypatch: pytest.MonkeyPatch) -> Knowled
     return KnowledgeIndexWriterTool(
         name="knowledge-index",
         config={
-            # Lazy engine — never connected in this test.
+            # Lazy engine, never connected in this test.
             "pg_url": "sqlite+aiosqlite:///:memory:",
             "os_url": "http://opensearch:9200",
         },
@@ -94,7 +94,7 @@ async def test_a_refused_write_raises_instead_of_being_logged(
 ) -> None:
     # It used to catch and log, leaving the caller unable to tell a written
     # assertion from an unwritten one. The caller is what decides whether the
-    # assertion counts as persisted — and once approval is what triggers
+    # assertion counts as persisted, and once approval is what triggers
     # indexing, a swallowed failure is an assertion PostgreSQL calls retrievable
     # and search cannot find.
     writer = _writer(_FakeOpenSearch(fail_index=True), monkeypatch)
@@ -123,17 +123,10 @@ async def test_removing_what_is_already_gone_is_not_a_failure(
     assert client.deleted[0]["ignore"] == [404]
 
 
-# ---------------------------------------------------------------------------
-# Readiness: "persisted" may not be true while "findable" is impossible
-# ---------------------------------------------------------------------------
-
 class _FakeIndices:
-    """The index-management half of an OpenSearch client, with a controllable store.
+    """An index-management fake with controllable existing indexes and create failures.
 
-    `present` is the deployment's actual state, so a test can start with some
-    indexes already there and a create can be made to fail while another writer
-    puts the index in place — which is the race the real client cannot avoid.
-    """
+    It can simulate another writer creating an index during a race."""
 
     def __init__(
         self,
@@ -156,7 +149,14 @@ class _FakeIndices:
         return index in self.present
 
     def get_mapping(self, *, index: str) -> dict[str, Any]:
-        """The mapping a deployment actually has, which may predate a field."""
+        """The mapping a deployment actually has, which may predate a field.
+
+        Args:
+            index (str): Index name used by the test.
+
+        Returns:
+            dict[str, Any]: Index mapping returned by the test backend.
+        """
         if index in self.stale:
             return {index: {"mappings": {"properties": {"subject": {"type": "text"}}}}}
         return {
@@ -167,7 +167,7 @@ class _FakeIndices:
             }
         }
 
-    def create(self, *, index: str, body: dict[str, Any]) -> None:  # noqa: ARG002
+    def create(self, *, index: str, body: dict[str, Any]) -> None:
         self.create_attempts.append(index)
         if index in self._raced:
             # Another writer got there between our `exists` and this call.
@@ -201,13 +201,7 @@ def test_an_index_that_exists_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> 
 def test_an_index_that_predates_the_wording_is_reported_as_degraded(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A search that quietly got worse is the hardest regression to find.
-
-    An index created before the wording was indexed still accepts every document
-    and answers every query — it simply cannot rank on `observed_text`. Nothing
-    fails, so nothing says so, and months later somebody debugs relevance while
-    the only problem is a rebuild nobody ran.
-    """
+    """Report an index as degraded when its mapping lacks observed wording."""
     indices = _FakeIndices(present=set(_KINDS), stale=set(_KINDS))
 
     with caplog.at_level("WARNING"):
@@ -233,7 +227,7 @@ def test_a_stale_index_is_not_failed_and_not_migrated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Degraded is allowed on purpose: the corpus is still searchable through its
-    # structured fields and keywords. What is not allowed is being silent — and
+    # structured fields and keywords. What is not allowed is being silent, and
     # rewriting somebody's mapping underneath them is a migration, not a check.
     indices = _FakeIndices(present=set(_KINDS), stale=set(_KINDS))
 
@@ -268,15 +262,7 @@ def test_only_the_missing_indexes_are_created(monkeypatch: pytest.MonkeyPatch) -
 def test_a_failed_create_is_raised_rather_than_logged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The whole point of the slice.
-
-    It used to catch and log, so a run committed to PostgreSQL, indexed into a
-    mapping that was never applied, and reported success — "persisted" true
-    while "findable" was structurally impossible.
-
-    There is no best effort here: every kind's index is required, because a kind
-    whose mapping is missing is a kind no query can find.
-    """
+    """Raise an index-creation failure before reporting persistence success."""
     indices = _FakeIndices(fail_create={"rules"})
 
     with pytest.raises(RuntimeError, match="refused the create"):
@@ -286,16 +272,7 @@ def test_a_failed_create_is_raised_rather_than_logged(
 def test_a_failed_create_is_retried_rather_than_remembered_as_done(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The second defect, and the one that made the first unrecoverable.
-
-    `mark_bootstrapped` ran on the failure path too, so the next call in the
-    process skipped the index it had just failed to create — the error was not
-    ignored but cached as success. A transient failure therefore became
-    permanent for the lifetime of the worker.
-
-    Retrying must also leave nothing half-made: the second attempt creates
-    exactly the index the first could not.
-    """
+    """Retry index creation after a failed bootstrap attempt."""
     indices = _FakeIndices(fail_create={"rules"})
     connections = _FakeConnections(_FakeCluster(indices))
     monkeypatch.setattr(writer_module, "_HAS_OPENSEARCH", True)
@@ -307,8 +284,8 @@ def test_a_failed_create_is_retried_rather_than_remembered_as_done(
     with pytest.raises(RuntimeError):
         writer.ensure_ready()
 
-    # The outage clears; the same process tries again through the same memo.
-    indices._fail_create = set()  # noqa: SLF001
+    # The outage clears. The same process tries again through the same memo.
+    indices._fail_create = set()
     writer.ensure_ready()
 
     assert set(indices.present) == _KINDS
@@ -316,15 +293,9 @@ def test_a_failed_create_is_retried_rather_than_remembered_as_done(
 
 
 def test_losing_the_create_race_is_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two workers bootstrapping one empty deployment.
+    """Accept another worker creating the index during bootstrap.
 
-    Both see the index missing and both try; the second is told it already
-    exists. That is the outcome it wanted, so it is success — and recognised by
-    asking again rather than by matching an exception type, because
-    `opensearchpy` is untyped and its error classes move between versions.
-
-    At most one create takes effect, and neither writer raises.
-    """
+    The writer checks current index state after the create race."""
     indices = _FakeIndices(created_by_someone_else=set(_KINDS))
 
     _writer(_FakeCluster(indices), monkeypatch).ensure_ready()
@@ -332,10 +303,6 @@ def test_losing_the_create_race_is_not_a_failure(monkeypatch: pytest.MonkeyPatch
     assert indices.created == []          # nobody here created one
     assert set(indices.present) == _KINDS  # and they are all there
 
-
-# ---------------------------------------------------------------------------
-# text_all is a bag, and a stable one
-# ---------------------------------------------------------------------------
 
 def _claim(observed: str = "", **fields: str) -> KnowledgeObject:
     now = datetime(2026, 8, 29, tzinfo=UTC)
@@ -350,17 +317,7 @@ def _claim(observed: str = "", **fields: str) -> KnowledgeObject:
 async def test_the_indexed_text_is_what_the_source_said(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wording is indexed, not a bag assembled from the field values.
-
-    `text_all` used to hold every value of the payload joined together —
-
-        graceful_shutdown_enabled active_requests waits_for application
-
-    which is not language. It carries no phrase, no grammar and no synonym, it
-    cannot be quoted back to a reader, and for a pattern it was literally
-    `description + pattern_name`, both already indexed beside it. What a lexical
-    index should rank on is the sentence the claim was read from.
-    """
+    """Index observed source wording instead of concatenated structure fields."""
     client = _FakeOpenSearch()
     sentence = "When graceful shutdown is enabled, the application waits for active requests."
 
@@ -403,7 +360,7 @@ async def test_a_claim_with_no_recorded_wording_is_indexed_without_one(
 ) -> None:
     # Written before revisions existed, or by a path that keeps none. Its
     # structure is still searchable, and nothing assembles a sentence to fill
-    # the gap — which is the one thing ADR-0048 forbids.
+    # the gap, which is the one thing ADR-0048 forbids.
     client = _FakeOpenSearch()
 
     await _writer(client, monkeypatch).index(

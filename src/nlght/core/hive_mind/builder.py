@@ -1,27 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""MentalModelBuilder — assembles a MentalModel from store snapshots.
-
-Pure logic — no LLM call.  The optional ``summary`` string comes from
-an LLM call in OrientStep and is passed in from outside.
-
-Usage::
-
-    snapshot = ContextSnapshot(
-        recent_turns  = coordinator.conversation.last_n(5),
-        known_results = coordinator.results.find_by_entities(entities),
-        active_atoms  = coordinator.working.read_active(),
-    )
-    builder = MentalModelBuilder(relevance_engine=engine)
-    model   = builder.build(
-        turn_id        = cid,
-        context        = snapshot,
-        signal_entities = entities,
-        intents        = ["informational"],
-        summary        = "...",   # optional, from a prior LLM call
-    )
-"""
+"""Assemble a MentalModel from session store snapshots."""
 
 from __future__ import annotations
 
@@ -41,10 +21,6 @@ from nlght.core.hive_mind.relevance import RelevanceEngine
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Context Snapshot
-# ---------------------------------------------------------------------------
 
 class ContextSnapshot:
     """Compact snapshot of all four stores for a single turn.
@@ -66,22 +42,16 @@ class ContextSnapshot:
         self.dependency_ids = dependency_ids or set()
 
 
-# ---------------------------------------------------------------------------
-# MentalModelBuilder
-# ---------------------------------------------------------------------------
-
 class MentalModelBuilder:
     """Assembles a MentalModel from a store snapshot and the current signal.
 
-    Parameters:
-        relevance_engine: Pre-configured RelevanceEngine.
-
-    **It selects nothing.** It assembles and scores; what the model is actually
-    told is decided once, later, by the reduction, which is the only place that
+    A configured RelevanceEngine supplies scores. This builder assembles and
+    scores the model without selecting what the model sees. The reduction makes
+    the final selection because it is the only place that
     can see retention, cost and everything competing for the same room at the
     same time.
 
-    The caps it used to apply — `max_atoms`, `max_results`, `max_turns` — and the
+    The caps it used to apply (`max_atoms`, `max_results`, `max_turns`) and the
     `relevance_threshold` are gone. Three storage types had three different
     selection rules, none of which knew what it would cost to lose what they were
     dropping. If a store ever grows large enough to need a *loading* limit, that
@@ -97,11 +67,16 @@ class MentalModelBuilder:
 
     @classmethod
     def from_step_config(cls, step_config: Mapping[str, object]) -> MentalModelBuilder:
-        """Build from the public ``session_memory`` step-config block.
+        """Configure a builder from the public session-memory step block.
 
-        Missing blocks and values retain the same defaults as the direct
-        constructors. Invalid values fail at step construction time instead of
-        silently changing context selection.
+        Args:
+            step_config (Mapping[str, object]): Step configuration mapping.
+
+        Returns:
+            MentalModelBuilder: MentalModelBuilder with relevance settings.
+
+        Side Effects:
+            None. Rejects removed or invalid options.
         """
         memory = _mapping_value(step_config, "session_memory")
         relevance = _mapping_value(memory, "relevance")
@@ -126,9 +101,9 @@ class MentalModelBuilder:
 
         # Settings that no longer do anything are refused rather than accepted
         # in silence. `relevance.threshold` and the `mental_model` caps used to
-        # remove candidates before anything could weigh them (ADR-0056); a
+        # remove candidates before anything could weigh them (ADR-0056). A
         # deployment that still sets one is asking for a behaviour that is gone,
-        # and letting it start would be the worst of both — configured, ignored,
+        # and letting it start would accept a configuration that is ignored,
         # and no way to tell.
         for gone, where in (("threshold", relevance), ("max_atoms", mental_model),
                             ("max_results", mental_model), ("max_turns", mental_model)):
@@ -149,15 +124,21 @@ class MentalModelBuilder:
         delta:           object | None = None,
         summary:         str | None = None,
     ) -> MentalModel:
-        """Build a complete MentalModel.  Synchronous, no LLM call.
+        """Assemble one turn model without calling an LLM.
 
-        Parameters:
-            turn_id:         Correlation ID for the current turn.
-            context:         ContextSnapshot from all four stores.
-            signal_entities: Entities from the current signal (Observe output).
-            intents:         All intents for this turn (one per sub-signal).
-            delta:           Optional DeltaReport from a state reconciler.
-            summary:         Optional summary string from a prior LLM call.
+        Args:
+            turn_id (str): Identity of the current turn.
+            context (ContextSnapshot): Context snapshot for the turn.
+            signal_entities (list[str]): Entities detected in the current signal.
+            intents (list[str]): Detected user intents.
+            delta (object | None): Optional memory change for the turn.
+            summary (str | None): Optional turn summary.
+
+        Returns:
+            MentalModel: Complete MentalModel.
+
+        Side Effects:
+            Reads the clock and emits debug logs.
         """
         now = datetime.now(UTC)
         intent_str = ",".join(intents) if intents else "informational"
@@ -169,7 +150,7 @@ class MentalModelBuilder:
         )
 
         # Scored and ordered, and **nothing discarded**. What may be forgotten
-        # is decided once, later, with retention and cost in view — a score
+        # is decided once, later, with retention and cost in view. A score
         # threshold and a per-type count answered it here, before either
         # existed, and a durable fact about the user could be dropped for being
         # the eleventh session result.
@@ -229,10 +210,6 @@ class MentalModelBuilder:
 
         return model
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _deduplicate_entities(
     signal_entities: list[str],

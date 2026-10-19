@@ -72,14 +72,14 @@ def test_a_run_that_never_fanned_out_is_its_own_execution() -> None:
     assert timing.finished_at == _at(30)
     assert timing.elapsed == timedelta(seconds=30)
     assert timing.running is False
-    # There are no children, so there is no child time — not zero, which would
+    # There are no children, so there is no child time, not zero, which would
     # read as "the children took no time".
     assert timing.child_time is None
 
 
 def test_a_fan_out_finishes_with_its_last_child_not_its_distribution() -> None:
     # The whole point. The distribution ended two seconds in, having handed the
-    # corpus out; the ingest ran for another twenty minutes.
+    # corpus out. The ingest ran for another twenty minutes.
     timing = run_timing(
         _record(completed_at=_at(2)),
         _summary(
@@ -95,8 +95,8 @@ def test_a_fan_out_finishes_with_its_last_child_not_its_distribution() -> None:
 
 
 def test_nothing_has_finished_while_a_child_is_still_pending() -> None:
-    # A maximum completion time exists — 87 children have finished — but it is
-    # not a finish, and reporting it as one is how a half-done run reads as over.
+    # Completed children provide a latest timestamp, but pending children keep
+    # the run unfinished.
     timing = run_timing(
         _record(completed_at=_at(2)),
         _summary(
@@ -125,7 +125,7 @@ def test_child_time_is_the_work_spent_not_the_time_that_passed() -> None:
 
     assert timing.child_time == timedelta(seconds=4800)
     assert timing.elapsed == timedelta(seconds=600)
-    # Eight times as much work as time — which is what the worker pool bought.
+    # Eight times as much work as time, which is what the worker pool bought.
     assert timing.parallel_factor is not None
     assert round(timing.parallel_factor, 2) == 8.0
 

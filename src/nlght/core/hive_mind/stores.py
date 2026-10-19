@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The four Hive-Mind stores.
-
-All stores are pure data holders — write routing and conflict
-detection live in the StoreCoordinator adapter.  No framework
-dependencies, no persistence logic here.
-"""
+"""Provide conversation, result, working, and context stores."""
 
 from __future__ import annotations
 
@@ -21,10 +16,8 @@ from nlght.core.hive_mind.models import (
     TurnSummary,
     WorkingAtom,
 )
+from nlght.core.model.trust import origin_from_json, origin_to_json
 
-# ---------------------------------------------------------------------------
-# 1. ConversationStore — WHERE AM I IN THE CONVERSATION?
-# ---------------------------------------------------------------------------
 
 class ConversationStore:
     """Chronological turn history for the session.  Append-only."""
@@ -64,10 +57,6 @@ class ConversationStore:
     def current_turn_nr(self) -> int:
         return len(self._turns)
 
-
-# ---------------------------------------------------------------------------
-# 3. SessionResultStore — WHAT DO I KNOW?
-# ---------------------------------------------------------------------------
 
 class SessionResultStore:
     """Holds finished, validated facts and artefacts for the session."""
@@ -120,10 +109,6 @@ class SessionResultStore:
         return [r for r in self._results.values() if r.status == PromotionStatus.FINAL]
 
 
-# ---------------------------------------------------------------------------
-# 4. WorkingMemory — WHAT AM I DOING RIGHT NOW?
-# ---------------------------------------------------------------------------
-
 @dataclasses.dataclass
 class _Branch:
     label: str
@@ -134,34 +119,40 @@ class WorkingMemory:
     """Cascading branch-stack for transient turn state.
 
     Branches are opened per OODA step and merged back into the parent branch.
-    Atoms marked ``promote_to_parent=True`` bubble up on merge; all others are
-    discarded.  The Turn-Branch is the root; its promoted atoms are written to
+    Atoms marked ``promote_to_parent=True`` bubble up on merge. All others are
+    discarded.  The Turn-Branch is the root. Its promoted atoms are written to
     ``SessionResultStore`` by the Pipeline-Runner at turn end.
 
     Always snapshot-capable: ``snapshot()`` serialises the full stack at any
-    point in time; ``from_snapshot()`` restores it.
+    point in time. ``from_snapshot()`` restores it.
     """
 
     def __init__(self) -> None:
         self._stack: list[_Branch] = []
 
-    # ------------------------------------------------------------------
-    # Branch lifecycle
-    # ------------------------------------------------------------------
 
     def branch(self, label: str) -> None:
-        """Open a new branch level (e.g. 'observe:abc123:4')."""
+        """Open a working-memory branch.
+
+        Args:
+            label (str): Branch label.
+
+        Side Effects:
+            Pushes an empty branch onto the in-memory stack.
+        """
         self._stack.append(_Branch(label=label))
 
     def merge(self, promote: bool = True) -> list[WorkingAtom]:
-        """Close the current branch.
+        """Close a branch and optionally promote selected atoms.
 
-        When ``promote`` is false, the branch is dropped and all atoms are
-        discarded.
+        Args:
+            promote (bool): Whether to promote the staged state.
 
-        When ``promote`` is true, atoms with ``promote_to_parent=True`` are
-        moved into the parent branch (or returned to the caller when the
-        Turn-Branch is merged). All other atoms are discarded.
+        Returns:
+            list[WorkingAtom]: Promoted atoms.
+
+        Side Effects:
+            Pops a branch and may append atoms to its parent.
         """
         if not self._stack:
             return []
@@ -173,18 +164,29 @@ class WorkingMemory:
             self._stack[-1].atoms.extend(promoted)
         return promoted
 
-    # ------------------------------------------------------------------
-    # Write / read
-    # ------------------------------------------------------------------
 
     def write(self, atom: WorkingAtom) -> None:
-        """Write into the current (top) branch."""
+        """Store an atom in the active branch.
+
+        Args:
+            atom (WorkingAtom): Atom to write to the current branch.
+
+        Side Effects:
+            Appends an atom to in-memory branch state.
+        """
         if not self._stack:
             raise RuntimeError("Cannot write WorkingAtom without an active WorkingMemory branch")
         self._stack[-1].atoms.append(atom)
 
     def read_active(self, atom_type: str | None = None) -> list[WorkingAtom]:
-        """Atoms in the current (top) branch only."""
+        """Read atoms from the top branch.
+
+        Args:
+            atom_type (str | None): Optional atom-type filter.
+
+        Returns:
+            list[WorkingAtom]: Matching atoms from the active branch.
+        """
         if not self._stack:
             return []
         atoms = self._stack[-1].atoms
@@ -193,7 +195,14 @@ class WorkingMemory:
         return list(atoms)
 
     def read_all(self, atom_type: str | None = None) -> list[WorkingAtom]:
-        """All atoms across the entire stack (Turn-Branch + all sub-branches)."""
+        """Read matching atoms across every branch.
+
+        Args:
+            atom_type (str | None): Optional atom-type filter.
+
+        Returns:
+            list[WorkingAtom]: Matching atoms from the branch stack.
+        """
         result: list[WorkingAtom] = []
         for b in self._stack:
             for a in b.atoms:
@@ -201,26 +210,37 @@ class WorkingMemory:
                     result.append(a)
         return result
 
-    # ------------------------------------------------------------------
-    # Snapshot
-    # ------------------------------------------------------------------
 
     def snapshot(self) -> list[dict[str, Any]]:
-        """Serialisable snapshot of the full branch stack.
+        """Capture the full branch stack for persistence.
 
-        Safe to call at any point — even mid-step.
+        Returns:
+            list[dict[str, Any]]: Serializable branch-stack snapshot.
         """
         return [
             {
                 "label": b.label,
-                "atoms": [dataclasses.asdict(a) for a in b.atoms],
+                "atoms": [
+                    {**dataclasses.asdict(a), "origin": origin_to_json(a.origin)}
+                    for a in b.atoms
+                ],
             }
             for b in self._stack
         ]
 
     @classmethod
     def from_snapshot(cls, data: list[dict[str, Any]]) -> WorkingMemory:
-        """Restore a WorkingMemory from a ``snapshot()`` dict."""
+        """Reconstruct working memory from a stored snapshot.
+
+        Args:
+            data (list[dict[str, Any]]): Branch-stack snapshot data.
+
+        Returns:
+            WorkingMemory: Restored WorkingMemory.
+
+        Side Effects:
+            Creates in-memory branches and atoms.
+        """
         wm = cls()
         for branch_data in data:
             b = _Branch(label=branch_data["label"])
@@ -229,20 +249,26 @@ class WorkingMemory:
                 raw_ts = ad.get("created_at")
                 if isinstance(raw_ts, str):
                     ad["created_at"] = datetime.fromisoformat(raw_ts)
+                ad["origin"] = origin_from_json(ad.get("origin"))
                 b.atoms.append(WorkingAtom(**ad))
             wm._stack.append(b)
         return wm
 
-    # ------------------------------------------------------------------
-    # Compatibility / introspection
-    # ------------------------------------------------------------------
 
     @property
     def active_task_id(self) -> str | None:
-        """Label of the top branch; None when the stack is empty."""
+        """Expose the current branch label.
+
+        Returns:
+            str | None: Top label or None when empty.
+        """
         return self._stack[-1].label if self._stack else None
 
     @property
     def depth(self) -> int:
-        """Current stack depth (0 = no active branch)."""
+        """Count active branches.
+
+        Returns:
+            int: Stack depth.
+        """
         return len(self._stack)

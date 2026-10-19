@@ -1,4 +1,4 @@
-"""Access-policy rules — add access_policies table, drop resources.allowed_models.
+"""Add access_policies and drop resources.allowed_models.
 
 Revision ID: 0002
 Revises: 0001
@@ -37,7 +37,7 @@ def upgrade() -> None:
     op.create_index("access_policies_enabled_idx", "access_policies", ["enabled"])
 
     # allowed_models is replaced by access_policies rules. Existing entries are
-    # intentionally not auto-converted — the mechanism never shipped in a
+    # intentionally not auto-converted because the mechanism never shipped in a
     # production release (pre-1.0, Experimental).
     op.drop_column("resources", "allowed_models")
 

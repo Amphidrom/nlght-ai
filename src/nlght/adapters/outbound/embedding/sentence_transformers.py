@@ -12,8 +12,8 @@ Two things about *loading* it are configuration rather than accident.
 
 **Where it runs.** Left alone, sentence-transformers picks the CPU and says so
 in a line easy to miss. A machine with a usable GPU should use it, and one whose
-GPU belongs to something else should be able to say so — hence `device`, with
-`auto` meaning "take an accelerator if there is one".
+GPU belongs to something else should be able to say so. The `device` option
+accepts `auto` to select an available accelerator.
 
 **Whether loading touches the network.** Even with every file already
 downloaded, the hub is asked to revalidate each one: roughly two dozen requests
@@ -50,10 +50,14 @@ OFFLINE_MODES = ("auto", "always", "never")
 
 
 def _source(missing: set[str]) -> str:
-    """Where a load that was not cache-first got its files.
+    """Describe where model files came from when cache-first loading failed.
 
-    "hub" claims the load was told to go there, which is only true when the
-    keyword could be passed at all.
+    Args:
+        missing (set[str]): Unsupported loader keywords.
+
+    Returns:
+        str: ``library default`` when the loader could not accept
+        ``local_files_only``. Otherwise ``hub``.
     """
     return "library default" if "local_files_only" in missing else "hub"
 
@@ -74,15 +78,18 @@ class DeviceChoice:
 
 
 def resolve_device(requested: str) -> DeviceChoice:
-    """Turn a configured device into one sentence-transformers understands.
+    """Resolve the configured embedding device against available hardware.
 
-    ``auto`` asks torch what is actually usable — CUDA first, then Apple's MPS,
-    then the CPU — rather than assuming a GPU exists because the machine has
-    one. Anything else is passed through: naming ``cuda:1`` is how a deployment
-    keeps the other card free, and naming ``cpu`` is how it opts out entirely.
+    Args:
+        requested (str): Explicit device name or ``auto``.
 
-    ``device`` is ``None`` when torch is not importable, which leaves the choice
-    to sentence-transformers exactly as before.
+    Returns:
+        DeviceChoice: Explicit choice, or the first available device among
+        CUDA, Apple MPS, and CPU. If torch is unavailable, the device is
+        ``None`` so sentence-transformers chooses its default.
+
+    Side Effects:
+        Imports torch lazily and queries hardware availability in auto mode.
     """
     requested = (requested or "auto").strip().lower()
     if requested and requested != "auto":
@@ -108,7 +115,7 @@ def resolve_device(requested: str) -> DeviceChoice:
     return DeviceChoice(
         "cpu",
         f"torch {torch.__version__} was built for CUDA {torch.version.cuda} but sees no "
-        f"device — check the driver and that a GPU is visible to this process",
+        f"device. Check the driver and that a GPU is visible to this process",
     )
 
 
@@ -158,7 +165,14 @@ class SentenceTransformersEmbeddingClient:
 
     @staticmethod
     def _require_cuda(device: str) -> None:
-        """Refuse a configured CUDA device the installed torch cannot provide."""
+        """Check CUDA availability when torch is installed.
+
+        Args:
+            device (str): Configured CUDA device name.
+
+        Raises:
+            RuntimeError: Installed torch has no usable CUDA device.
+        """
         try:
             import torch  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
         except ImportError:  # pragma: no cover - torch ships with the extra
@@ -171,7 +185,7 @@ class SentenceTransformersEmbeddingClient:
             f"CUDA variant with: uv sync --extra embedding --extra embedding-cuda"
             if getattr(torch.version, "cuda", None) is None
             else f"torch {torch.__version__} was built for CUDA {torch.version.cuda} but sees "
-                 f"no device — check the driver and that a GPU is visible to this process"
+                 f"no device. Check the driver and that a GPU is visible to this process"
         )
         raise RuntimeError(
             f"embedding device '{device}' was configured, but no CUDA device is usable: "
@@ -180,13 +194,17 @@ class SentenceTransformersEmbeddingClient:
 
     @staticmethod
     def _require_cuda_index(torch: Any, device: str) -> None:  # noqa: ANN401 (the torch module)
-        """Refuse `cuda:N` where there is no card N.
+        """Reject a CUDA device index that is unavailable on this machine.
 
-        `is_available()` answers "is there a GPU", not "is there *that* GPU", so a
-        machine with one card accepted `cuda:1` here and failed deep inside model
-        loading instead — which is the one thing this check exists to prevent.
-        Naming an index is how a deployment keeps a card free, so getting it wrong
-        by one is the ordinary mistake, not an exotic one.
+        Args:
+            torch (Any): Imported torch module or compatible test double.
+            device (str): Configured CUDA device name.
+
+        Raises:
+            RuntimeError: The requested index exceeds the available CUDA devices.
+
+        Side Effects:
+            Queries the CUDA device count when an explicit index is present.
         """
         _, _, index = device.partition(":")
         if not index.isdigit():
@@ -205,19 +223,16 @@ class SentenceTransformersEmbeddingClient:
 
     @staticmethod
     def _unsupported(factory: Any, wanted: Sequence[str]) -> set[str]:  # noqa: ANN401 (the model class, or a test double)
-        """Which of these keywords the installed sentence-transformers will not take.
+        """Find requested keywords missing from a model factory signature.
 
-        Asked of the signature rather than discovered by being refused. The
-        previous version caught `TypeError` from the call and fell back to
-        `factory(name)` — so *one* unsupported keyword silently dropped **all**
-        of them: a named CUDA device became the CPU, a cache directory became
-        the default one, and `offline: always` quietly reached the network on an
-        air-gapped machine. Each is the exact failure its setting exists to
-        prevent, arriving through a compatibility shim.
+        Args:
+            factory (Any): Model constructor or compatible test double.
+            wanted (Sequence[str]): Keyword names to check.
 
-        An empty answer where the callable cannot be introspected — a C
-        extension, an odd wrapper — because "cannot ask" is not "does not
-        support", and refusing on that would be the opposite mistake.
+        Returns:
+            set[str]: Unsupported keywords. An uninspectable callable or a
+            factory accepting arbitrary keywords returns an empty set, since
+            support cannot be disproved from its signature.
         """
         try:
             parameters = inspect.signature(factory).parameters
@@ -248,7 +263,7 @@ class SentenceTransformersEmbeddingClient:
         if choice.device is not None and choice.device.startswith("cuda"):
             self._require_cuda(choice.device)
         elif choice.device == "cpu" and (device or "auto").strip().lower() in ("", "auto"):
-            # Chosen, not defaulted into — and the reason is what tells an
+            # Chosen, not defaulted into, and the reason is what tells an
             # operator whether to change the wheel or the machine.
             logger.warning("embedding.device.no_accelerator | %s", choice.reason)
 
@@ -307,11 +322,11 @@ class SentenceTransformersEmbeddingClient:
                 continue
             try:
                 loaded = factory(self._model_name, **options, **keywords)
-            except Exception as exc:  # noqa: BLE001 - any load failure is worth one retry online
+            except Exception as exc:
                 last_error = exc
                 if local_only and offline == "auto":
                     logger.info(
-                        "embedding.model.cache_miss | model=%s — not complete in the cache, "
+                        "embedding.model.cache_miss | model=%s: not complete in the cache, "
                         "fetching from the hub once",
                         self._model_name,
                     )

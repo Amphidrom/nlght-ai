@@ -158,7 +158,7 @@ async def test_refused_and_merged_knowledge_is_taken_back_out() -> None:
 
 async def test_the_mapping_exists_before_the_first_write() -> None:
     # Indexing into an unmapped OpenSearch index stores the document and makes
-    # it unsearchable — the exact failure this step exists to prevent.
+    # it unsearchable. This step must prevent that state.
     writer = _Writer(_Repository(canonical=[_assertion("fact-1")]))
 
     await _step(writer).run(_ctx())

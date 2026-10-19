@@ -1,35 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Execution stream transport over PostgreSQL ``LISTEN``/``NOTIFY``.
+"""Relay live execution signals between nodes through PostgreSQL.
 
-The distributed counterpart of ``InProcessExecutionStreamBroker``: a worker on
-one node publishes a running execution's signals, and a gateway on another node
-subscribes and relays them to the caller. Both sides keep talking to the
-``ExecutionStreamBroker`` port; only which adapter is wired changes.
-
-How it works:
-
-- Every node listens on one channel from startup and routes frames by execution
-  id, so a gateway is already listening before it submits a run — there is no
-  window in which the first signals of a stream could be missed.
-- ``publish`` fans out to local subscribers immediately *and* notifies the
-  channel. PostgreSQL delivers a notification to every listening session
-  including this node's own, so the listener drops frames carrying its own
-  origin id: each node delivers a signal exactly once, and a same-node
-  ``gateway+worker`` never waits on a database round trip for a token.
-- Local delivery, backlog replay for a late local subscriber, and channel
-  retention are delegated to the in-process broker, which already solves them.
-  Across nodes there is deliberately no backlog: a subscriber receives the live
-  tail, and the durable execution record — not this relay — remains the source of
-  truth for the terminal result.
-- The listening connection is long-lived and therefore assumed to drop
-  eventually; the listener reconnects with backoff rather than leaving streaming
-  quietly dead.
-
-Payloads are framed by ``execution_stream_wire``, which splits a signal too large
-for one ``NOTIFY`` into fragments. That keeps the 8000-byte payload cap a detail
-of this transport rather than a constraint on what a step may emit.
+The adapter keeps listening connections and publishes notifications.
 """
 
 from __future__ import annotations
@@ -55,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHANNEL = "nlght_execution_stream"
 
-# PostgreSQL caps a NOTIFY payload at 8000 bytes; stay clear of the edge.
+# PostgreSQL caps a NOTIFY payload at 8000 bytes. Stay clear of the edge.
 _PAYLOAD_BUDGET = 7800
 
 # Backoff bounds for re-establishing a dropped listening connection.
@@ -64,7 +38,7 @@ _RECONNECT_MAX_SECONDS = 30.0
 
 # Frames buffered between the driver's callback (which cannot await) and the
 # task that delivers them. A backlog this deep already means the consumer cannot
-# keep up; dropping the oldest frame beats unbounded growth.
+# keep up. Dropping the oldest frame beats unbounded growth.
 _INBOX_SIZE = 4096
 
 
@@ -86,7 +60,13 @@ ConnectionFactory = Callable[[], Awaitable[_Connection]]
 
 
 class PostgresExecutionStreamBroker:
-    """``ExecutionStreamBroker`` whose transport is PostgreSQL ``LISTEN``/``NOTIFY``."""
+    """Distributed broker backed by PostgreSQL LISTEN and NOTIFY.
+
+    Local subscribers receive signals immediately. Remote subscribers receive
+    the live tail. The durable execution record supplies the terminal result.
+    Notifications from this node are ignored after local delivery, and a lost
+    listening connection is re-established with bounded backoff.
+    """
 
     is_distributed = True
 
@@ -130,7 +110,7 @@ class PostgresExecutionStreamBroker:
                 await task
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 - shutting down, nothing left to salvage
+            except Exception:
                 logger.debug("execution.stream.stop_failed", exc_info=True)
         self._listener_task = None
         self._deliver_task = None
@@ -165,18 +145,20 @@ class PostgresExecutionStreamBroker:
     # -- publishing ----------------------------------------------------------
 
     async def _notify(self, payloads: list[str]) -> None:
-        """Put frames on the channel, in order, over one serialized connection.
+        """Publish frames in order over one serialized connection.
 
-        A transport failure must not fail the execution that is producing the
-        signals: the durable record still carries the result, and the caller's
-        stream degrades rather than the run.
+        Args:
+            payloads (list[str]): Encoded stream frames to publish.
+
+        Side Effects:
+            Sends PostgreSQL notifications. Logs transport failures without failing the execution.
         """
         async with self._publish_lock:
             try:
                 connection = await self._publishing_connection()
                 for payload in payloads:
                     await connection.execute("SELECT pg_notify($1, $2)", self._channel, payload)
-            except Exception:  # noqa: BLE001 - best-effort relay, never fail the run
+            except Exception:
                 logger.warning(
                     "execution.stream.publish_failed | channel=%s", self._channel, exc_info=True
                 )
@@ -193,7 +175,11 @@ class PostgresExecutionStreamBroker:
     # -- listening -----------------------------------------------------------
 
     async def _listen_forever(self) -> None:
-        """Hold a listening connection open, re-establishing it when it drops."""
+        """Maintain a listening connection with bounded reconnect backoff.
+
+        Side Effects:
+            Opens and closes PostgreSQL connections until shutdown.
+        """
         delay = _RECONNECT_BASE_SECONDS
         while not self._stopping.is_set():
             connection: _Connection | None = None
@@ -207,7 +193,7 @@ class PostgresExecutionStreamBroker:
                 await _first_of(self._stopping.wait(), dead.wait())
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - keep retrying, the stream is best-effort
+            except Exception:
                 logger.warning(
                     "execution.stream.listen_failed | channel=%s retry_in=%.1fs",
                     self._channel, delay, exc_info=True,
@@ -221,10 +207,13 @@ class PostgresExecutionStreamBroker:
             delay = min(delay * 2, _RECONNECT_MAX_SECONDS)
 
     def _on_notify(self, *args: Any) -> None:  # noqa: ANN401
-        """Driver callback — synchronous, so it only hands the frame onward.
+        """Queue one driver notification for asynchronous delivery.
 
-        asyncpg calls this as ``(connection, pid, channel, payload)``; taking the
-        payload as the last argument keeps it working if a driver passes fewer.
+        Args:
+            args (Any): Driver callback values with the payload last.
+
+        Side Effects:
+            Adds a valid string payload to the bounded inbox or logs overflow.
         """
         if not args:
             return
@@ -237,14 +226,18 @@ class PostgresExecutionStreamBroker:
             logger.warning("execution.stream.inbox_full | channel=%s", self._channel)
 
     async def _deliver_forever(self) -> None:
-        """Publish frames received from other nodes into the local broker."""
+        """Deliver frames from other nodes to local subscribers.
+
+        Side Effects:
+            Reads the inbox and publishes decoded signals through the local broker.
+        """
         while True:
             payload = await self._inbox.get()
             try:
                 await self._deliver(payload)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - one bad frame must not end the relay
+            except Exception:
                 logger.warning("execution.stream.deliver_failed", exc_info=True)
 
     async def _deliver(self, payload: str) -> None:
@@ -265,14 +258,20 @@ class PostgresExecutionStreamBroker:
 
 
 def _asyncpg_connector(url: str) -> ConnectionFactory:
-    """Build a connection factory for ``url``, resolved lazily.
+    """Build a lazy asyncpg connection factory.
 
-    The driver is imported on first use so importing this module costs nothing on
-    a node configured for the in-process transport.
+    Args:
+        url (str): SQLAlchemy PostgreSQL URL.
+
+    Returns:
+        ConnectionFactory: Factory that opens a dedicated asyncpg connection.
+
+    Side Effects:
+        Imports and connects to asyncpg only when the factory is called.
     """
 
     async def connect() -> _Connection:
-        # asyncpg ships no type information; the `_Connection` protocol above is
+        # asyncpg ships no type information. The `_Connection` protocol above is
         # what this adapter actually depends on, so bind the driver to it here
         # and keep `Any` out of the rest of the module.
         import asyncpg  # type: ignore[import-untyped]  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
@@ -284,10 +283,13 @@ def _asyncpg_connector(url: str) -> ConnectionFactory:
 
 
 def asyncpg_dsn(url: str) -> str:
-    """Translate a SQLAlchemy URL into the plain DSN asyncpg expects.
+    """Convert a SQLAlchemy PostgreSQL URL to an asyncpg DSN.
 
-    ``LISTEN`` needs a dedicated connection outside the SQLAlchemy pool, so the
-    configured ``postgresql+asyncpg://`` URL has to lose its driver suffix.
+    Args:
+        url (str): URL that may include the SQLAlchemy asyncpg driver suffix.
+
+    Returns:
+        str: Plain PostgreSQL DSN for a dedicated LISTEN connection.
     """
     from sqlalchemy.engine import make_url  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
@@ -296,7 +298,14 @@ def asyncpg_dsn(url: str) -> str:
 
 
 async def _first_of(*awaitables: Awaitable[Any]) -> None:
-    """Wait until the first of ``awaitables`` completes, cancelling the rest."""
+    """Wait for the first awaitable and cancel the others.
+
+    Args:
+        awaitables (Awaitable[Any]): Operations whose first completion ends the wait.
+
+    Side Effects:
+        Schedules and cancels asyncio tasks.
+    """
     tasks = [asyncio.ensure_future(item) for item in awaitables]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -308,5 +317,5 @@ async def _first_of(*awaitables: Awaitable[Any]) -> None:
 async def _close_quietly(connection: _Connection) -> None:
     try:
         await connection.close()
-    except Exception:  # noqa: BLE001 - closing a broken connection is not news
+    except Exception:
         logger.debug("execution.stream.close_failed", exc_info=True)

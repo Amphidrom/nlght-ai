@@ -1,29 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The core claim of the identity model, as state transitions.
+"""Verify stable knowledge identity across document and extraction changes.
 
-    a model-generated description is not an identity
-
-    persisted assertion_id + stable slot + proposition matching = continuity
-
-Everything else in the design rests on that sentence, and nothing verified it.
-A live run showed why it matters: an unedited sentence — "Each SanitizingFunction
-is called in order until a function changes the value" — came back from the model
-with different `subject` and `rule_property` fields, and the corpus gained an
-assertion nobody wrote. The wording moved, so the identity moved with it.
-
-These are the atomic transitions. No model, no Ollama, no corpus: controlled old
-and new extraction outputs and exact database states. Each fixture **deliberately
-supplies different model-generated fields for the same proposition**, because a
-test that passes only because the entity key happened to match proves nothing —
-it would be green today and green after the bug, saying the same thing about
-neither.
-
-Everything here holds today. The transitions that were once `xfail(strict=True)`
-have landed, and the guards against a matcher that merges *too eagerly* matter as
-much as the matching — a ladder that continued everything would pass every
-positive case in this file and destroy the corpus.
+Identity follows the persisted assertion, stable slot, and proposition match.
+These tests vary model-generated descriptions while asserting exact database
+transitions. They also guard against merging materially different claims.
 """
 
 from __future__ import annotations
@@ -57,9 +39,6 @@ from nlght.core.knowledge import (
 
 pytestmark = pytest.mark.integration
 
-# ---------------------------------------------------------------------------
-# The corpus, in two wordings the model might produce for one proposition
-# ---------------------------------------------------------------------------
 
 SLOT_X = "unit:actuator#customizing-sanitization"
 SLOT_Y = "unit:actuator#sanitization"
@@ -88,7 +67,7 @@ LIMIT = entity_key("rule", subject="value", rule_property="max_length")
 
 
 def _write(
-    entity,  # noqa: ANN001 (EntityKey)
+    entity,
     *,
     text: str,
     kind: str = "rule",
@@ -105,14 +84,14 @@ def _write(
         scope=(),
         text=text,
         # The fingerprint is derived from the wording, so two descriptions of one
-        # proposition have different fingerprints — as they did live.
+        # proposition have different fingerprints, as observed in the live run.
         fingerprint=fingerprint or f"fp:{text}",
         extraction_version=extraction_version,
         document_id=document_id,
         document_revision=document_revision,
         slot_id=slot_id,
         run_id=run_id,
-        # Every sighting carries a structured claim; these tests are about which
+        # Every sighting carries a structured claim. These tests are about which
         # assertion it continues, so the structure is the minimum its kind needs.
         proposition=Proposition(
             {"rule_text": text} if kind == "rule"
@@ -131,7 +110,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -139,17 +118,17 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001 (the tests read exact rows)
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
 
-async def _rows(repository, model):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _rows(repository, model):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
-async def _revisions(repository, assertion_id: str):  # noqa: ANN001, ANN201
+async def _revisions(repository, assertion_id: str):
     variants = {
         row.variant_id
         for row in await _rows(repository, KnowledgeVariant)
@@ -159,14 +138,10 @@ async def _revisions(repository, assertion_id: str):  # noqa: ANN001, ANN201
     return sorted(rows, key=lambda row: row.revision)
 
 
-async def _evidence(repository, assertion_id: str):  # noqa: ANN001, ANN201
+async def _evidence(repository, assertion_id: str):
     revisions = {row.revision_id for row in await _revisions(repository, assertion_id)}
     return [r for r in await _rows(repository, KnowledgeEvidence) if r.revision_id in revisions]
 
-
-# ---------------------------------------------------------------------------
-# 1. The failure the live run produced
-# ---------------------------------------------------------------------------
 
 async def test_same_proposition_same_slot_keeps_the_assertion_id(repository) -> None:
     """The central test. It reproduces the live defect exactly.
@@ -203,7 +178,7 @@ async def test_a_redescribed_assertion_is_not_withdrawn(repository) -> None:
     #
     # Unmarked, and it took the ratchet to notice: this holds today, though only
     # because nothing withdraws anything yet. It has to still hold once
-    # retraction exists — which is precisely when it becomes easy to break.
+    # retraction exists, which is precisely when it becomes easy to break.
     first = await repository.record_lineage(_write(SANITIZER_AS_EXECUTION, text=SANITIZER_TEXT))
 
     await repository.record_lineage(
@@ -229,13 +204,10 @@ async def test_a_redescribed_assertion_is_not_withdrawn(repository) -> None:
 async def test_a_rephrased_body_keeps_the_assertion_whatever_the_kind(
     repository, kind: str, fields: dict[str, str]
 ) -> None:
-    """Every kind separates what it is from how it is worded, and all of them
-    must survive the model rewording the second half.
+    """Keep an assertion when the model rephrases its description.
 
-    This used to be asserted against the content hash, where it could only ever
-    fail: a hash of the whole content block moves when any of it moves. It is a
-    property of the resolver, not of a hash — the slot and the wording decide,
-    and the description is what is allowed to change.
+    The stable slot and observed wording establish continuity across claim kinds;
+    the model-generated description may change.
     """
     key = entity_key(kind, **fields)
     body = "Lines are limited to 100 characters."
@@ -266,16 +238,10 @@ async def test_reflowing_a_line_is_not_a_new_state(repository) -> None:
 
 
 async def test_a_visible_change_to_the_wording_is_a_new_state(repository) -> None:
-    """And the tolerance stops at whitespace.
+    """Record a visible wording edit as a new revision without a new approval.
 
-    A full stop is not a rewrap — a reader sees it, so the sentence that was
-    observed is a different one and the corpus records that it was. This is the
-    line between "the same thing said the same way" and "the same claim said
-    differently", and drawing it anywhere past whitespace hides a real change:
-    the same leniency that swallows a full stop swallows a word.
-
-    It costs a revision and nothing else. Nothing material moved, so the
-    approval carries and no reviewer is asked about a punctuation mark.
+    Whitespace reflow preserves wording, while punctuation changes the observed
+    text. The underlying claim remains the same.
     """
     key = entity_key("rule", subject="line-length", rule_property="maximum")
 
@@ -291,17 +257,11 @@ async def test_a_visible_change_to_the_wording_is_a_new_state(repository) -> Non
     assert second.review_state == "approved"
 
 
-# ---------------------------------------------------------------------------
-# 2. The counter-proof: no heuristic may merge two different claims
-# ---------------------------------------------------------------------------
-
 async def test_material_change_same_slot_is_a_different_assertion(repository) -> None:
-    """Java 17 became Java 21. Same slot, same wording pattern, different claim.
+    """Create a new assertion when a claim changes materially in the same slot.
 
-    Unmarked on purpose: it passes today and must keep passing. A matcher that
-    made this one assertion would be worse than the bug it replaced — it would
-    serve a changed claim under an old approval, and nothing in the report would
-    show it.
+    Treating Java 17 and Java 21 as one approved assertion would conceal a
+    changed claim under the previous approval.
     """
     first = await repository.record_lineage(
         _write(JAVA_17, kind="fact", text="Spring requires Java 17.")
@@ -358,12 +318,10 @@ async def test_an_unchanged_assertion_survives_its_neighbour_being_edited(reposi
 
 
 async def test_an_ambiguous_match_does_not_merge(repository) -> None:
-    """Two candidates, one new claim resembling both. Nothing may be forced.
+    """Create a new ambiguous assertion when two prior claims match equally.
 
-    `assign` exists for exactly this and is not wired in. When no assignment is
-    clearly better than another, the honest answer is a new assertion marked
-    ambiguous — never the first plausible match, which is how a corpus silently
-    acquires wrong continuations.
+    Choosing the first plausible match would silently attach the new claim to
+    the wrong history.
     """
     left = await repository.record_lineage(
         _write(entity_key("rule", subject="timeout", rule_property="connect"),
@@ -386,16 +344,10 @@ async def test_an_ambiguous_match_does_not_merge(repository) -> None:
 async def test_a_changed_value_under_one_key_is_a_new_revision_needing_review(
     repository,
 ) -> None:
-    """The key confirms *which* claim; the body decides *what state* it is in.
+    """Keep the assertion identity but require review for a changed value.
 
-    A rule's key is its `subject` and `rule_property` — "what is the approval
-    threshold for expenses". The threshold lives in the body. So CHF 500 becoming
-    CHF 550 is not a different rule: the business quantity is the same one, and
-    what moved is its normative state.
-
-    Which makes the harm precise, and it is not an identity harm. Continuing the
-    assertion is right; carrying the approval across is not. A person approved
-    five hundred, not five fifty.
+    The rule key identifies the approval threshold. Changing CHF 500 to CHF 550
+    changes the rule state and invalidates its previous approval.
     """
     threshold = entity_key("rule", subject="expense", rule_property="approval_threshold")
 
@@ -438,7 +390,7 @@ async def test_two_documents_disagreeing_on_a_value_do_not_collapse_silently(
     repository,
 ) -> None:
     # One key, two documents, two different thresholds. They continue one
-    # assertion — it is one business quantity — but they must not land as the
+    # assertion because it is one business quantity. They must not land as the
     # same state with the approval intact, because nobody has ruled on the
     # second one.
     threshold = entity_key("rule", subject="expense", rule_property="approval_threshold")
@@ -456,13 +408,9 @@ async def test_two_documents_disagreeing_on_a_value_do_not_collapse_silently(
     assert second.review_state == "needs_review"
 
 
-# ---------------------------------------------------------------------------
-# 3. Where a claim sits, and where it came from
-# ---------------------------------------------------------------------------
-
 async def test_an_assertion_that_moved_within_a_document_keeps_its_id(repository) -> None:
     # A section renamed or reordered moves the slot, not the claim. The slot
-    # lineage records the move so the anchor can be followed; the assertion id
+    # lineage records the move so the anchor can be followed. The assertion id
     # does not move with it.
     first = await repository.record_lineage(_write(SANITIZER_AS_EXECUTION, text=SANITIZER_TEXT))
 
@@ -476,12 +424,9 @@ async def test_an_assertion_that_moved_within_a_document_keeps_its_id(repository
 
 
 async def test_the_same_claim_in_two_documents_keeps_its_provenance_apart(repository) -> None:
-    """One claim, two sources. The evidence must not blur together.
+    """Keep evidence separate when two documents support one assertion.
 
-    The assertion is shared on purpose — the same claim found twice is one claim
-    reinforced, not two. What must stay separate is where each sighting came
-    from, because "does document A still assert this" is the question retraction
-    is decided by, and a merged provenance cannot answer it.
+    Retraction depends on whether each document still carries the claim.
     """
     first = await repository.record_lineage(
         _write(JAVA_17, kind="fact", text="Spring requires Java 17.", document_id=DOC_A)
@@ -498,43 +443,47 @@ async def test_the_same_claim_in_two_documents_keeps_its_provenance_apart(reposi
     assert {row.slot_id for row in evidence} == {SLOT_X, "unit:reference#stack"}
 
 
-# ---------------------------------------------------------------------------
-# 4. A claim the source stopped carrying
-# ---------------------------------------------------------------------------
-
 async def _slot(repository, *writes, slot_id: str = SLOT_X, document_id: str = DOC_A,
-                run_id: str = "run-1"):  # noqa: ANN001, ANN002, ANN201
-    """One document with a single section, in one call."""
+                run_id: str = "run-1"):
+    """One document with a single section, in one call.
+
+    Args:
+        repository (Any): Repository used by the test.
+        *writes (Any): Claim writes included in the section.
+        slot_id (str): Identifier of the claim slot.
+        document_id (str): Document identifier.
+        run_id (str): Ingestion run identifier.
+    """
     return await _document(
         repository, {slot_id: writes}, document_id=document_id, run_id=run_id
     )
 
 
 async def _document(repository, sections, *, document_id: str = DOC_A,
-                    run_id: str = "run-1"):  # noqa: ANN001, ANN201
-    """Everything one document says, in one call.
+                    run_id: str = "run-1"):
+    """Record every section observed in a complete document read.
 
-    The API the retraction case forces, and the container it forces. Absence
-    cannot be read off a single write — a claim is gone because the source no
-    longer holds it, knowable only once everything it *does* hold has arrived —
-    and it cannot be read off a single *section* either, while a section's id is
-    its position.
+    A missing claim can be retired only after the entire document has been read.
+    Section paths identify sections; ordinals do not determine identity.
 
-    Each key is a heading path, which is what a section is found by. The ordinal
-    travels beside it and decides nothing.
+    Args:
+        repository (Any): Repository used by the test.
+        sections (Any): Document sections to store.
+        document_id (str): Document identifier.
+        run_id (str): Ingestion run identifier.
     """
     return await repository.record_document(
         document_id=document_id,
         sections=[
             ObservedSection.as_read(
-                # An anchor of "" is a section with nothing to be found by — the
+                # An anchor of "" is a section with nothing to be found by. It is
                 # unscoped part of a document, which PDF and prose are entirely.
                 anchor="" if anchor == UNSCOPED else anchor,
                 anchor_strength=NO_ANCHOR if anchor == UNSCOPED else DERIVED_ANCHOR,
                 # From what the section says, not from what it is called. A
                 # fingerprint taken off the anchor is identical however much the
                 # text under it changed, so a section that lost a sentence looked
-                # untouched — and retraction now reads an untouched section as
+                # untouched, and retraction now reads an untouched section as
                 # evidence that the source did *not* drop anything.
                 content=anchor + "|" + "|".join(sorted(write.text for write in writes)),
                 unit_ordinal=anchor,
@@ -551,8 +500,15 @@ async def _document(repository, sections, *, document_id: str = DOC_A,
 UNSCOPED = "<unscoped>"
 
 
-def _graph(write) -> KnowledgeWrite:  # noqa: ANN001
-    """The graph half of the same sighting, which travels in one transaction."""
+def _graph(write) -> KnowledgeWrite:
+    """The graph half of the same sighting, which travels in one transaction.
+
+    Args:
+        write (Any): Knowledge write being converted to graph form.
+
+    Returns:
+        KnowledgeWrite: Graph write corresponding to the selected sighting.
+    """
     return KnowledgeWrite(
         identity=write.fingerprint,
         payload=FactPayload(subject="spring", predicate="requires", object=write.text),
@@ -565,13 +521,10 @@ def _graph(write) -> KnowledgeWrite:  # noqa: ANN001
 
 
 async def test_an_assertion_the_source_dropped_is_retired_not_deleted(repository) -> None:
-    """The slot held two claims and now holds one.
+    """Retire a dropped claim while preserving its evidence.
 
-    Retired rather than deleted, and its evidence untouched: a reader following a
-    citation needs to find what was asserted and that it stopped being asserted.
-    Deleting answers neither, and the evidence is what answers "what did document
-    D at revision R say" — a claim that stopped being asserted did not stop having
-    been asserted.
+    Historical citations must still show what the document asserted before the
+    claim disappeared.
     """
     kept = (await _slot(
         repository,
@@ -595,17 +548,10 @@ async def test_an_assertion_the_source_dropped_is_retired_not_deleted(repository
 
 
 async def test_a_section_that_says_the_same_thing_cannot_lose_a_claim(repository) -> None:
-    """Absence is evidence of removal only where the section could have changed.
+    """Keep claims from an unchanged section when extraction omits one.
 
-    A live run read an unedited paragraph twice — byte-identical parser input,
-    the same fingerprint both times — and the model returned one of its two
-    claims the second time. The other was retired. Nothing about the source had
-    changed; the model had simply answered differently, and a retraction turned
-    that into lost knowledge with an approval spent on it.
-
-    Retraction stays a set operation over what the source says (ADR-0044). This
-    is what keeps it one: a section still saying exactly what it said cannot be
-    a section that dropped anything.
+    The stable-slot guard prevents model nondeterminism from retiring knowledge
+    that the source text still supports.
     """
     both = (await _slot(
         repository,
@@ -614,7 +560,7 @@ async def test_a_section_that_says_the_same_thing_cannot_lose_a_claim(repository
     )).recorded
     forgotten = both[1].assertion_id
 
-    # The same section, unchanged — and the model mentions only one claim.
+    # The same section, unchanged, and the model mentions only one claim.
     outcome = await repository.record_document(
         document_id=DOC_A,
         sections=[
@@ -642,8 +588,13 @@ async def test_a_section_that_says_the_same_thing_cannot_lose_a_claim(repository
     assert rows[forgotten].retired_at is None, "the model forgot it; the source did not drop it"
 
 
-def _unchanged_section(*writes, run_id: str):  # noqa: ANN002, ANN202
-    """The section exactly as the first run was given it, whatever is claimed now."""
+def _unchanged_section(*writes, run_id: str):
+    """The section exactly as the first run was given it, whatever is claimed now.
+
+    Args:
+        *writes (Any): Writes retained from the first run.
+        run_id (str): Ingestion run identifier.
+    """
     return ObservedSection.as_read(
         anchor=SLOT_X,
         anchor_strength=DERIVED_ANCHOR,
@@ -656,13 +607,10 @@ def _unchanged_section(*writes, run_id: str):  # noqa: ANN002, ANN202
 
 
 async def test_a_section_that_says_the_same_thing_cannot_gain_one_either(repository) -> None:
-    """The other direction of the same fact about the model.
+    """Reject a new claim from unchanged text and extraction input.
 
-    Absence and arrival are one phenomenon: asked twice about identical text, the
-    model answered differently. The retirement guard refused the loss, and a live
-    run promptly produced the gain — an unedited paragraph read twice with an
-    identical fingerprint came back with a third claim, and the corpus grew a
-    claim its source had never started saying.
+    A second model response to the same input must not add a claim absent from
+    the earlier complete observation.
     """
     before = (await _slot(
         repository,
@@ -691,7 +639,7 @@ async def test_a_section_that_says_the_same_thing_cannot_gain_one_either(reposit
 
 async def test_a_sighting_of_what_the_section_already_says_still_lands(repository) -> None:
     # Reinforcement is the point of a second run. Only wording the slot has never
-    # carried is refused; seeing again what is already there is evidence.
+    # carried is refused. Seeing again what is already there is evidence.
     first = (await _slot(
         repository,
         _write(JAVA_17, kind="fact", text="Spring requires Java 17."),
@@ -715,19 +663,10 @@ async def test_a_sighting_of_what_the_section_already_says_still_lands(repositor
 
 
 async def test_a_full_stop_is_a_different_question_to_the_model(repository) -> None:
-    """The guard asks "same input?", never "same meaning?".
+    """Treat punctuation changes as changed extraction input.
 
-    It was asking the second by accident. `still_saying_the_same` compared the
-    *section* fingerprint, which normalises case, whitespace and trailing
-    punctuation on purpose — a reflowed section is still the same section — so a
-    sentence given a full stop read as an unchanged slot, the arrival guard
-    refused the corrected wording, and the corpus went on quoting a sentence the
-    document no longer contained:
-
-        run-2 recorded=0        no revision, and retrieval answers with the old text
-
-    The two questions need two fingerprints. This one is about the exact input
-    the model was shown, and normalises nothing.
+    The slot fingerprint normalizes punctuation for location matching. The input
+    fingerprint preserves exact text so a corrected sentence can be extracted.
     """
     before = (await _slot(
         repository,
@@ -769,7 +708,7 @@ async def test_a_byte_identical_section_still_freezes_its_claim_set(repository) 
         _write(MAVEN, kind="fact", text="Spring requires Maven."),
     )).recorded
 
-    # The same section text — `_slot` builds it from the claims, so the third
+    # The same section text matters. `_slot` builds it from the claims, so the third
     # claim would change it. It is passed as a section that says what it said.
     await repository.record_document(
         document_id=DOC_A,
@@ -792,12 +731,10 @@ async def test_a_byte_identical_section_still_freezes_its_claim_set(repository) 
 
 
 async def test_the_guard_freezes_the_slot_and_not_the_lifecycle(repository) -> None:
-    """What is held still is the claim set this section contributes — nothing else.
+    """Keep the claim set stable without freezing reviews or evidence.
 
-    A reviewer's decision, another document's support, and the evidence of a
-    second sighting all reach a claim standing in an unchanged section. The guard
-    is about the model contradicting itself over the same text, and freezing a
-    review would make it a lock on the corpus instead.
+    The guard controls contradictory model extraction from unchanged text. It
+    does not block other documents or reviewer decisions.
     """
     from nlght.core.knowledge.knowledge import ReviewDecision
 
@@ -836,19 +773,9 @@ async def test_the_guard_freezes_the_slot_and_not_the_lifecycle(repository) -> N
 
 
 async def test_a_removed_section_still_retires_what_it_held(repository) -> None:
-    """The slot's lifecycle outranks its input diff, and that has to stay legible.
+    """Retire claims when a section disappears from a complete document read.
 
-    A section that is gone is never read again, so its last recorded fingerprint
-    stands unchanged forever — the comparison prints
-
-        slot_input_changed=false
-        expected_change=true
-        because=slot_removed
-
-    which reads like a contradiction and is not one. The guard against a model
-    losing a claim over *unchanged text* must never be generalised into "an
-    unchanged fingerprint means no retirement ever": nothing read that section,
-    so its fingerprint is not evidence about anything.
+    An unchanged last fingerprint cannot prove that a section still exists.
     """
     held = (await _slot(
         repository,
@@ -881,12 +808,10 @@ async def test_a_removed_section_still_retires_what_it_held(repository) -> None:
 
 
 async def test_a_new_extraction_version_may_say_something_new(repository) -> None:
-    """An unchanged section asked a different question may answer differently.
+    """Allow new claims when the extraction contract changes.
 
-    The guard is about the model contradicting itself, not about freezing the
-    corpus. `extraction_version` hashes the prompt, so a sharpened contract is a
-    new question — and refusing its answers would make every improvement
-    invisible on text nobody edits.
+    A new prompt version asks a different question, even when source text is
+    unchanged.
     """
     await _slot(
         repository,
@@ -915,17 +840,10 @@ async def test_a_new_extraction_version_may_say_something_new(repository) -> Non
 async def test_inserting_a_paragraph_does_not_retire_what_moved_below_it(
     repository,
 ) -> None:
-    """The failure that made the container the document instead of the slot.
+    """Preserve claims moved by an inserted paragraph.
 
-    A slot id is a section's *position* — `source:document:0`, `:1`, `:2` — so a
-    paragraph inserted at the top renumbers every section under it. Comparing per
-    slot then found the claim missing from the slot it used to occupy, retired
-    it, and re-created it in the one it had moved to. An edit that touched none
-    of those claims destroyed all of them: approval gone, history gone, and the
-    report calling it expected because the document had after all been edited.
-
-    Nothing here fixes the slot id. What it fixes is that a claim the document
-    still asserts is not gone, wherever in the document it now sits.
+    Position-based slot IDs change when sections shift. Document-level matching
+    must retain claims that the document still asserts.
     """
     first = (await _document(
         repository,
@@ -933,7 +851,7 @@ async def test_inserting_a_paragraph_does_not_retire_what_moved_below_it(
                            slot_id="s:doc:1")]},
     )).recorded[0]
 
-    # A paragraph is inserted above. Every ordinal below it shifts; the headings
+    # A paragraph is inserted above. Every ordinal below it shifts. The headings
     # do not, which is the difference the registry is built to notice.
     outcome = await _document(
         repository,
@@ -950,8 +868,8 @@ async def test_inserting_a_paragraph_does_not_retire_what_moved_below_it(
     rows = {row.assertion_id: row for row in await _rows(repository, KnowledgeAssertion)}
     assert rows[first.assertion_id].retired_at is None
     assert len(rows) == 2, "the moved claim must not have been re-created"
-    # And it did not "move" at all any more. The ordinal shifted; the section did
-    # not, so the evidence names one slot before and after — which is the whole
+    # And it did not "move" at all any more. The ordinal shifted. The section did
+    # not, so the evidence names one slot before and after, which is the whole
     # difference between an identity and a position.
     slots = {row.slot_id for row in await _evidence(repository, first.assertion_id)}
     assert len(slots) == 1
@@ -985,7 +903,7 @@ async def test_a_claim_dropped_from_one_section_is_still_retired(repository) -> 
 
 async def test_a_claim_another_document_still_carries_is_not_retired(repository) -> None:
     # The second guard, and the one that decides whether retraction is safe to
-    # run at all. Erring towards keeping costs a stale row a reviewer can retire;
+    # run at all. Keeping it may cost a stale row that a reviewer can retire.
     # erring the other way deletes knowledge a second source was carrying.
     first = (await _slot(
         repository, _write(JAVA_17, kind="fact", text="Spring requires Java 17.")
@@ -1027,10 +945,6 @@ async def test_a_retired_claim_coming_back_is_not_silently_reactivated(repositor
     assert rows[original.assertion_id].retired_at is not None
 
 
-# ---------------------------------------------------------------------------
-# 5. The invariant every one of the above depends on
-# ---------------------------------------------------------------------------
-
 async def test_a_retry_changes_nothing(repository) -> None:
     """A crashed run replayed must leave exactly the state it would have left.
 
@@ -1053,16 +967,7 @@ async def test_a_retry_changes_nothing(repository) -> None:
     assert len(await _evidence(repository, first.assertion_id)) == 1
 
 
-# ---------------------------------------------------------------------------
-# Moving between diff scopes
-# ---------------------------------------------------------------------------
-#
-#     Document
-#     ├── Slot A       its own diff scope
-#     ├── Slot B       its own diff scope
-#     └── Unscoped     the document-wide fallback
-#
-# A claim can move between those without the source changing what it says — a
+# A claim can move between scopes without changing what the source says. A
 # heading gains an id, or loses one, or a section is written above the first
 # heading. The scopes exist to make a diff precise, and a claim crossing between
 # them must not read as one claim ending and another beginning.
@@ -1167,28 +1072,11 @@ async def test_a_deleted_section_still_loses_its_claims(repository) -> None:
     assert rows[kept.assertion_id].retired_at is None
 
 
-# ---------------------------------------------------------------------------
-# One sentence, two kinds
-# ---------------------------------------------------------------------------
-
 async def test_two_kinds_read_from_one_sentence_stay_two_assertions(repository) -> None:
-    """The live failure, and why it only appeared once the wording was observed.
+    """Keep different claim kinds separate when they share observed wording.
 
-    A model reads one sentence and produces two claims from it — a `rule` for
-    what it requires and a `fact` for what it relates. That is legitimate and
-    common. Both now carry the *same* observed wording, because the wording is
-    the source's sentence (ADR-0048) rather than the kind's own body.
-
-    The matching ladder's strongest rung is "the same slot, saying the same
-    thing", and it compared exactly that text. So the second claim continued the
-    first one's assertion across kinds, and the graph refused the write:
-
-        knowledge '...' already exists as kind 'fact';
-        refusing to rewrite it as 'rule'
-
-    The guard was right and the ladder had answered wrongly. Before ADR-0048 the
-    text was `rule_text` for a rule and `object` for a fact — different strings,
-    so this held by accident rather than by rule.
+    A fact and rule extracted from one sentence may quote the same text without
+    sharing an assertion identity.
     """
     sentence = "The grace period must not exceed 30 seconds."
 
@@ -1261,15 +1149,12 @@ async def test_a_candidate_with_no_kind_is_not_continued_into(repository) -> Non
     assert decision.assertion_id is None
 
 
-# ---------------------------------------------------------------------------
-# A node names the state it stands for
-# ---------------------------------------------------------------------------
 #
 # The graph and the lineage used to be joined by an equality between two hashes,
 # `KnowledgeRevision.fingerprint == Knowledge.identity`, which is not a
 # relationship: a fingerprint is a content address and two revisions may carry
-# one — a revision is new when the observed *wording* moves, and the structure it
-# hashes need not have moved at all. Every read that needed "which state is this
+# one. A revision is new when the observed *wording* moves, even if the
+# fingerprinted structure stays the same. Every read that needed "which state is this
 # node" therefore quantified over the set and hoped it answered.
 #
 # `Knowledge.revision_id` is the edge. These five pin what it means, and in
@@ -1277,13 +1162,10 @@ async def test_a_candidate_with_no_kind_is_not_continued_into(repository) -> Non
 # pointer may move, and the two very different reasons a pointer can be absent.
 
 async def test_a_structural_change_leaves_the_old_node_on_the_old_state(repository) -> None:
-    """P1 → R1, P2 → R2. The first node is not re-aimed, and is not canonical.
+    """Keep the old graph node attached to its original revision.
 
-    A record whose content hashes to P1 claiming to represent R2 would be a lie
-    about itself. It stops being canonical for a different reason entirely: R1 is
-    no longer the deepest revision of its variant, which is a fact about the
-    lineage — one hop, and an exact answer, where the old predicate had to ask
-    whether *any* revision hashing to P1 was current.
+    A structural change creates a new canonical state instead of repointing the
+    old node to content it does not represent.
     """
     first = (await _slot(
         repository,
@@ -1310,13 +1192,10 @@ async def test_a_structural_change_leaves_the_old_node_on_the_old_state(reposito
 
 
 async def test_one_state_reworded_keeps_its_node_and_moves_its_pointer(repository) -> None:
-    """Two revisions, one fingerprint, one node — and the node is the newer state.
+    """Move the graph node's revision pointer after a wording change.
 
-    The case the fingerprint could never decide. The structured claim did not
-    move, so the graph has one record for it; the wording did, so the lineage has
-    two revisions carrying one address. Which of them the node stood for was
-    simply not recorded anywhere, and the read side guessed "the deepest" — right
-    by luck rather than by construction.
+    The structured fingerprint remains stable, while the lineage records a newer
+    revision for the same node.
     """
     shared = "fp:one-structured-state"
     first = (await _slot(
@@ -1372,16 +1251,10 @@ async def test_a_node_with_no_lineage_at_all_stays_canonical(repository) -> None
 async def test_a_node_whose_state_the_migration_could_not_prove_is_withheld(
     repository,
 ) -> None:
-    """The other empty pointer, and it does not mean the same thing.
+    """Withhold a node whose revision identity migration could not establish.
 
-    Migration `0018` sets the pointer only where one revision carries the node's
-    fingerprint and no other — an injection, not a resemblance. Where several
-    did, it cannot say which state the node stands for, and one of them may be a
-    state the corpus moved past long ago.
-
-    Reading that as "no lineage" would hand a superseded wording back to
-    retrieval as though it were current, which is the failure `revision_id` was
-    introduced to end. So it is withheld until a sighting settles it.
+    Several matching revisions cannot prove which state a node represents.
+    Retrieval must not present a possibly superseded state as current.
     """
     recorded = (await _slot(
         repository,
@@ -1389,13 +1262,13 @@ async def test_a_node_whose_state_the_migration_could_not_prove_is_withheld(
     )).recorded[0]
 
     # Exactly the row state migration 0018 leaves behind for an unprovable node.
-    async with AsyncSession(repository._test_engine) as session, session.begin():  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session, session.begin():
         node = await session.get(Knowledge, recorded.fingerprint)
         node.revision_id = None
         node.revision_unresolved = True
 
     assert await repository.resolve([recorded.fingerprint]) == []
-    # A review surface still sees it — being unprovable is not being invisible.
+    # A review surface still sees it because unresolved provenance is not invisibility.
     assert len(await repository.resolve(
         [recorded.fingerprint], include_quarantined=True
     )) == 1
@@ -1407,7 +1280,7 @@ async def test_a_later_sighting_settles_what_the_migration_could_not(repository)
         repository,
         _write(JAVA_17, kind="fact", text="Spring requires Java 17."),
     )).recorded[0]
-    async with AsyncSession(repository._test_engine) as session, session.begin():  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session, session.begin():
         node = await session.get(Knowledge, recorded.fingerprint)
         node.revision_id = None
         node.revision_unresolved = True

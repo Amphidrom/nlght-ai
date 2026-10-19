@@ -4,9 +4,9 @@
 """In-process execution stream broker and its worker-side emitter.
 
 Same-node ``gateway+worker`` streaming: the worker publishes a running
-execution's signals into the broker; the gateway subscribes and relays them to
+execution's signals into the broker. The gateway subscribes and relays them to
 the caller. This is the concrete transport behind ``ExecutionStreamBroker`` for a
-single process; ``postgres_execution_stream`` is the distributed one, selected by
+single process. ``postgres_execution_stream`` is the distributed one, selected by
 ``execution.stream.transport`` without either side noticing. It also reuses this
 broker for local fan-out, so the delivery semantics below hold under both.
 """
@@ -28,7 +28,7 @@ _MAX_BACKLOG = 1024
 
 # Upper bound on retained channels. A closed channel is kept until its last
 # subscriber drains it (so a subscriber that attaches after the run already
-# finished still replays the backlog and ends, rather than hanging); this caps
+# finished still replays the backlog and ends, rather than hanging). This caps
 # the retention of closed channels that are never read.
 _MAX_CHANNELS = 4096
 
@@ -74,8 +74,8 @@ class InProcessExecutionStreamBroker:
         for queue in channel.subscribers:
             queue.put_nowait(None)
         # Keep the closed channel (with its backlog) so a subscriber that attaches
-        # after the run already finished — a fast run can complete before the
-        # gateway subscribes — still replays it and then ends, instead of hanging
+        # after the run finishes still receives the backlog. A fast run can
+        # complete before the gateway subscribes. Replay prevents it from hanging
         # on a fresh empty channel. Dropped once its last subscriber drains it, or
         # evicted below if it is never read.
         if not channel.subscribers:
@@ -129,9 +129,8 @@ class PublishingSignalEmitter(SignalEmitter):
     """A ``SignalEmitter`` whose transport is the execution stream broker.
 
     The worker drives a streaming execution with this emitter so each step's
-    output is forwarded to whoever is relaying the stream to the caller — the
-    same ``SignalEmitter`` seam the buffering and queuing emitters implement,
-    only its backend crosses to the gateway.
+    output is forwarded through the broker to the gateway relaying the stream.
+    It implements the same ``SignalEmitter`` port as local emitters.
     """
 
     def __init__(self, broker: ExecutionStreamBroker, execution_id: uuid.UUID) -> None:

@@ -1,14 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Deterministic document processing.
-
-Side-effect free: classification, enrichment, and chunking of one document, plus
-the stable processing revision derived from them. It lives in ``core`` rather
-than ``application`` because it orchestrates nothing — it is the domain rule
-that decides what a processed document *is*, and both the application layer and
-workflow steps depend on it.
-"""
+"""Classify, enrich, chunk, and version source documents."""
 
 from __future__ import annotations
 

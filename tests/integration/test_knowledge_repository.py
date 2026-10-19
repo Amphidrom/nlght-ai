@@ -53,7 +53,7 @@ def _fact(
 
 @pytest.fixture
 async def sqlite_engine():
-    """A throwaway knowledge database — separate from the platform schema."""
+    """Create an isolated knowledge database for the test."""
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from nlght.adapters.outbound.persistence.knowledge_models import KnowledgeBase
@@ -78,12 +78,7 @@ async def test_a_new_assertion_is_stored_with_its_payload_and_metadata(sqlite_en
 
 
 async def test_an_independent_sighting_reinforces_confidence(sqlite_engine) -> None:
-    """Independent means another source, not another run.
-
-    Two documents saying the same thing is corroboration. The same document read
-    twice is not, however many runs it takes — so what makes a sighting
-    independent is the source it came from.
-    """
+    """Reinforce confidence when another source confirms the same claim."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.upsert(_fact(confidence=0.6, source_id="source-1"))
 
@@ -111,17 +106,7 @@ async def test_a_retried_step_does_not_count_the_same_evidence_twice(sqlite_engi
 
 
 async def test_a_retried_step_does_not_reinforce_confidence_either(sqlite_engine) -> None:
-    """The crash case: assertions written, the extraction record not yet.
-
-    A run that dies between persisting its assertions and recording that it
-    extracted the document is retried, and the retry writes the same assertions
-    again under the same run. The observation is already guarded — but
-    confidence was not, so the retry reinforced the node against itself and a
-    claim grew more certain for having been interrupted.
-
-    Reinforcement is for *independent* sightings. Seeing the same evidence twice
-    because a worker crashed is one sighting.
-    """
+    """Keep confidence stable when a retry repeats the same observation."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.upsert(_fact(run_id="run-1", source_id="source-1"))
 
@@ -142,13 +127,7 @@ async def test_the_same_claim_from_another_source_still_reinforces(sqlite_engine
 
 
 async def test_a_later_run_over_the_same_source_does_not_reinforce(sqlite_engine) -> None:
-    """The correction. This test asserted the opposite and the premise was wrong.
-
-    A later run over the same document is that document saying the same thing a
-    second time. Calling it corroboration made a claim grow more certain for
-    having been re-read — the extraction skip usually prevents ever getting
-    here, but "usually" is not what belief should rest on.
-    """
+    """Keep confidence stable when a later run reads the same source."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.upsert(_fact(run_id="run-1", source_id="source-1"))
 
@@ -172,8 +151,8 @@ async def test_reusing_an_identity_for_another_kind_is_refused(sqlite_engine) ->
     # Its own type, and a permanent one. Retrying cannot make the same input
     # resolve differently, and where a model produced that input a retry can
     # succeed by accident and hide the matcher fault that caused it.
-    from nlght.core.errors.errors import PermanentError  # noqa: PLC0415
-    from nlght.core.knowledge import KnowledgeKindConflictError  # noqa: PLC0415
+    from nlght.core.errors.errors import PermanentError
+    from nlght.core.knowledge import KnowledgeKindConflictError
 
     assert issubclass(KnowledgeKindConflictError, PermanentError)
     with pytest.raises(KnowledgeKindConflictError, match="already exists as kind"):
@@ -209,14 +188,7 @@ async def test_resolve_preserves_the_backend_ranking_order(sqlite_engine) -> Non
 async def test_a_later_run_may_not_raise_the_quarantine_on_a_released_assertion(
     sqlite_engine,
 ) -> None:
-    """Ingestion says what a source asserts, not whether a person has ruled on it.
-
-    This test used to assert the opposite — that a later run raises the
-    quarantine — and the premise was wrong. The review policy flags *every*
-    candidate on *every* run, so letting a run raise the flag meant an approved
-    assertion was quarantined again on the next pass over an unchanged page. The
-    approval was undone by the ingestion that found nothing new.
-    """
+    """Keep a released assertion out of quarantine on a later ingestion."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.upsert(_fact("fact-1"))
 
@@ -305,7 +277,7 @@ async def test_rejection_keeps_knowledge_out_of_every_retrieval_path(sqlite_engi
     )
 
     assert await repository.resolve(["dirty"]) == []
-    # Rejection is a decision, so the item leaves the queue — the quarantine
+    # Rejection is a decision, so the item leaves the queue. The quarantine
     # flag alone cannot distinguish "unseen" from "seen and refused", and a
     # queue built on it could never be emptied.
     assert await repository.pending_review() == []
@@ -400,7 +372,7 @@ async def test_every_builtin_kind_round_trips(sqlite_engine) -> None:
     resolved = await repository.resolve([w.identity for w in writes])
 
     assert [item.kind for item in resolved] == ["fact", "rule", "pattern", "decision"]
-    # A rule written without the short pair round-trips with it absent — which
+    # A rule written without the short pair round-trips with it absent, which
     # is what a corpus stored before those fields existed looks like.
     assert resolved[1].payload == {
         "rule_text": "Never log secrets", "subject": None, "rule_property": None,
@@ -412,8 +384,8 @@ async def test_every_builtin_kind_round_trips(sqlite_engine) -> None:
 
 
 async def test_a_rule_round_trips_its_subject_and_property(sqlite_engine) -> None:
-    # And one written with them keeps them, canonically — the model's casing
-    # does not survive into the database.
+    # A row keeps canonical identity fields. The model's casing does not
+    # survive into the database.
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     write = KnowledgeWrite(
         identity="rule-subjectful", type="security",
@@ -526,7 +498,7 @@ async def test_merge_chains_are_refused(sqlite_engine) -> None:
             merge_into="duplicate",
         )
     # `duplicate` has already been ruled on, so reaching the merge rule at all
-    # means deliberately replacing that decision — the guard comes first, and
+    # means deliberately replacing that decision. The guard comes first, and
     # this is checking the rule behind it.
     with pytest.raises(ValueError, match="already merged"):
         await repository.record_review(
@@ -558,11 +530,6 @@ async def test_a_merge_needs_a_real_and_different_target(sqlite_engine) -> None:
             identity="only", reviewer_id="r", decision=ReviewDecision.APPROVED,
             merge_into="only",
         )
-
-
-# ---------------------------------------------------------------------------
-# Two reviewers, one assertion
-# ---------------------------------------------------------------------------
 
 
 async def test_a_second_decision_on_the_same_version_is_refused(sqlite_engine) -> None:
@@ -604,7 +571,7 @@ async def test_a_decision_can_be_replaced_deliberately(sqlite_engine) -> None:
     )
 
     assert await repository.resolve(["misclicked"]) == []
-    # Both decisions stay in the history — replacing is not erasing.
+    # Both decisions stay in the history because replacement does not erase one.
     assert len(await repository.reviews("misclicked")) == 2
 
 
@@ -635,7 +602,7 @@ async def test_fresh_evidence_reopens_an_assertion_without_superseding(sqlite_en
 
 
 async def test_a_reviewer_id_may_be_any_opaque_string(sqlite_engine) -> None:
-    # It will be whatever the identity provider hands over — an email, an
+    # It will be whatever the identity provider hands over, such as an email or an
     # opaque id, something with symbols in it. Nothing here parses it.
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.upsert(_fact("opaque", review_required=True, review_reason="unsure"))
@@ -679,7 +646,7 @@ async def test_recording_an_extraction_makes_the_document_skippable(sqlite_engin
 
 
 async def test_a_changed_model_makes_a_recorded_document_current_no_longer(sqlite_engine) -> None:
-    # The document did not change; the extraction did. A content-only key would
+    # The document did not change. The extraction did. A content-only key would
     # skip it here, which is exactly when the corpus needs redoing.
     from nlght.core.knowledge import ExtractionStateWrite, extraction_version
 
@@ -737,17 +704,7 @@ async def test_re_extracting_a_document_replaces_its_state(sqlite_engine) -> Non
 
 
 async def test_a_later_run_does_not_undo_an_approval(sqlite_engine) -> None:
-    """The defect: a reviewer's decision survived until the next ingestion.
-
-    Somebody looked at the assertion and approved it. The next run over the
-    same unchanged document re-extracts it, the review policy flags every
-    candidate as it always does, and `upsert` raised `review_required` again —
-    so the approval was gone and the assertion left retrieval, for a page nobody
-    had touched.
-
-    Ingestion says what a source asserts. It does not get to say whether a
-    person has ruled on it.
-    """
+    """Preserve approval and retrieval visibility after another ingestion."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.upsert(_fact(review_required=True, review_reason="policy: all"))
     await repository.record_review(
@@ -766,14 +723,7 @@ async def test_a_later_run_does_not_undo_an_approval(sqlite_engine) -> None:
 async def test_a_later_run_does_not_return_a_rejected_assertion_to_the_queue(
     sqlite_engine,
 ) -> None:
-    """The same defect through the other door, and the quieter one.
-
-    A rejection keeps `review_required` set — that is what holds the assertion
-    out of retrieval — so the queue tells an unseen assertion from a judged one
-    by comparing the review against the node's last change. `upsert` stamped
-    `updated_at` on every sighting, so a re-ingestion made the node look changed
-    and the rejected assertion came back to be judged again. On every run.
-    """
+    """Keep a rejected assertion out of the review queue after reingestion."""
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.upsert(_fact(review_required=True, review_reason="policy: all"))
     await repository.record_review(

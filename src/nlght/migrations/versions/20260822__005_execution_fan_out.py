@@ -4,8 +4,8 @@
 """Execution fan-out: workflow_executions.parent_execution_id.
 
 A run that spreads its work across workers submits one child execution per item.
-A child is an ordinary execution — claimed, leased, fenced, and retried like any
-other — and this nullable self-reference is what keeps the work of one logical
+A child is an ordinary execution that is claimed, leased, fenced, and retried.
+This nullable self-reference keeps the work of one logical
 run findable once it has been spread out.
 
 ON DELETE SET NULL rather than CASCADE: a child's own record is durable evidence

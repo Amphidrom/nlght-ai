@@ -1,4 +1,4 @@
-"""Alembic migration environment — async SQLAlchemy setup.
+"""Set up async SQLAlchemy for Alembic migrations.
 
 The database URL is read from the same platform.yaml that the runtime uses.
 No URL is stored in alembic.ini or in this file.
@@ -27,28 +27,25 @@ from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
-# ---------------------------------------------------------------------------
-# Import the metadata Alembic uses for autogenerate
-# ---------------------------------------------------------------------------
 from nlght.adapters.outbound.persistence.models import Base
 
 target_metadata = Base.metadata
 
-# ---------------------------------------------------------------------------
-# Alembic config object (gives access to alembic.ini values)
-# ---------------------------------------------------------------------------
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
-# ---------------------------------------------------------------------------
-# Read DB URL from platform.yaml
-# ---------------------------------------------------------------------------
-
 def _load_db_url() -> str | None:
-    """Find the persistence URL in platform.yaml (integrations.persistence.workflows.url)."""
+    """Read the workflow persistence URL from platform configuration.
+
+    Returns:
+        str | None: Configured URL, or ``None`` if the file or value is absent.
+
+    Side Effects:
+        Read the path from ``NLGHT_CONFIG`` or the default platform file.
+    """
     config_path_env = os.environ.get("NLGHT_CONFIG")
     if config_path_env:
         yaml_path = Path(config_path_env)
@@ -70,7 +67,7 @@ def _load_db_url() -> str | None:
 
 
 # `-x url=...` overrides the configured URL, so a database can be migrated
-# without a platform.yaml — what a CI job or a one-off setup usually needs.
+# without a platform.yaml, as CI jobs and one-off setup often require.
 _x_args = context.get_x_argument(as_dictionary=True)
 _db_url = _x_args.get("url") or _load_db_url()
 if _db_url:
@@ -84,10 +81,6 @@ elif not context.is_offline_mode():
         f"Override config path with: export NLGHT_CONFIG=/path/to/platform.yaml"
     )
 
-
-# ---------------------------------------------------------------------------
-# Offline mode: generate SQL without a live connection
-# ---------------------------------------------------------------------------
 
 def run_migrations_offline() -> None:
     """Emit migration SQL to stdout without connecting to the database.
@@ -107,10 +100,6 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-# ---------------------------------------------------------------------------
-# Online mode: connect and apply migrations
-# ---------------------------------------------------------------------------
-
 def do_run_migrations(connection: Connection) -> None:
     context.configure(
         connection=connection,
@@ -127,18 +116,13 @@ async def run_migrations_online() -> None:
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
-        # NullPool: each migration run gets a fresh connection —
-        # avoids connection pool issues in short-lived CLI processes.
+        # Avoid pooling connections across short-lived migration runs.
         poolclass=NullPool,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if context.is_offline_mode():
     run_migrations_offline()

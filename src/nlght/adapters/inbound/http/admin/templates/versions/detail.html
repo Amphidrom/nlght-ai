@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}v{{ version.version }} — {{ workflow.name }} — nlght Admin{% endblock %}
+{% block title %}v{{ version.version }}: {{ workflow.name }} | nlght Admin{% endblock %}
 {% block content %}
 <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem">
   <div>
@@ -38,14 +38,14 @@
       {% if s.is_start %}<span class="badge badge-yes">start</span>{% endif %}
       {% if s.is_terminal %}<span class="badge badge-no">terminal</span>{% endif %}
       {% if s.is_resume %}<span class="badge badge-draft">resume</span>{% endif %}
-      {% if not s.is_start and not s.is_terminal and not s.is_resume %}—{% endif %}
+      {% if not s.is_start and not s.is_terminal and not s.is_resume %}None{% endif %}
     </td>
     <td>
       {% if s.transitions %}
         {% for verdict, target in s.transitions.items() %}
-          <span class="badge badge-draft">{{ verdict }} → {{ target }}</span>
+          <span class="badge badge-draft">{{ verdict }} to {{ target }}</span>
         {% endfor %}
-      {% else %}—{% endif %}
+      {% else %}None{% endif %}
     </td>
     <td class="actions">
       <a href="/admin/steps/{{ s.workflow_step_id }}">Edit</a>
@@ -60,17 +60,18 @@
   </tbody>
 </table>
 {% else %}
-<p>No steps yet. <a href="/admin/versions/{{ version.workflow_version_id }}/steps/new">Add the first step →</a></p>
+<p>No steps yet. <a href="/admin/versions/{{ version.workflow_version_id }}/steps/new">Add the first step</a></p>
 {% endif %}
 
 {% if steps %}
 <!-- Graph Editor -->
-<h4 style="margin-top:2.5rem">Step Graph <small style="font-weight:400;color:var(--pico-muted-color)">— visual transition editor</small></h4>
+<h4 style="margin-top:2.5rem">Step Graph <small style="font-weight:400;color:var(--pico-muted-color)">Visual transition editor</small></h4>
 <div class="graph-wrap">
   <div class="graph-toolbar">
-    <select id="gFrom"><option value="">From step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
-    <input id="gVerdict" type="text" placeholder="verdict (e.g. done)" style="max-width:160px"/>
-    <select id="gTo"><option value="">To step…</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
+    <select id="gFrom"><option value="">From step</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
+    <select id="gVerdict" style="max-width:180px"><option value="">Select verdict</option></select>
+    <input id="gCustomVerdict" type="text" placeholder="Custom verdict" style="max-width:160px;display:none"/>
+    <select id="gTo"><option value="">To step</option>{% for s in steps %}<option value="{{ s.workflow_step_id }}">{{ s.name }}</option>{% endfor %}</select>
     <button id="addTransitionBtn" type="button">Add transition</button>
     <button id="deleteTransitionBtn" type="button" class="secondary" disabled>Delete transition</button>
     <span style="flex:1"></span>
@@ -101,11 +102,10 @@
 
   const versionId = '{{ version.workflow_version_id }}';
   const stepNameById = Object.fromEntries(stepsData.map(s => [s.id, s.name]));
+  const stepById = Object.fromEntries(stepsData.map(s => [s.id, s]));
   const container = document.getElementById('cy');
 
-  // No stored positions. The graph is what the layout computes, every time —
-  // dragging a step is a passing adjustment to the current view, not a fact
-  // about the workflow.
+  // Recompute layout on each load because dragging changes only the current view.
   const nodes = stepsData.map(s => ({
     data: { id: s.id, label: s.name + '\n[' + s.type + ']' },
     classes: s.is_start ? 'start' : s.is_terminal ? 'terminal' : s.is_resume ? 'resume' : 'normal',
@@ -122,15 +122,8 @@
     });
   });
 
-  // A layered layout, computed here rather than pulled in.
-  //
-  // Cytoscape's built-in breadthfirst assigns ranks but never reorders within
-  // them, so a pipeline with any branching comes out with edges crossing for no
-  // reason. dagre does that reordering and is what workflow tools normally use,
-  // but it is an extension that would have to be vendored — and asking for two
-  // downloads before the page looks right is not a fix. The two passes below are
-  // what dagre does in its first two phases, which for a workflow of tens of
-  // steps is the part that matters.
+  // Reorder breadthfirst ranks to reduce crossings without requiring dagre.
+  // A vendored dagre extension takes precedence when available.
   // Left to right: a pipeline is read the way a sentence is, and a workflow of
   // twenty steps is far wider than a browser is tall. RANK_GAP separates one
   // layer from the next along the flow; NODE_GAP separates the steps that share
@@ -163,13 +156,8 @@
       incoming.get(target).push(source);
     });
 
-    // Cycles first. A workflow routes backwards — a review step that sends an
-    // assertion back for another pass, a batching step that repeats — and
-    // ranking by longest path is only meaningful on a graph without them. A
-    // depth-first walk marks the edges that close a cycle; they are still drawn,
-    // they just do not get to say what sits below what. Without this a back edge
-    // drags its own predecessor beneath its successors, which is worse than no
-    // layout at all.
+    // Exclude cycle-closing edges from ranking so back edges cannot pull their
+    // predecessors below successors. Keep those edges visible in the graph.
     const WHITE = 0, GREY = 1, BLACK = 2;
     const colour = new Map(ids.map(id => [id, WHITE]));
     const backEdges = new Set();
@@ -236,12 +224,7 @@
       });
     }
 
-    // Which way the flow runs is decided by the space there is to run in, not
-    // by a fixed preference. A pipeline of twenty steps stacked downwards in a
-    // canvas that is three times wider than it is tall wastes the width and
-    // shrinks every step to fit the height. So both orientations are measured
-    // against the canvas and the one that lets the graph be largest wins —
-    // which on any ordinary desktop field means left to right.
+    // Measure both orientations so the graph uses the available canvas area.
     const rankCount = layers.length;
     const widest = layers.reduce((max, layer) => Math.max(max, layer.length), 1);
     const canvasW = container.clientWidth || 900;
@@ -268,9 +251,7 @@
     return positions;
   }
 
-  // dagre, when it has been vendored, does the same job with a more thorough
-  // crossing pass — so it wins if it is there, and the layout above is what
-  // makes the page look right without it.
+  // Prefer vendored dagre for crossing reduction; keep local layout as fallback.
   let useDagre = false;
   if (typeof window.cytoscapeDagre === 'function') {
     try { cytoscape.use(window.cytoscapeDagre); useDagre = true; }
@@ -311,14 +292,12 @@
           'text-background-opacity': 1, 'text-background-padding': '2px',
         }
       },
-      // A step routing to itself is how a batching step continues its own work —
-      // ingestion.write does it once per document, so these are common and worth
-      // reading at a glance.
+      // Show self-routing batching steps clearly, including ingestion.write.
       //
       // `:loop` is the selector for it. The obvious-looking `[source = "target"]`
       // is not: that asks whether the edge's *source data field* holds the string
       // "target", which it never does, so the rule silently matched nothing and
-      // every loop fell back to cytoscape's default — a small arc tucked into the
+      // every loop fell back to cytoscape's default: a small arc tucked into the
       // node's upper-left corner, half hidden behind the box and with its verdict
       // written across it.
       //
@@ -341,7 +320,7 @@
   // Zooming anchors on the pointer by converting client coordinates with a
   // cached container rectangle. Cytoscape refreshes that cache from events it
   // subscribed to at startup, so anything that moves the container without one
-  // of them leaves the anchor off by however far the container travelled — the
+  // of them leaves the anchor off by however far the container travelled. The
   // zoom then walks away from the cursor. Invalidating right before a gesture
   // costs one field write and makes the rectangle unconditionally current.
   function refreshContainerRect() {
@@ -388,10 +367,10 @@
 
   function deleteSelectedTransitions() {
     // Transitions only. Selecting a step and pressing Delete used to remove it
-    // from the canvas, and Save then wrote a transition map without it —
+    // from the canvas, and Save then wrote a transition map without it,
     // quietly dropping that step's routing while the step still existed.
     const selected = cy.edges(':selected');
-    if (selected.length) { selected.remove(); syncDeleteButton(); }
+    if (selected.length) { selected.remove(); syncDeleteButton(); refreshVerdicts(); }
   }
 
   deleteTransitionBtn.addEventListener('click', deleteSelectedTransitions);
@@ -408,7 +387,7 @@
       cy.layout(dagreOptions).run();
     } else {
       // From the transitions on the canvas now, not the ones the page loaded
-      // with — the point of re-arranging is usually that they have changed.
+      // with, because re-arranging commonly follows transition edits.
       const positions = layeredPositions(
         cy.edges().map(e => ({ source: e.data('source'), target: e.data('target') }))
       );
@@ -419,11 +398,43 @@
     fit();
   });
 
+  const verdictSelect = document.getElementById('gVerdict');
+  const customVerdict = document.getElementById('gCustomVerdict');
+
+  function refreshVerdicts() {
+    const from = document.getElementById('gFrom').value;
+    const step = stepById[from];
+    const existing = cy.edges().filter(edge => edge.data('source') === from)
+      .map(edge => edge.data('label'));
+    const values = [...new Set([...(step?.verdicts || []), ...existing])];
+    verdictSelect.replaceChildren(new Option('Select verdict', ''));
+    values.forEach(value => {
+      const terminal = value === 'done' || value === 'failed';
+      const option = new Option(terminal ? value + ' (terminates)' : value, value);
+      option.disabled = terminal;
+      verdictSelect.add(option);
+    });
+    const customOption = new Option('Custom verdict...', '');
+    customOption.dataset.custom = 'true';
+    verdictSelect.add(customOption);
+    customVerdict.value = '';
+    customVerdict.style.display = 'none';
+  }
+
+  document.getElementById('gFrom').addEventListener('change', refreshVerdicts);
+  verdictSelect.addEventListener('change', () => {
+    customVerdict.style.display = verdictSelect.selectedOptions[0]?.dataset.custom ? '' : 'none';
+  });
+
   document.getElementById('addTransitionBtn').addEventListener('click', () => {
     const from = document.getElementById('gFrom').value;
-    const verdict = document.getElementById('gVerdict').value.trim();
+    const verdict = (verdictSelect.selectedOptions[0]?.dataset.custom ? customVerdict.value : verdictSelect.value).trim();
     const to = document.getElementById('gTo').value;
     if (!from || !verdict || !to) { alert('Please fill in all three fields.'); return; }
+    if (verdict === 'done' || verdict === 'failed') {
+      alert('This verdict terminates the workflow and does not need a transition.');
+      return;
+    }
     const edgeId = from + '__' + verdict + '__' + to;
     if (cy.getElementById(edgeId).length) { alert('This transition already exists.'); return; }
     // One verdict routes to one step. A second target for a verdict that already
@@ -435,7 +446,7 @@
       return;
     }
     cy.add({ data: { id: edgeId, source: from, target: to, label: verdict } });
-    document.getElementById('gVerdict').value = '';
+    refreshVerdicts();
   });
 
   document.getElementById('saveGraphBtn').addEventListener('click', async () => {
@@ -445,16 +456,16 @@
       transitions[e.data('source')][e.data('label')] = e.data('target');
     });
     const status = document.getElementById('saveStatus');
-    status.textContent = 'Saving…';
+    status.textContent = 'Saving';
     try {
       const resp = await fetch('/admin/versions/' + versionId + '/graph', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': window.nlghtCsrfToken },
         body: JSON.stringify({ transitions }),
       });
-      if (resp.ok) { status.textContent = '✓ Saved'; setTimeout(() => status.textContent = '', 2500); }
-      else { status.textContent = '✗ Error ' + resp.status; }
-    } catch (err) { status.textContent = '✗ ' + err.message; }
+      if (resp.ok) { status.textContent = 'Saved'; setTimeout(() => status.textContent = '', 2500); }
+      else { status.textContent = 'Error ' + resp.status; }
+    } catch (err) { status.textContent = 'Error: ' + err.message; }
   });
 })();
 </script>

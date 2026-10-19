@@ -21,10 +21,18 @@ logger = logging.getLogger(__name__)
 def create_app(
     config_path: str | None = None,
 ) -> FastAPI:
-    """Create the FastAPI application.
+    """Create the HTTP application and its startup lifespan.
 
-    Protocol adapters are wired up inside the lifespan after the container is built,
-    so that route registration happens in the same async context as subsystem startup.
+    Args:
+        config_path (str | None): Platform configuration path. When absent,
+            use ``NLGHT_CONFIG`` or the default path.
+
+    Returns:
+        FastAPI: Application with health routes and a startup lifespan.
+
+    Side Effects:
+        At startup, build the container, register protocol and optional admin
+        routes, and start their subsystems. At shutdown, stop those components.
     """
     _config_path = config_path or os.environ.get("NLGHT_CONFIG", _DEFAULT_CONFIG_PATH)
     admin_enabled = os.environ.get("NLGHT_ADMIN", "").lower() in ("1", "true")
@@ -35,22 +43,22 @@ def create_app(
         app.state.container = container
 
         # Register /admin and the metrics endpoint *before* the protocol
-        # adapters. The generic_json adapter is a catch-all — `/{full_path:path}`
-        # for every method — and Starlette matches routes in registration order,
+        # adapters. The generic_json adapter catches `/{full_path:path}`
+        # for every method, and Starlette matches routes in registration order,
         # so anything mounted after it is shadowed. Admin and metrics would then
         # answer as unmapped workflow paths (404 "No enabled workflow found for
         # operation 'generic_json_request'") instead of serving their own routes.
         if admin_enabled:
             from nlght.adapters.inbound.http.admin.router import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                admin_router,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
+                admin_router,
             )
             app.include_router(admin_router, prefix="/admin")
             logger.info("Admin UI mounted at /admin")
         metering = getattr(container, "metering", None)
         if metering is not None and hasattr(metering, "make_asgi_app"):
             # A mount matches "<endpoint>/..." but never the bare "<endpoint>"
-            # itself; Starlette would normally redirect to the trailing slash,
-            # but only when nothing else matched — and the catch-all below
+        # itself. Starlette would normally redirect to the trailing slash,
+            # but only when nothing else matched, and the catch-all below
             # always matches. Scrapers request the bare path, so it gets an
             # explicit redirect registered ahead of the catch-all.
             endpoint = metering.endpoint
@@ -85,13 +93,18 @@ def create_app(
 
     @app.get("/readyz")
     async def readyz(response: Response) -> dict[str, str]:
-        """Reports whether the app can actually serve traffic, not just that the process is up.
+        """Report readiness using the configured database connection.
 
-        Only checks the database — the one dependency required for every
-        request path. Model providers are deliberately not pinged here: a
-        readiness probe that calls out to external LLM APIs would make pod
-        health depend on third-party latency/availability instead of this
-        process's own state.
+        Args:
+            response (Response): Response whose status becomes 503 when the
+                database is unreachable.
+
+        Returns:
+            dict[str, str]: Readiness status and database state.
+
+        Notes:
+            Model providers are excluded so external API latency does not
+            determine this process's readiness.
         """
         engine = getattr(app.state.container, "engine", None)
         if engine is None:

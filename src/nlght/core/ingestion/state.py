@@ -15,7 +15,7 @@ class DocumentRevisionWrite:
 
     ``content`` is the authority: exactly ``ProcessedDocument.text``, the string
     chunking ran over and the string chunk offsets index into. Nothing derives
-    it again later — a refetch through ``artifact_ref`` returns whatever the
+    it again later. A refetch through ``artifact_ref`` returns whatever the
     source holds now, which for a source that transforms at acquisition is not
     even the same representation, and the search payload is a projection that
     may be rebuilt or dropped at any time. Neither can be addressed by an
@@ -24,8 +24,8 @@ class DocumentRevisionWrite:
     ``artifact_ref`` stays what it always was: where this revision came from.
     It is provenance, never a read fallback.
 
-    ``None`` where the document was observed and has no text — a binary file, or
-    one that would not decode. Such a document belongs in the snapshot, because
+    ``None`` means the document was observed but has no text, such as a binary
+    file or one that would not decode. Such a document belongs in the snapshot, because
     the tombstone rule is "absent from a complete snapshot" and leaving it out
     would declare it deleted, but there is nothing to store and nothing to
     index. That is the single meaning of ``None`` here, and it must stay single.
@@ -90,9 +90,9 @@ class IndexStateWrite:
     source content did not change.
 
     ``index_generation`` names *which* index it was written to. Content and
-    enricher describe the document; without the generation the record would
+    enricher describe the document. Without the generation the record would
     claim a document is indexed even after the index it names was dropped and
-    recreated — and a run over an unchanged source would then write nothing and
+    recreated. A run over an unchanged source would then write nothing and
     report success into an empty index. It is also what makes a large reindex
     resumable: a document already carrying the current generation is done, and
     an interrupted run picks up exactly the rest.
@@ -104,11 +104,11 @@ class IndexStateWrite:
     enricher_hash: str
     processing_revision_id: str
     index_generation: str
-    #: How the document was projected into the indexes — payload schema,
+    #: How the document was projected into the indexes: payload schema,
     #: embedding provider, model, dimension, distance metric.
     #:
     #: Separate from the three above because it moves for different reasons.
-    #: They describe the document and which incarnation of an index holds it;
+    #: They describe the document and which incarnation of an index holds it.
     #: none of them notices when the embedding model changes. Without this, a
     #: model swap reindexed nothing: every document read as current, the run
     #: reported success, and the collection kept vectors from a model the
@@ -146,8 +146,8 @@ class IndexStateSummary:
 
     ``indexed`` minus ``on_current_generation`` is the work an interrupted
     reindex still owes. ``live_documents`` minus ``indexed`` is what was never
-    written. Neither says anything about what the indexes actually hold — only
-    a caller that can ask Qdrant and OpenSearch can compare that, and the gap
+    written. Neither says anything about what the indexes actually hold. A
+    caller that can ask Qdrant and OpenSearch can compare that, and the gap
     between this expectation and their answer is the divergence worth reporting.
     """
 
@@ -159,5 +159,9 @@ class IndexStateSummary:
 
     @property
     def outstanding(self) -> int:
-        """Documents recorded against an older generation of this target."""
+        """Count indexed documents awaiting the current generation.
+
+        Returns:
+            int: Difference between those counts.
+        """
         return self.indexed - self.on_current_generation

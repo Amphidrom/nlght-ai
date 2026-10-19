@@ -1,12 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The contract every adapter owes, whatever domain type it starts from.
+"""Apply shared mental-element invariants to each domain adapter.
 
-An adapter is the last place domain knowledge is allowed to be. What it produces
-must be complete enough for the reduction and the renderer to work without ever
-asking what the thing was — so these checks are run against each adapter's output
-rather than written out five times.
+Adapters carry domain meaning into a generic form before reduction and
+rendering.
 """
 
 from __future__ import annotations
@@ -15,7 +13,11 @@ from nlght.core.hive_mind.models import Level, MentalElement, estimate_tokens
 
 
 def assert_element_contract(element: MentalElement) -> None:
-    """What must hold for any element, from any adapter."""
+    """What must hold for any element, from any adapter.
+
+    Args:
+        element (MentalElement): Mental element whose adapter contract is checked.
+    """
     # It can be said at all, and it can be said at exactly one level per name.
     assert element.representations
     assert len(element.levels) == len({item.level for item in element.representations})
@@ -32,14 +34,14 @@ def assert_element_contract(element: MentalElement) -> None:
                 f"{element.element_id} prices {representation.level} itself"
             )
 
-    # Cheaper as it gets shorter — the condition the monotonicity guarantee
-    # rests on, checked here too because an adapter is where it can be broken.
+    # Shorter forms must not cost more. An adapter can otherwise break the
+    # reduction's monotonicity guarantee.
     offered = [element.at(level) for level in element.levels]
     for fuller, shorter in zip(offered, offered[1:], strict=False):
         assert shorter is not None and fuller is not None
         assert shorter.cost <= fuller.cost
 
-    # A full representation is what the source said; only a shortened one is
+    # A full representation is what the source said. Only a shortened one is
     # derived (ADR-0053).
     full = element.at(Level.FULL)
     if full is not None:
@@ -50,12 +52,11 @@ def assert_element_contract(element: MentalElement) -> None:
 
 
 def assert_no_invented_short_form(element: MentalElement) -> None:
-    """No adapter may fabricate a compact wording.
+    """Reject an adapter representation that invents abbreviated source text.
 
-    Truncating ends a claim mid-sentence and extracting one is a judgement about
-    which sentence carries it. Where no honest short form exists, the element
-    offers none — and the reduction copes, because levels are optional.
-    """
+    Args:
+        element (MentalElement): Adapted element to inspect.
+        """
     assert Level.COMPACT not in element.levels, (
         f"{element.element_id} offers a compact form; was it written or invented?"
     )

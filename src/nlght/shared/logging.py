@@ -23,11 +23,17 @@ def setup_logging(
     app_name: str = "nlght",
     log_dir: str = "logs",
 ) -> None:
-    """Configure logging from a flat dict of logger-name → level strings.
+    """Configure root and named loggers from level overrides.
 
-    The special key ``root`` controls the root logger, equivalent to Spring Boot's
-    ``logging.level.root``.  All other keys are applied as named-logger overrides,
-    e.g. ``{"nlght": "DEBUG", "sqlalchemy.engine": "WARNING"}``.
+    Args:
+        level_overrides (dict[str, str] | None): Logger names and levels.
+            ``root`` sets the root level. Unknown levels are logged and skipped.
+        app_name (str): Prefix for the timestamped log filename.
+        log_dir (str): Directory receiving the log file.
+
+    Side Effects:
+        Create the log directory, replace root handlers, write a log file,
+        and set levels on named loggers.
     """
     overrides: dict[str, str] = level_overrides or {}
     root_level_str = overrides.get("root", "INFO").upper()
@@ -53,7 +59,7 @@ def setup_logging(
         level = _LEVEL_MAP.get(level_str.upper())
         if level is None:
             logging.getLogger(__name__).warning(
-                "Unknown log level %r for logger %r — skipping", level_str, logger_name
+                "Unknown log level %r for logger %r: skipping", level_str, logger_name
             )
             continue
         logging.getLogger(logger_name).setLevel(level)

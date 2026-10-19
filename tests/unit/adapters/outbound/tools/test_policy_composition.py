@@ -25,11 +25,13 @@ from nlght.adapters.outbound.tools.action_policy import (
     _evaluate_side_effect,
     strictest,
 )
+from nlght.core.model.trust import ContentExposure, ContentTrust, SourceRef
 from nlght.core.tools.action import (
     ActionDecision,
     ActionDecisionReason,
     ActionDecisionResult,
     ActionExecutionContext,
+    ActionReview,
     ConcreteAction,
     DataEgressClass,
     ExecutionCapabilities,
@@ -57,11 +59,17 @@ HOSTED = ExecutionCapabilities(
 CONTEXT = ActionExecutionContext(
     request_id="r", correlation_id="c", principal=None, workflow="w",
     session_id=None, resource_address="kind/name", signature_name="op",
-    has_external_untrusted_input=True,
+    exposure=ContentExposure((SourceRef("web", "", "https://attacker.example", ContentTrust.UNTRUSTED),)),
 )
 
 
-def _every_action():  # noqa: ANN202
+def _review(action: ConcreteAction) -> ActionReview:
+    return ActionReview(
+        context=CONTEXT, action=action, action_fingerprint="f", effective_arguments_json="{}",
+    )
+
+
+def _every_action():
     product = itertools.product(
         SideEffectClass, DataEgressClass, ScopeClass, ExecutionClass, (CONFINED, HOSTED),
     )
@@ -79,7 +87,7 @@ async def test_no_dimension_is_ever_masked_by_another() -> None:
     checked = 0
 
     for action in _every_action():
-        combined = await policy.evaluate(action, CONTEXT)
+        combined = await policy.evaluate(_review(action))
         dimensions = (
             _evaluate_execution(action),
             _evaluate_side_effect(action),
@@ -110,7 +118,7 @@ async def test_a_single_denying_dimension_denies_the_action() -> None:
         capabilities=CONFINED,
     )
 
-    result = await policy.evaluate(action, CONTEXT)
+    result = await policy.evaluate(_review(action))
 
     assert result.decision is ActionDecision.DENY
     assert result.reason is ActionDecisionReason.ARBITRARY_EGRESS

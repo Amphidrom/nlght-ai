@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{% if policy %}Edit policy{% else %}New policy{% endif %} — nlght Admin{% endblock %}
+{% block title %}{% if policy %}Edit policy{% else %}New policy{% endif %} | nlght Admin{% endblock %}
 {% block content %}
 <div>
   <p style="margin:0;color:var(--pico-muted-color)"><a href="/admin/policies">Access Policies</a> /</p>
@@ -40,7 +40,7 @@
     Enabled
   </label>
   <label style="margin-top:1rem">
-    Conditions <small>(JSON — keys AND, values OR, globs; keys: <code>model</code>, <code>header:&lt;name&gt;</code>, <code>client_host</code>; empty = matches always)</small>
+    Conditions <small>(JSON object: keys use AND, values use OR. Globs are supported for <code>model</code>, <code>header:&lt;name&gt;</code>, and <code>client_host</code>. Empty matches always.)</small>
     <textarea name="conditions_json" rows="6" placeholder='{"model": ["llama3*"], "header:x-org": ["acme"]}'>{{ policy.conditions | tojson(indent=2) if policy else '{}' }}</textarea>
   </label>
   <div class="form-actions">

@@ -14,6 +14,7 @@ import pytest
 from nlght.adapters.outbound.stores import data as data_module
 from nlght.adapters.outbound.stores.connections import StoreConnections
 from nlght.adapters.outbound.stores.data import DataStoreTool
+from nlght.core.model.trust import ContentTrust
 from nlght.ports.outbound.embedding_client import EmbeddingResult
 
 
@@ -32,12 +33,9 @@ class _FakeConnections(StoreConnections):
 
 
 class _Corpus:
-    """The authority, as the store sees it: what is published and what it says.
+    """Published document revisions and payloads visible to the store.
 
-    Every document is published at the revision the payload names unless a test
-    says otherwise — which is what makes a stale candidate a deliberate setup
-    rather than the default.
-    """
+    Each payload is current unless a test explicitly marks its revision stale."""
 
     def __init__(
         self,
@@ -72,15 +70,10 @@ class _Hit:
 
 
 class _FakeQdrant:
-    """Mirrors the client's real surface, `query_points` and a response object.
+    """A Qdrant double that exposes the current query_points API.
 
-    It used to expose `search`, which qdrant-client dropped after 1.9. The store
-    called the method that no longer existed, the AttributeError was caught and
-    logged rather than raised, and the semantic half of every hybrid search
-    returned nothing against a real Qdrant — while every unit test passed,
-    because the fake still had the old method. A fake that keeps a removed API
-    alive does not test the adapter, it tests itself.
-    """
+    The response shape matches the client so removed API methods cannot keep
+    adapter tests green."""
 
     def __init__(self, hits: list[_Hit] | None = None, *, fail: bool = False) -> None:
         self.hits = hits or []
@@ -196,16 +189,7 @@ async def test_a_text_query_is_embedded_before_the_vector_search() -> None:
 
 
 async def test_both_backends_answer_and_each_finding_names_its_own() -> None:
-    """A document and a chunk of it are two findings, not one seen twice.
-
-    The two backends answer at different granularities on purpose: OpenSearch
-    holds the document, Qdrant holds chunks of it. Sharing a `document_id` makes
-    them related, and relatedness is not identity (`core/retrieval/hit.py`) — so
-    they are ranked together and neither is folded into the other.
-
-    This is why the store cannot show cross-backend reinforcement, and the
-    reason is the carrier rather than the old mismatched key spaces.
-    """
+    """Preserve document and chunk findings from both search backends."""
     tool = _tool(
         _FakeQdrant([_Hit("shared", 0.9), _Hit("vector-only", 0.8)]),
         _FakeOpenSearch(["shared", "lexical-only"]),
@@ -280,9 +264,9 @@ async def test_keyword_search_skips_embedding_entirely() -> None:
 
 
 async def test_fusion_is_rank_based_not_score_based() -> None:
-    # BM25 scores dwarf cosine similarities; a sum would let the lexical backend
+    # BM25 scores dwarf cosine similarities. A sum would let the lexical backend
     # decide every ranking on its own. The fusion itself now lives in
-    # `core/retrieval` and is pinned there; this holds the store to using it.
+    # `core/retrieval` and is pinned there. This holds the store to using it.
     tool = _tool(_FakeQdrant([_Hit("v", 0.91)]), _FakeOpenSearch(["l"]), _FakeEmbedding())
 
     fused = await tool.search(query="tls", limit=10)
@@ -301,28 +285,15 @@ async def test_the_llm_wrapper_keeps_its_shape() -> None:
     """The model-facing contract is unchanged: id, score, content, sources, metadata."""
     tool = _tool(_FakeQdrant([_Hit("a", 0.9)]), _FakeOpenSearch(["a"]), _FakeEmbedding())
 
-    payload = json.loads(await tool.search_tool(query="auth", limit=2))
+    payload = json.loads((await tool.search_tool(query="auth", limit=2)).content)
 
     assert {entry["id"] for entry in payload} == {"a", "chunk-a"}
     assert all(set(entry) >= {"id", "score", "content", "sources"} for entry in payload)
     assert sorted(entry["sources"][0] for entry in payload) == ["lexical", "vector"]
 
 
-# ---------------------------------------------------------------------------
-# the currency boundary and the authority (ADR-0062)
-# ---------------------------------------------------------------------------
-
-
 async def test_a_stale_candidate_never_reaches_the_ranking() -> None:
-    """The reason the check sits in the store and not after the fusion.
-
-    `write_document` upserts before it prunes — deliberately, so a document is
-    never briefly absent — so Qdrant holds chunks of two processing revisions
-    during a rewrite. A stale one that reached the ranking would already have
-    distorted it: it took a rank, displaced something current, and moved the
-    scores around it. Removing it afterwards leaves a ranking computed with it
-    in.
-    """
+    """Filter stale chunk revisions before ranking candidates."""
     corpus = _Corpus(published={"fresh": "proc-fresh"})  # "stale" is not published
     tool = _tool(
         _FakeQdrant([_Hit("stale", 0.99), _Hit("fresh", 0.5)]),
@@ -334,7 +305,7 @@ async def test_a_stale_candidate_never_reaches_the_ranking() -> None:
     hits = await tool.search(query="auth", limit=10)
 
     assert {hit.id for hit in hits} == {"fresh", "chunk-fresh"}
-    # Not merely absent from the answer — absent from what was ranked.
+    # A stale candidate must be absent from ranking, not only the final answer.
     candidates = await tool.search_semantic_candidates(query="auth", limit=10)
     assert [hit.provenance.document_id for hit in candidates] == ["fresh"]
 
@@ -369,7 +340,7 @@ async def test_a_chunk_is_answered_with_the_span_cut_from_the_stored_revision() 
 
 
 async def test_a_document_is_answered_whole_because_it_names_no_span() -> None:
-    """No invented range, no index snippet — the finding named the document."""
+    """Return a whole-document finding when it names no span."""
     corpus = _Corpus(contents={("d", "proc-d"): "the whole revision, all of it"})
     tool = _tool(lexical=_FakeOpenSearch(["d"]), corpus=corpus)
 
@@ -390,3 +361,81 @@ async def test_currency_is_asked_once_per_capability_not_once_per_hit() -> None:
     await tool.search_keyword_candidates(query="auth", limit=10)
 
     assert corpus.asked == ["a", "b", "c"]
+
+
+class _SourcedOpenSearch(_FakeOpenSearch):
+    """The same index, with each document stamped with its ingestion source."""
+
+    def __init__(self, sources: dict[str, str]) -> None:
+        super().__init__(list(sources))
+        self.sources = sources
+
+    def search(self, *, index: str, body: dict[str, Any]) -> dict[str, Any]:
+        response = super().search(index=index, body=body)
+        for hit in response["hits"]["hits"]:
+            hit["_source"]["source"] = self.sources[hit["_id"]]
+        return response
+
+
+def _trusting_tool(
+    lexical: _FakeOpenSearch, trusted: list[str], *, resource_id: str = "",
+) -> DataStoreTool:
+    tool = DataStoreTool(
+        name="data",
+        config={
+            "pg_url": "sqlite+aiosqlite:///:memory:",
+            "qdrant_url": "http://qdrant:6333",
+            "opensearch_url": "http://opensearch:9200",
+            "trusted_sources": trusted,
+        },
+        store_connections=_FakeConnections(qdrant=_FakeQdrant(), opensearch=lexical),
+        resource_id=resource_id,
+    )
+    tool._repository = _Corpus()  # type: ignore[assignment]
+    return tool
+
+
+async def test_a_listed_source_is_trusted_and_an_unlisted_one_is_not() -> None:
+    tool = _trusting_tool(
+        _SourcedOpenSearch({"a": "handbook", "b": "web-crawl"}),
+        ["handbook"],
+        resource_id="store-1",
+    )
+
+    output = await tool.search_keyword_tool(query="tls", limit=5)
+
+    assert {(ref.source_id, ref.trust) for ref in output.origin.sources} == {
+        ("handbook", ContentTrust.TRUSTED),
+        ("web-crawl", ContentTrust.UNTRUSTED),
+    }
+    assert {ref.resource_id for ref in output.origin.sources} == {"store-1"}
+    assert output.origin.trust is ContentTrust.UNTRUSTED
+
+
+async def test_a_result_from_trusted_sources_only_is_trusted() -> None:
+    tool = _trusting_tool(_SourcedOpenSearch({"a": "handbook"}), ["handbook"])
+
+    output = await tool.search_keyword_tool(query="tls", limit=5)
+
+    assert output.origin.trust is ContentTrust.TRUSTED
+
+
+async def test_a_hit_without_a_source_is_untrusted_even_when_everything_listed_is_trusted() -> None:
+    tool = _trusting_tool(_FakeOpenSearch(["a"]), ["handbook"])
+
+    output = await tool.search_keyword_tool(query="tls", limit=5)
+
+    assert output.origin.trust is ContentTrust.UNTRUSTED
+
+
+async def test_retrieval_candidates_carry_their_origin() -> None:
+    tool = _trusting_tool(_SourcedOpenSearch({"a": "handbook"}), ["handbook"])
+
+    (hit,) = await tool.search_keyword_candidates(query="tls", limit=5)
+
+    assert hit.provenance.origin.trust is ContentTrust.TRUSTED
+
+
+def test_a_malformed_trusted_sources_setting_is_refused() -> None:
+    with pytest.raises(ValueError, match="trusted_sources"):
+        _trusting_tool(_FakeOpenSearch(), "handbook")  # type: ignore[arg-type]

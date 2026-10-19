@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.shared.logging — setup_logging."""
+"""Configure shared logging and verify handler setup."""
 from __future__ import annotations
 
 import logging
@@ -32,7 +32,7 @@ def test_setup_logging_off_level(tmp_path) -> None:
 
 
 def test_setup_logging_unknown_level_skipped(tmp_path) -> None:
-    # Should not raise — unknown levels are logged as WARNING and skipped
+    # Unknown levels are logged as WARNING and skipped without raising.
     setup_logging({"some.logger": "NOTAVALIDLEVEL"}, log_dir=str(tmp_path))
 
 

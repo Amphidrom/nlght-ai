@@ -1,22 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""check_control_signals — evaluates control signals from Observe output.
-
-Decision priority:
-    1. Stop intent  → ControlSignalDecision(should_stop=True)
-    2. Scope change → note scope, continue
-    3. Priority boost → note tool boost, continue
-    4. No control signal → pass_through
-
-Usage::
-
-    decision = check_control_signals(
-        classifications = classifications,  # list of SignalClassification-like objects
-        mental_model    = mental_model,
-        cid             = cid,
-    )
-"""
+"""Evaluate control signals from Observe classifications."""
 
 from __future__ import annotations
 
@@ -50,12 +35,15 @@ def check_control_signals(
     mental_model:    object,
     cid:             str,
 ) -> ControlSignalDecision:
-    """Evaluate control signals from a list of SignalClassification-like objects.
+    """Resolve control signals against current state.
 
-    Parameters:
-        classifications: Sub-signals from ObserveStep.
-        mental_model:    Current MentalModel (typed as Any to avoid circular imports).
-        cid:             Correlation ID for logging.
+    Args:
+        classifications (list[Any]): Control-signal classifications for the turn.
+        mental_model (object): Current mental state used to resolve them.
+        cid (str): Correlation identity of the turn.
+
+    Returns:
+        ControlSignalDecision: ControlSignalDecision.
     """
     stop_reason:    str | None = None
     priority_boost: str | None = None
@@ -90,18 +78,18 @@ def check_control_signals(
         scope = _extract_scope_change(sc)
         if scope:
             scope_change = scope
-            logger.info("[%s] control_signal: scope_change → %s", cid, scope_change)
+            logger.info("[%s] control_signal: scope_change -> %s", cid, scope_change)
 
         if intent_value in _PRIORITY_INTENT_TO_TOOL:
             priority_boost = _PRIORITY_INTENT_TO_TOOL[intent_value]
-            logger.info("[%s] control_signal: priority_boost → %s", cid, priority_boost)
+            logger.info("[%s] control_signal: priority_boost -> %s", cid, priority_boost)
 
     if not found_control:
-        logger.debug("[%s] control_signal: no control signal → pass_through", cid)
+        logger.debug("[%s] control_signal: no control signal -> pass_through", cid)
         return ControlSignalDecision(pass_through=True)
 
     if not stop_reason and not priority_boost and not scope_change:
-        logger.debug("[%s] control_signal: no actionable directive → pass_through", cid)
+        logger.debug("[%s] control_signal: no actionable directive -> pass_through", cid)
         return ControlSignalDecision(pass_through=True)
 
     decision = ControlSignalDecision(

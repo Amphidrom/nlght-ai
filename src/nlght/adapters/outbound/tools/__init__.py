@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tool adapter — catalog builder, loader, and built-in tool registry.
+"""Provide the tool catalog builder, loader, and built-in tool registry.
 
 The ``tool_registry`` singleton is the extension point for registering custom tools:
 

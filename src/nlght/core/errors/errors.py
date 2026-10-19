@@ -62,9 +62,9 @@ class PermanentError(AIRuntimeError):
     """A failure that will fail identically however often it is retried.
 
     The distinction the worker needs and could not previously make: a timeout, a
-    refused connection and a busy backend are worth another attempt; a
+    refused connection and a busy backend are worth another attempt. A
     misconfigured step and a write the domain refuses are not. Retrying the
-    second kind burns attempts on an outcome that cannot change — and where a
+    second kind burns attempts on an outcome that cannot change. Where a
     model is involved it is worse than wasteful, because a nondeterministic
     answer can make the retry *succeed* and hide the fault instead of surfacing
     it.
@@ -83,7 +83,7 @@ class ResourceAccessDeniedError(PermanentError):
     execution path does not spend attempts on it.
 
     Raised rather than filtered because the caller *named* this resource. The
-    tool catalog filters — a model is not told about what it may not use — but a
+    tool catalog filters. A model is not told about what it may not use, but a
     step naming a resource has stated a requirement, and continuing without it
     would run something other than the workflow that was configured.
     """
@@ -97,7 +97,7 @@ class ResourceAccessDeniedError(PermanentError):
         self.address = address
         self.workflow = workflow
         where = f"workflow '{workflow}'" if workflow else "a caller outside any workflow"
-        because = f" — {reason}" if reason else ""
+        because = f": {reason}" if reason else ""
         super().__init__(
             f"Access to resource '{address}' is not granted to {where}{because}."
         )
@@ -114,10 +114,10 @@ class AmbiguousToolNameError(PermanentError):
 
     Raised at build time rather than resolved, because there is no correct
     resolution available here. Renaming the operation would change an API a
-    model was told about; picking one would be the silent behaviour under a
+    model was told about. Picking one would be the silent behaviour under a
     different name. Which resource this workflow should see is a configuration
-    decision, and the operator is the one who can make it — narrowing it with a
-    `resource` or `tool` rule removes the collision, because a resource the
+    decision for the operator. Narrowing access with a `resource` or `tool`
+    rule removes the collision, because a resource the
     caller may not use offers nothing to collide with.
 
     Permanent: the same configuration produces the same clash on every request.
@@ -130,7 +130,7 @@ class AmbiguousToolNameError(PermanentError):
         super().__init__(
             f"Operation '{operation}' is offered by {named}. A model calls it by "
             f"that one name, so only one resource can provide it to a given "
-            f"workflow — restrict one of them with an access rule, or stop "
+            f"workflow. Restrict one of them with an access rule, or stop "
             f"enabling both."
         )
 

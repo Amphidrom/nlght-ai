@@ -5,17 +5,17 @@
 
 ``knowledge.parse`` splits generic prose. These handle formats where the markup
 itself carries structure, so a unit ends at a real section boundary rather than
-wherever a blank line happened to fall — which is what makes extraction from
+wherever a blank line happened to fall. This made extraction from
 specifications and cheat sheets usable.
 
 The parsing logic for each format is a standalone function registered in
 ``FORMAT_PARSERS`` by name. Three things consume that registry:
 
 - the explicit per-format steps (``knowledge.parse_markdown``, ``.parse_asciidoc``,
-  ``.parse_html``, ``.parse_pdf``), which each claim one format by file extension;
+  ``.parse_html``, ``.parse_pdf``), which each claim one format by file extension.
 - the dispatching step (``knowledge.parse_auto``), which routes each document to
-  the parser its extension names and falls back to prose for the rest;
-- and any future caller that wants the parsing without a step.
+  the parser its extension names and falls back to prose for the rest.
+- callers that parse a document without a workflow step.
 
 Every parser keeps the section heading in the unit's evidence, so the noise
 filter can later drop assertions whose subject merely echoes their heading.
@@ -83,7 +83,7 @@ class _UnitBuilder:
         self._revision_id = processing_revision_id
         # Provenance carried through to the evidence. It was the other parser's
         # `metadata["path"]` and this one had none, so half the corpus had no
-        # path at all — the same shape of gap as the missing `processing_revision_id` that
+        # path at all. This resembles the missing `processing_revision_id` that
         # made `KnowledgeUnit` use fields instead of a metadata dict.
         self._document_path = document_path
         self._tags = tags
@@ -98,12 +98,16 @@ class _UnitBuilder:
         self.units: list[KnowledgeUnit] = []
 
     def heading(self, level: int, text: str, anchor: str = "") -> None:
-        """A new section starts here, with whatever the format could offer.
+        """Start a section, preserving authored anchors when present.
 
-        `anchor` is what the *source* wrote. When there is one it is taken
-        unchanged — an authored id is the strongest thing a document can give,
-        and normalising it would be inventing. When there is none the heading
-        path stands in, and says so.
+        Args:
+            level (int): Heading depth in the source format.
+            text (str): Visible heading text.
+            anchor (str): Authored source ID. An empty value derives an anchor from the
+                heading path.
+
+        Side Effects:
+            Flushes the prior unit and updates the builder section and anchor state.
         """
         self.flush()
         self.section = text
@@ -139,16 +143,18 @@ class _UnitBuilder:
         )
 
 
-# ---------------------------------------------------------------------------
-# Parsing functions — one per format, appending to a _UnitBuilder. Text parsers
-# take the document's text; the PDF parser takes the original bytes.
-# ---------------------------------------------------------------------------
+# Parsing functions append one format at a time to a _UnitBuilder. Text parsers
+# take the document's text. The PDF parser takes the original bytes.
 
 def parse_markdown(text: str, builder: _UnitBuilder) -> None:
-    """Split Markdown on headings, dropping code, quotes, images, and rules.
+    """Split Markdown at headings while excluding nonassertive markup.
 
-    They carry no assertion, and feeding them to a model produces confident
-    nonsense about syntax rather than about the subject.
+    Args:
+        text (str): Markdown source text.
+        builder (_UnitBuilder): Unit builder receiving parsed sections.
+
+    Side Effects:
+        Appends parsed lines and units to builder.
     """
     in_code = False
     for raw in text.splitlines():
@@ -169,28 +175,13 @@ _ADOC_MACRO = re.compile(r"(?<![\w:])([a-z][\w-]*):{1,2}(\S*?)\[([^\[\]]*)\]")
 
 
 def _macro_text(match: re.Match[str]) -> str:
-    """Reduce one AsciiDoc macro to the words a reader actually sees.
+    """Reduce an AsciiDoc macro to its reader-visible label.
 
-    `parse_html` has always done this — it takes an element's text and discards
-    its attributes — while this parser passed macros through verbatim. So a
-    navigation partial reached the model as
+    Args:
+        match (re.Match[str]): Regular-expression match for one AsciiDoc macro.
 
-        xref:api:java/index.html[Spring Boot,role=link-external, window=_blank]
-
-    and the model, asked what that asserts, answered with `link-external` and
-    `_blank`. It was not wrong; it was shown markup and asked to read it as
-    prose. Eight such assertions were persisted as approved knowledge.
-
-    An attribute list is positional entries first, then `name=value` pairs, so
-    the visible text is the positional part and the rest is presentation. When
-    there is no positional part the target carries the meaning — `javadoc:`,
-    `configprop:` and `include-code::` are written with an empty list precisely
-    because their target *is* the subject — so dropping it would delete the one
-    identifier the sentence was about.
-
-    This is reading the macro's own syntax, not matching known attribute names:
-    a list of `role`, `window`, `format` and whatever the next markup version
-    adds would never be finished.
+    Returns:
+        str: Visible label without target and attribute syntax.
     """
     target, attributes = match.group(2), match.group(3)
     positional = [
@@ -204,10 +195,14 @@ def _macro_text(match: re.Match[str]) -> str:
 
 
 def parse_asciidoc(text: str, builder: _UnitBuilder) -> None:
-    """Split AsciiDoc on ``=`` headings, dropping build directives.
+    """Split AsciiDoc at headings while excluding build directives.
 
-    Attribute lines, comments, conditionals, includes, and anchors are build
-    directives, not statements about the subject.
+    Args:
+        text (str): AsciiDoc source text.
+        builder (_UnitBuilder): Unit builder receiving parsed sections.
+
+    Side Effects:
+        Appends parsed lines and units to builder.
     """
     pending_anchor = ""
     for raw in text.splitlines():
@@ -217,14 +212,12 @@ def parse_asciidoc(text: str, builder: _UnitBuilder) -> None:
         if line.startswith(":") or line.startswith(_ADOC_NOISE):
             continue
         if line.startswith("[[") and line.endswith("]]"):
-            # An authored id, and the parser used to drop it with the build
-            # directives. `[[howto.actuator.customizing-sanitization]]` survives
-            # a rename, a reorder and a rewrite, which is everything a section's
-            # position does not — see `working/knowledge-slot-identity`. It
-            # precedes its heading, so it waits for it.
+            # An authored id survives section moves and edits, unlike position.
+            # Hold it for the following heading so slot resolution has a stable
+            # anchor (ADR-0043).
             pending_anchor = line[2:-2].split(",", 1)[0].strip()
             continue
-        # Block attributes — `[source,xml]`, `[NOTE]` — configure how the block
+        # Block attributes such as `[source,xml]` and `[NOTE]` configure how the block
         # below is rendered. They say nothing about the subject, and a line that
         # is nothing but an attribute list has no words in it to begin with.
         if line.startswith("[") and line.endswith("]"):
@@ -247,12 +240,17 @@ def parse_asciidoc(text: str, builder: _UnitBuilder) -> None:
 
 
 def parse_html(text: str, builder: _UnitBuilder) -> None:
-    """Split HTML on headings after stripping chrome.
+    """Strip page chrome before splitting HTML at headings.
 
-    Scripts, styles, navigation, headers, and footers are removed first: on a
-    specification page they repeat on every document and would otherwise
-    dominate extraction. Assumes ``beautifulsoup4`` is importable — the caller
-    checks the dependency and decides whether to raise or skip.
+    Args:
+        text (str): HTML source text.
+        builder (_UnitBuilder): Unit builder receiving parsed sections.
+
+    Side Effects:
+        Appends parsed lines and units to builder.
+
+    Notes:
+        The caller must ensure beautifulsoup4 is available.
     """
     soup = _BeautifulSoup(text, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header"]):
@@ -263,9 +261,9 @@ def parse_html(text: str, builder: _UnitBuilder) -> None:
         if not content:
             continue
         if element.name.startswith("h"):
-            # The id is authored and taken unchanged; without one the heading
+            # The id is authored and taken unchanged. Without one the heading
             # path stands in and says it is derived. Nothing is invented for a
-            # heading that has no id — a made-up identifier would be a position
+            # heading that has no id. A made-up identifier would be a position
             # wearing a better name.
             level = int(element.name[1:]) if element.name[1:].isdigit() else 1
             builder.heading(level, content, str(element.get("id") or "").strip())
@@ -274,11 +272,17 @@ def parse_html(text: str, builder: _UnitBuilder) -> None:
 
 
 def parse_pdf(content: bytes, builder: _UnitBuilder) -> None:
-    """Extract PDF text and split it on blank lines.
+    """Extract PDF text and split it into units at blank lines.
 
-    Takes the original bytes because processing turns documents into text and a
-    PDF has none until it is extracted here. Assumes ``pdfminer.six`` is
-    importable — the caller checks the dependency.
+    Args:
+        content (bytes): Original PDF bytes from the acquired snapshot.
+        builder (_UnitBuilder): Unit builder receiving extracted text.
+
+    Side Effects:
+        Extracts PDF text and appends units to builder.
+
+    Notes:
+        The caller must ensure pdfminer.six is available.
     """
     import io  # noqa: PLC0415 (only needed on the PDF path)
 
@@ -291,11 +295,14 @@ def parse_pdf(content: bytes, builder: _UnitBuilder) -> None:
 
 
 def parse_prose(text: str, builder: _UnitBuilder) -> None:
-    """Generic fallback: one unit per blank-line-separated block.
+    """Split plain text into blank-line-separated units.
 
-    Blank lines are the most reliable structural signal across plain text and
-    any format without its own parser, so an unrecognised document still yields
-    coherent units rather than nothing.
+    Args:
+        text (str): Plain source text.
+        builder (_UnitBuilder): Unit builder receiving parsed blocks.
+
+    Side Effects:
+        Appends text blocks and units to builder.
     """
     for block in re.split(r"\n\s*\n", text):
         cleaned = block.strip()
@@ -304,10 +311,8 @@ def parse_prose(text: str, builder: _UnitBuilder) -> None:
             builder.flush()
 
 
-# ---------------------------------------------------------------------------
-# Registry — named parsers with their default extensions and any optional
+# Registry of named parsers with default extensions and optional
 # dependency. Both the explicit per-format steps and the dispatching step use it.
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class _Requirement:
@@ -327,11 +332,11 @@ class _Parser:
     parse: Callable[..., None]
     default_extensions: tuple[str, ...]
     requires: _Requirement | None = None
-    #: The processed text is useless to this parser — PDF has no text until it
+    #: The processed text is unusable by this parser because PDF has no text until it
     #: is extracted from the bytes. Without the snapshot the document is skipped.
     needs_raw: bool = False
     #: The processed text works, and the source's own form works better. HTML on
-    #: disk arrives as its own markup either way; HTML from Confluence arrives as
+    #: disk arrives as its own markup either way. HTML from Confluence arrives as
     #: text with the tags removed, and the tags are the structure. Preferring
     #: rather than requiring keeps the parser usable where no snapshot is at hand.
     prefers_raw: bool = False
@@ -359,11 +364,14 @@ FORMAT_PARSERS: dict[str, _Parser] = {
 
 
 def _raw_content(ctx: WorkflowStepContext, document: ProcessedDocument) -> bytes | None:
-    """The document as its source holds it, from the acquired snapshot.
+    """Read the acquired source form of a processed document.
 
-    `markup` rather than `content`: a source that transformed its document to
-    produce the searchable text keeps the original beside it, and a parser wants
-    that one.
+    Args:
+        ctx (WorkflowStepContext): Workflow context containing the acquisition snapshot.
+        document (ProcessedDocument): Processed document whose original form is needed.
+
+    Returns:
+        bytes | None: Original markup bytes, or None when no matching snapshot exists.
     """
     snapshot = ctx.metadata.get("ingestion.snapshot")
     if not isinstance(snapshot, SourceSnapshot):
@@ -383,13 +391,25 @@ def _apply_parser(
     step_type: str,
     on_missing_dependency: str,
 ) -> bool:
-    """Run one parser against a document.
+    """Run one format parser with an explicit dependency policy.
 
-    Returns ``True`` when the parser ran, ``False`` when the document was
-    skipped. ``on_missing_dependency`` is ``"raise"`` (the explicit per-format
-    steps: a configured format with a missing backend is an error) or
-    ``"skip"`` (the dispatcher: one unparseable document must not fail a mixed
-    corpus).
+    Args:
+        spec (_Parser): Parser definition and optional dependency.
+        document (ProcessedDocument): Processed document to parse.
+        builder (_UnitBuilder): Unit builder receiving parsed content.
+        ctx (WorkflowStepContext): Workflow context containing source snapshots.
+        step_type (str): Step name used in diagnostics.
+        on_missing_dependency (str): Raise for an explicit format step, or skip for
+            mixed-format dispatch.
+
+    Returns:
+        bool: True when the parser ran. False when the document was skipped.
+
+    Raises:
+        WorkflowConfigurationError: A required backend is missing and policy is raise.
+
+    Side Effects:
+        Appends units to builder or logs a skipped document.
     """
     if spec.requires is not None and not spec.requires.available():
         if on_missing_dependency == "raise":
@@ -398,7 +418,7 @@ def _apply_parser(
                 f"Install it with: pip install 'nlght-ai[{spec.requires.extra}]'"
             )
         logger.warning(
-            "[%s] %s.dependency_missing | package=%s document=%s — skipped",
+            "[%s] %s.dependency_missing | package=%s document=%s: skipped",
             ctx.correlation_id, step_type, spec.requires.package, document.document_id,
         )
         return False
@@ -433,12 +453,13 @@ def _require_processed(step_type: str, ctx: WorkflowStepContext) -> tuple[Proces
     return documents
 
 
-# ---------------------------------------------------------------------------
-# Explicit per-format steps — each claims one format by extension.
-# ---------------------------------------------------------------------------
-
 class _FormatParseStep(StepBase):
     """Shared plumbing: claim documents by extension, parse, append units."""
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by format parsers."""
+
+        EMPTY = EMPTY
 
     EXTENSIONS: tuple[str, ...] = ()
     PARSER: str = ""  # key into FORMAT_PARSERS
@@ -488,13 +509,14 @@ class _FormatParseStep(StepBase):
             "[%s] %s.done | documents=%d units=%d",
             ctx.correlation_id, self.TYPE, parsed, len(units),
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT" if units else EMPTY)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if units else self.Verdict.EMPTY)
 
 
 class MarkdownParseStep(_FormatParseStep):
     """Parses Markdown, splitting on headings and dropping non-assertive markup."""
 
     TYPE = "knowledge.parse_markdown"
+
     EXTENSIONS = (".md", ".markdown")
     PARSER = "markdown"
 
@@ -523,10 +545,6 @@ class PdfParseStep(_FormatParseStep):
     PARSER = "pdf"
 
 
-# ---------------------------------------------------------------------------
-# Dispatching step — routes each document to the parser its extension names.
-# ---------------------------------------------------------------------------
-
 _DEFAULT_AUTO_PARSERS = ("markdown", "asciidoc", "html", "pdf")
 _SKIP_FALLBACK = {"", "none", "skip"}
 
@@ -545,8 +563,8 @@ class KnowledgeParseAutoStep(StepBase):
                     pdf), each claiming its own default extensions.
         extensions: map of extension -> parser name, to add or override which
                     parser an extension routes to (e.g. ``{".txt": "prose"}``).
-        fallback:   parser for unmatched extensions (default ``prose``;
-                    ``none`` skips them).
+        fallback:   Parser for unmatched extensions. Defaults to ``prose``.
+                    Set ``none`` to skip them.
         tags:       static tags attached to every unit.
 
     Reads ``ctx.metadata['ingestion.processed']`` and appends to
@@ -555,6 +573,11 @@ class KnowledgeParseAutoStep(StepBase):
     """
 
     TYPE = "knowledge.parse_auto"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        EMPTY = EMPTY
 
     @classmethod
     def options(cls) -> list[StepOption]:
@@ -646,4 +669,4 @@ class KnowledgeParseAutoStep(StepBase):
             "[%s] %s.done | documents=%d units=%d",
             ctx.correlation_id, self.TYPE, parsed, len(units),
         )
-        return StepResult(ctx=ctx, verdict="DEFAULT" if units else EMPTY)
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT if units else self.Verdict.EMPTY)

@@ -1,25 +1,12 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What a candidate's content hash is for, now that it is not identity.
+"""Check that extraction fingerprints address exact normalized content.
 
-`ExtractedItem.fingerprint` was called `identity` and was doing two jobs. One it
-can hold: addressing the graph node, so the same claim found on two pages
-reinforces one node instead of duplicating it. One it cannot: deciding which
-assertion a sighting continues. A claim whose wording moved hashed differently,
-so the corpus opened a second assertion and left the approval on the first.
-
-That second job now belongs to the resolver, and the promises that used to be
-asserted here against the hash — a reworded rule stays one rule, a rephrased
-decision or pattern keeps its assertion, two runs survive the model rewording
-one of them — moved to `tests/integration/test_knowledge_identity_core.py`,
-where they are properties of stored state rather than of a hash. They could
-never have held here: a hash of the whole content block moves when any of it
-moves, which is what a hash is for.
-
-What remains is the contract the hash really has. It is stable, order- and
-case-independent, and it separates kinds and types that share words — so two
-sightings of one claim address one node, and two different claims never do.
+The fingerprint is stable across field order, casing, and source location.
+It separates different kinds, types, and content values. Assertion identity
+is resolved separately from stored lineage and propositions; a changed
+fingerprint alone does not determine whether a sighting continues a claim.
 """
 
 from __future__ import annotations
@@ -35,23 +22,17 @@ def _fact(subject: str = "spring-boot", obj: str = "3.2") -> ExtractedItem:
     return _item("fact", "dependency", subject=subject, predicate="version", object=obj)
 
 
-# ---------------------------------------------------------------------------
-# What already holds. The fingerprint keeps these properties whatever else changes.
-# ---------------------------------------------------------------------------
-
-def test_the_same_claim_extracted_twice_is_one_assertion() -> None:
-    # The whole point of a content-derived identity, and the precondition for
-    # a second run over an unchanged document changing nothing.
+def test_the_same_claim_extracted_twice_has_one_fingerprint() -> None:
+    # Stable content gives retries the same address for the extracted item.
     assert _fact().fingerprint == _fact().fingerprint
 
 
-def test_a_different_claim_is_a_different_assertion() -> None:
+def test_different_content_has_a_different_fingerprint() -> None:
     assert _fact(obj="3.2").fingerprint != _fact(obj="3.3").fingerprint
 
 
-def test_the_same_claim_from_two_documents_reinforces_one_assertion() -> None:
-    # Identity is deliberately independent of where the claim was found, so two
-    # pages asserting the same thing support one node instead of two.
+def test_source_document_does_not_change_the_fingerprint() -> None:
+    # Source location must not change the fingerprint of the extracted content.
     from_a = _fact()
     from_b = _fact()
     from_a.evidence["document_id"] = "doc-a"
@@ -60,50 +41,46 @@ def test_the_same_claim_from_two_documents_reinforces_one_assertion() -> None:
     assert from_a.fingerprint == from_b.fingerprint
 
 
-def test_field_order_does_not_change_identity() -> None:
+def test_field_order_does_not_change_the_fingerprint() -> None:
     ordered = _item("fact", "dependency", subject="s", predicate="p", object="o")
     shuffled = _item("fact", "dependency", object="o", subject="s", predicate="p")
 
     assert ordered.fingerprint == shuffled.fingerprint
 
 
-def test_capitalisation_does_not_change_identity() -> None:
+def test_capitalisation_does_not_change_the_fingerprint() -> None:
     assert _fact(subject="Spring-Boot").fingerprint == _fact(subject="spring-boot").fingerprint
 
 
-def test_the_same_words_under_a_different_type_are_a_different_assertion() -> None:
+def test_type_contributes_to_the_fingerprint() -> None:
     # "3.2" as a dependency version and as a release date would otherwise merge.
     assert _item("fact", "dependency", subject="s", predicate="p", object="o").fingerprint != \
            _item("fact", "release", subject="s", predicate="p", object="o").fingerprint
 
 
-def test_the_same_words_under_a_different_kind_are_a_different_assertion() -> None:
+def test_kind_contributes_to_the_fingerprint() -> None:
     assert _item("rule", "security", subject="tokens").fingerprint != \
            _item("decision", "security", subject="tokens").fingerprint
 
 
-# ---------------------------------------------------------------------------
-# What must hold and does not. Each of these is a run-to-run drift today,
-# and under incremental update a drift is a retraction plus a lost approval.
-# ---------------------------------------------------------------------------
-
 def test_two_rules_about_different_subjects_stay_two_rules() -> None:
-    # The other direction of the same specification, and it already holds —
-    # today because the subject is hashed along with everything else, later
-    # because it is one of the identifying fields. It has to keep holding: a
-    # specification that only merged would be satisfied by hashing nothing.
+    # A changed subject changes the content address even when wording matches.
     tokens = _item("rule", "security", subject="access-token-logging", rule_text="Same words.")
     passwords = _item("rule", "security", subject="password-storage", rule_text="Same words.")
 
     assert tokens.fingerprint != passwords.fingerprint
 
 
-# ---------------------------------------------------------------------------
-# The acceptance metric of the design, in the half that identity decides.
-# ---------------------------------------------------------------------------
-
 def _extracted(rule_wording: str, fact_object: str) -> set[str]:
-    """One document's assertions, as two runs of the extractor might phrase them."""
+    """Collect fingerprints for three extracted items.
+
+    Args:
+        rule_wording (str): Wording of the extracted rule.
+        fact_object (str): Object of the extracted fact.
+
+    Returns:
+        set[str]: Content fingerprints for the rule, fact, and pattern.
+    """
     return {
         _item(
             "rule", "security",
@@ -120,10 +97,8 @@ def _extracted(rule_wording: str, fact_object: str) -> set[str]:
     }
 
 
-def test_two_runs_over_an_unchanged_document_produce_the_same_assertions() -> None:
-    # The design's acceptance metric: a second run over an unchanged source must
-    # change nothing. With a deterministic extractor this already holds — it is
-    # the baseline the next test departs from.
+def test_two_runs_over_unchanged_content_produce_the_same_fingerprints() -> None:
+    # Identical extraction output keeps the same content addresses across runs.
     first = _extracted("Access tokens must not be logged.", "3.2")
     second = _extracted("Access tokens must not be logged.", "3.2")
 
@@ -131,9 +106,7 @@ def test_two_runs_over_an_unchanged_document_produce_the_same_assertions() -> No
 
 
 def test_a_real_change_is_still_visible_as_a_change() -> None:
-    # The guard on all of the above: none of this may make the corpus blind to
-    # an edit that matters. A different version is a different fact, whatever
-    # the rules do.
+    # A changed fact value must have a different content address.
     unchanged = _extracted("Access tokens must not be logged.", "3.2")
     upgraded = _extracted("Access tokens must not be logged.", "3.3")
 

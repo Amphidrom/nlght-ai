@@ -23,10 +23,6 @@ from nlght.core.signals.signal import Signal
 from nlght.core.trigger.trigger import Trigger, TriggerKind
 from nlght.core.workflow.workflow import WorkflowDef, WorkflowInvocation, WorkflowVersionDef
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
 _VALID_MESSAGES = [{"role": "user", "content": "Hello"}]
 
 
@@ -91,13 +87,9 @@ class StubExecutor:
 
 
 class StubDispatcher:
-    """Submits, and answers what became of it.
+    """A dispatcher double that submits durable runs and reports their status.
 
-    The sync path holds the request open and polls `get_status` until the
-    execution is terminal — a sync call is the same durable run as an async
-    one, it just waits. A stub that only submits leaves that poll with nothing
-    to ask.
-    """
+    The synchronous adapter polls status until a submitted run is terminal."""
 
     def __init__(self, result: dict | None = None) -> None:
         self.submissions = []
@@ -135,10 +127,6 @@ def _make_app(*adapters) -> FastAPI:
     return app
 
 
-# ---------------------------------------------------------------------------
-# Fake ModelProviderBackend
-# ---------------------------------------------------------------------------
-
 class _FakeBoundClient:
     def __init__(self, content: str, stream: bool) -> None:
         self._content = content
@@ -169,12 +157,8 @@ class _FakeModelBackend:
         pass
 
 
-# ---------------------------------------------------------------------------
-# OpenAI — request validation
-# ---------------------------------------------------------------------------
-
 def test_openai_chat_completions_returns_422_without_messages() -> None:
-    """Missing messages field → 422 Unprocessable Entity."""
+    """Reject an OpenAI chat request with no messages."""
     app = _make_app(OpenAIHttpProtocolAdapter(base_path="/v1"))
     with TestClient(app) as client:
         response = client.post("/v1/chat/completions", json={"model": "qwen3"})
@@ -201,7 +185,7 @@ def test_openai_chat_completions_returns_422_with_invalid_role() -> None:
 
 
 def test_openai_chat_completions_returns_503_without_provider() -> None:
-    """Valid request but no model_provider_base_url → 503."""
+    """Return service unavailable when no model provider is configured."""
     app = _make_app(OpenAIHttpProtocolAdapter(base_path="/v1"))
     with TestClient(app) as client:
         response = client.post(
@@ -210,10 +194,6 @@ def test_openai_chat_completions_returns_503_without_provider() -> None:
         )
     assert response.status_code == 503
 
-
-# ---------------------------------------------------------------------------
-# OpenAI — list_models proxy
-# ---------------------------------------------------------------------------
 
 def test_openai_models_returns_503_without_provider() -> None:
     app = _make_app(OpenAIHttpProtocolAdapter(base_path="/v1"))
@@ -234,12 +214,8 @@ def test_openai_models_lists_from_backend() -> None:
     assert data[0]["object"] == "model"
 
 
-# ---------------------------------------------------------------------------
-# OpenAI — direct inference (no workflow)
-# ---------------------------------------------------------------------------
-
 def test_openai_chat_completions_direct_inference() -> None:
-    """No workflow configured → direct ModelClient inference."""
+    """Send an unmapped OpenAI chat request to direct model inference."""
     backend = _FakeModelBackend(models=[], response_content="Hello back")
     app = _make_app(OpenAIHttpProtocolAdapter(base_path="/v1", model_backend=backend))
     with TestClient(app) as client:
@@ -254,7 +230,7 @@ def test_openai_chat_completions_direct_inference() -> None:
 
 
 def test_openai_chat_completions_streaming_returns_sse() -> None:
-    """stream:true → text/event-stream with [DONE] sentinel."""
+    """Stream chat output as server-sent events ending with DONE."""
     backend = _FakeModelBackend(models=[], response_content="chunk")
     app = _make_app(OpenAIHttpProtocolAdapter(base_path="/v1", model_backend=backend))
     with TestClient(app) as client:
@@ -267,17 +243,8 @@ def test_openai_chat_completions_streaming_returns_sse() -> None:
     assert "[DONE]" in response.text
 
 
-# ---------------------------------------------------------------------------
-# OpenAI routes take precedence over generic JSON catch-all
-# ---------------------------------------------------------------------------
-
 def test_openai_routes_take_precedence_over_generic_json() -> None:
-    """OpenAI routes must be registered before the GenericJson catch-all.
-
-    /v1/chat/completions with a valid body reaches the OpenAI adapter (503 — no
-    provider) rather than the generic JSON catch-all (which would need a gateway
-    service and would return a different error).
-    """
+    """Route OpenAI chat requests before the generic JSON catch-all."""
     app = _make_app(
         OpenAIHttpProtocolAdapter(base_path="/v1"),
         GenericJsonHttpProtocolAdapter(),
@@ -294,10 +261,6 @@ def test_openai_routes_take_precedence_over_generic_json() -> None:
     assert response.status_code == 503
     assert "model provider" in response.json()["detail"].lower()
 
-
-# ---------------------------------------------------------------------------
-# Generic JSON catch-all
-# ---------------------------------------------------------------------------
 
 def test_generic_json_catch_all_route() -> None:
     invocation = _make_invocation("generic_json_request")
@@ -319,11 +282,6 @@ def test_generic_json_returns_404_on_missing_workflow() -> None:
         response = client.post("/anything", json={})
 
     assert response.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Generic JSON as the configurable trigger surface
-# ---------------------------------------------------------------------------
 
 
 def test_a_configured_path_names_the_workflow_and_runs_it() -> None:
@@ -379,7 +337,7 @@ def test_an_unmapped_path_still_falls_back_to_the_resolved_operation() -> None:
 
 
 def test_without_a_runtime_the_resolution_is_reported_rather_than_faked() -> None:
-    # A container with no executor cannot run anything; saying so beats
+    # A container with no executor cannot run anything. Saying so beats
     # answering as though the workflow had run.
     invocation = _make_invocation("ingest-data")
     app = _make_app(
@@ -392,11 +350,6 @@ def test_without_a_runtime_the_resolution_is_reported_rather_than_faked() -> Non
 
     assert response.status_code == 200
     assert response.json()["workflow"]["name"] == "ingest-data"
-
-
-# ---------------------------------------------------------------------------
-# Sync vs async per endpoint
-# ---------------------------------------------------------------------------
 
 
 def test_an_async_endpoint_queues_the_run_and_answers_202() -> None:
@@ -486,7 +439,7 @@ def test_an_endpoint_may_override_the_default_mode() -> None:
     assert response.json() == {"ran": True}
     # Not zero submissions: with a durable dispatcher configured, sync commits
     # the run to the queue exactly as async does, so it is claimable, retried
-    # and concurrency-governed either way. The mode decides only who waits —
+    # and concurrency-governed either way. The mode decides only who waits:
     # async answers 202 with an id, sync holds the request open for the result.
     assert len(dispatcher.submissions) == 1
 

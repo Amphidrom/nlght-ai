@@ -1,29 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What kind a claim is, decided by what it says.
-
-Every extracted assertion gets exactly one kind, and it is decided by the
-**semantics of that assertion** — not by the shape of the fields it happens to
-fill, not by which file it came from, and not by whatever the model tends to
-prefer. Nothing downstream can repair a wrong one: `kind` is part of the identity
-namespace, so a sentence read as a `rule` on one pass and a `decision` on the
-next retires the claim and creates another (ADR-0048, ADR-0049).
-
-The contract lived nowhere. The extraction prompt named the four kinds and gave
-the field shape of each, which is a schema and not a criterion, so the model was
-left to guess — and it guessed differently for one identical sentence in two
-documents, producing two entity keys where the corpus expected one.
-
-It lives here as data rather than as prose in a prompt string, so that the prompt
-is assembled from it and a test can hold each part in place. A definition or a
-contrast quietly deleted is a contract that stops binding while every string
-still looks right.
-
-**One prompt, not four.** Extraction and classification are one act: the same
-pass produces the wording, the structured claim and the kind. A separate
-classifier would be a second semantic authority that can disagree with the first.
-"""
+"""Define semantic kind criteria and contrast examples for extraction."""
 
 from __future__ import annotations
 
@@ -171,12 +149,10 @@ def _contrasts(items: tuple[Contrast, ...]) -> str:
 
 
 def contract() -> str:
-    """The contract as the extraction prompt carries it.
+    """Assemble the kind contract from one maintained definition set.
 
-    Assembled rather than written out, so the prompt cannot drift from the
-    definitions the tests and the corpus are held to. It is hashed into
-    `extraction_version`, so changing any part of it re-extracts the corpus
-    instead of leaving old classifications standing beside new ones.
+    Returns:
+        str: Extraction prompt text included in the extraction version.
     """
     definitions = "\n".join(
         f"  {item.kind:9}{item.definition}" for item in DEFINITIONS

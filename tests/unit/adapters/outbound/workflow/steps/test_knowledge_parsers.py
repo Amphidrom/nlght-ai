@@ -166,14 +166,7 @@ See xref:reference:actuator/monitoring.adoc#actuator.monitoring.port[Customizing
 
 
 async def test_asciidoc_reduces_a_macro_to_the_words_a_reader_sees() -> None:
-    """The presentation attributes never reach the model.
-
-    They did, and it read them: a navigation partial produced eight approved
-    assertions whose objects were `link-external`, `_blank` and `index.html`.
-    The model was not wrong — it was shown markup and asked what it asserts.
-    `parse_html` had always taken an element's text and dropped its attributes;
-    this parser did not, and the two disagreed about the same class of input.
-    """
+    """Strip AsciiDoc presentation attributes before model extraction."""
     units = await _units(AsciiDocParseStep(config={}), _document("nav.adoc", _ADOC_MACROS))
 
     body = " ".join(unit.content for unit in units)
@@ -255,7 +248,7 @@ async def test_pdf_without_the_original_bytes_is_skipped_not_fatal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Processing produces no text for a PDF, and the raw bytes live on the
-    # snapshot; without it there is nothing to extract, but the run continues.
+    # snapshot. Without it there is nothing to extract, but the run continues.
     from nlght.adapters.outbound.workflow.steps.knowledge import parsers
 
     monkeypatch.setattr(parsers, "_HAS_PDFMINER", True)
@@ -356,7 +349,7 @@ async def test_parse_auto_skips_a_document_whose_parser_dependency_is_missing(
         _document("a.md", "# H\n\nMarkdown claim."),
     )
 
-    # The HTML document is skipped (not fatal); the Markdown one still parses.
+    # The HTML document is skipped (not fatal). The Markdown one still parses.
     contents = [unit.content for unit in units]
     assert contents == ["Markdown claim."]
 

@@ -4,17 +4,17 @@
 """Ask the index a question, across whichever stores this platform has.
 
 The step owns the round trips and the translation, and no judgement. What to
-ask, how deep, and how the answers are ranked is decided in `core.retrieval` —
-pure, and tested without a store.
+ask, how deep, and how the answers are ranked is decided in `core.retrieval`,
+which is pure and tested without a store.
 
-    plan    →  requested ∩ available, and whether the vector call is worth it
-    routes  →  one call per store, each failure isolated
-    rank    →  positions within each store are fused; scores never are
-    hits    →  three granularities, kept apart, ranked together
+    plan: requested and available sources, and whether a vector call is useful
+    routes: one call per store, each failure isolated
+    rank: fuse positions within each store without mixing scores
+    hits: keep three granularities distinct while ranking together
 
 Search produces *findings*: these systems found these things. Which of them
-becomes text a model is shown is a separate question — it needs a token budget
-and a context window — and it is not answered here.
+becomes text shown to a model requires a token budget and a context window.
+That decision happens during context building.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from nlght.core.errors.errors import WorkflowConfigurationError
 from nlght.core.model.messages import UserMessage, normalize_workflow_messages
+from nlght.core.model.trust import UNANNOTATED, ContentOrigin
 from nlght.core.retrieval import (
     ASSERTION,
     KNOWLEDGE,
@@ -61,7 +62,7 @@ NOTHING_FOUND = "empty"
 
 #: Which activation answers each capability. Two stores, three capabilities:
 #: `data_store` spans keyword and semantic discovery over one corpus, and a
-#: capability is not a store — splitting them into a store each is what the
+#: capability is not a store. Splitting them into a store each is what the
 #: retired `lexical_store`/`vector_store` kinds did, and it made the corpus the
 #: ingestion writes and the corpus retrieval reads two configurations that
 #: nothing kept aligned.
@@ -101,6 +102,11 @@ class RetrievalSearchStep(StepBase):
     """
 
     TYPE = "retrieval.search"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_FOUND = NOTHING_FOUND
 
     def __init__(
         self,
@@ -166,16 +172,22 @@ class RetrievalSearchStep(StepBase):
         ]
 
     async def _activate(self, source: str, caller: RequestContext | None) -> Any:  # noqa: ANN401
-        """The store activation this workflow named, or `None` where it named none.
+        """Activate the configured store for a retrieval source.
 
-        Named per source rather than discovered, so a workflow searching one
-        index cannot pick up another's.
+        Args:
+            source (str): Retrieval source key used to select a store option.
+            caller (RequestContext | None): Caller used for access checks.
 
-        Three outcomes, and they are not the same thing. Naming nothing means
-        this platform does not have that capability — reported, never an error.
-        Naming something that does not resolve is a misconfiguration. Naming
-        something this workflow may not use is a denial, and it raises: the
-        workflow asked for it.
+        Returns:
+            Any: Named store activation, or ``None`` when no store is configured.
+
+        Raises:
+            WorkflowConfigurationError: A named store has no activator or cannot
+                be resolved uniquely.
+            ResourceAccessDeniedError: Access policy denies the caller.
+
+        Side Effects:
+            Resolves and activates the named resource when configured.
         """
         name = str(self.config.get(_OPTION[source], "")).strip()
         if not name:
@@ -189,14 +201,17 @@ class RetrievalSearchStep(StepBase):
         )
 
     async def _stores(self, caller: RequestContext | None) -> dict[str, Any]:
-        """Every capability this platform actually has, by source.
+        """Activate configured stores and map them to retrieval sources.
 
-        One activation can answer two capabilities: `data_store` serves both
-        keyword and semantic discovery over one corpus, so naming it makes both
-        available and it is activated once. That is also why the two cannot be
-        available separately any more — they are two questions asked of one
-        store, not two stores, and a plan requiring one without the other has
-        nothing left to distinguish.
+        Args:
+            caller (RequestContext | None): Caller used for access checks.
+
+        Returns:
+            dict[str, Any]: Activated stores keyed by retrieval source. Sources
+            with the same resource name share one activation.
+
+        Side Effects:
+            Activates each distinct configured resource once.
         """
         activated: dict[str, Any] = {}
         cache: dict[str, Any] = {}
@@ -286,22 +301,29 @@ class RetrievalSearchStep(StepBase):
             ctx.correlation_id, ",".join(plan.sources), len(found), len(fused),
             stats["duration_ms"],
         )
-        return StepResult(ctx=ctx, verdict=None if fused else NOTHING_FOUND)
+        return StepResult(ctx=ctx, verdict=None if fused else self.Verdict.NOTHING_FOUND)
 
     async def _lexical(
         self, store: Any, question: str, limit: int, note: Any  # noqa: ANN401
     ) -> list[RetrievalHit]:
-        """Keyword discovery, as candidates the store has already vouched for.
+        """Find keyword candidates already checked by the data store.
 
-        The store returns findings rather than backend rows, and everything it
-        returns is on the published revision — it drops the rest before anything
-        here can rank it (ADR-0062). So there is no translation left to do, and
-        nothing here re-checks currency: a second check after the fusion would be
-        both duplicate and too late to matter.
+        Args:
+            store (Any): Data store activation serving keyword candidates.
+            question (str): Query text.
+            limit (int): Maximum candidate count.
+            note (Any): Callback recording source statistics.
+
+        Returns:
+            list[RetrievalHit]: Current-revision candidates, or an empty list
+            when the store fails.
+
+        Side Effects:
+            Queries the store, records statistics, and logs failures.
         """
         try:
             hits = await store.search_keyword_candidates(query=question, limit=limit)
-        except Exception as error:  # noqa: BLE001 (one store failing must not lose the others)
+        except Exception as error:
             logger.exception("retrieval.lexical.failed")
             note(LEXICAL, asked=True, ok=False, error=str(error))
             return []
@@ -311,16 +333,24 @@ class RetrievalSearchStep(StepBase):
     async def _vector(
         self, store: Any, question: str, limit: int, note: Any  # noqa: ANN401
     ) -> list[RetrievalHit]:
-        """Semantic discovery, from the same activation and the same corpus.
+        """Find semantic candidates from the data store's corpus.
 
-        The store embeds the question itself, which is why this no longer holds
-        an embedding client of its own for the call. A platform without an
-        embedding provider gets an empty list rather than a failure — a lexical
-        index and a knowledge store are still a working platform.
+        Args:
+            store (Any): Data store activation embedding and searching the query.
+            question (str): Query text.
+            limit (int): Maximum candidate count.
+            note (Any): Callback recording source statistics.
+
+        Returns:
+            list[RetrievalHit]: Semantic candidates, or an empty list on failure
+            or when no candidates match.
+
+        Side Effects:
+            Queries the store, records statistics, and logs failures.
         """
         try:
             hits = await store.search_semantic_candidates(query=question, limit=limit)
-        except Exception as error:  # noqa: BLE001 (one store failing must not lose the others)
+        except Exception as error:
             logger.exception("retrieval.vector.failed")
             note(VECTOR, asked=True, ok=False, error=str(error))
             return []
@@ -333,12 +363,19 @@ class RetrievalSearchStep(StepBase):
     async def _knowledge(
         self, store: Any, question: str, plan: Any, note: Any  # noqa: ANN401
     ) -> list[RetrievalHit]:
-        """Reviewed claims, and only the ones a reader is allowed to see.
+        """Find reviewed claims allowed by the knowledge store.
 
-        The store's read path resolves identities through the repository, which
-        is where the quarantine lives (ADR-0032) — a claim awaiting review or
-        merged into another cannot come back from it. Nothing here re-implements
-        that, and nothing here may work around it.
+        Args:
+            store (Any): Knowledge store activation enforcing review visibility.
+            question (str): Query text.
+            plan (Any): Plan specifying knowledge kinds and fetch count.
+            note (Any): Callback recording source statistics.
+
+        Returns:
+            list[RetrievalHit]: Visible claim hits across requested kinds.
+
+        Side Effects:
+            Queries each supported kind, records statistics, and logs failures.
         """
         hits: list[RetrievalHit] = []
         limit = plan.fetch_for(KNOWLEDGE)
@@ -349,7 +386,7 @@ class RetrievalSearchStep(StepBase):
                 continue
             try:
                 claims = await method(query=question, limit=limit)
-            except Exception as error:  # noqa: BLE001 (one kind failing must not lose the rest)
+            except Exception as error:
                 logger.exception("retrieval.knowledge.failed kind=%s", kind)
                 note(KNOWLEDGE, asked=True, ok=False, error=str(error))
                 continue
@@ -372,6 +409,9 @@ class RetrievalSearchStep(StepBase):
                             getattr(claim, "revision_id", "") or ""
                         ),
                         support=tuple(getattr(claim, "support", ()) or ()),
+        # The store labels a claim by the sources carrying it.
+                        # a store that cannot is unannotated (ADR-0074).
+                        origin=_claim_origin(store, claim),
                     ),
                     fields={"kind": (kind,), "type": (str(getattr(claim, "type", "")),)},
                 )
@@ -382,17 +422,21 @@ class RetrievalSearchStep(StepBase):
 
 
 
-def _wording(claim: Any) -> str:  # noqa: ANN401 (a KnowledgeObject of any kind)
-    """What a reviewed claim says, in the source's own words.
+def _claim_origin(store: object, claim: object) -> ContentOrigin:
+    labeller = getattr(store, "claim_origin", None)
+    origin = labeller(claim) if callable(labeller) else None
+    return origin if isinstance(origin, ContentOrigin) else UNANNOTATED
 
-    `observed_text` is the authority (ADR-0048) and the store carries it now, so
-    this is a read rather than a search through the payload for whichever field
-    happened to hold prose.
 
-    A claim written before revisions existed has none, and the payload is then
-    the only thing left to show. That is worse and it is still better than an
-    empty passage — but nothing here assembles a sentence out of field values,
-    which is the one thing ADR-0048 forbids.
+def _wording(claim: object) -> str:
+    """Read a claim's observed wording or a legacy fallback.
+
+    Args:
+        claim (object): Claim returned by a knowledge store.
+
+    Returns:
+        str: Observed source text when available. Legacy claims fall back to
+        one prose field or their identity without assembling new wording.
     """
     observed = getattr(claim, "observed_text", "")
     if isinstance(observed, str) and observed.strip():

@@ -1,14 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The whole path, asserted where it actually matters: at the model call.
+"""Carry retrieved hits through prompt composition to the model call.
 
-    retrieval.hits → prompt.compose → passthrough → ModelClient.call(messages)
-
-Nothing in the middle is mocked. The only fake is the model itself, which records
-what it was sent — because what a model receives is the only place the pipeline's
-claims can be checked rather than inferred.
-"""
+The model fake records the final messages while the intervening workflow steps
+run without mocks."""
 
 from __future__ import annotations
 
@@ -46,45 +42,44 @@ pytestmark = pytest.mark.integration
 
 
 class _RecordingModel:
-    """A model that answers nothing and remembers everything it was sent.
-
-    It implements the whole `ModelClient` contract including `token_budget`,
-    because a double that stands in for a port has to satisfy it — a double that
-    is missing a member only proves the production code was duck-typing.
-    """
+    """A model double that records the complete request and implements the model port."""
 
     def __init__(self) -> None:
         self.calls: list[list[CanonicalMessage]] = []
 
     @property
     def token_budget(self) -> TokenBudget | None:
-        """No budget from here, which is a definite answer and not a gap."""
+        """No budget from here, which is a definite answer and not a gap.
+
+        Returns:
+            TokenBudget | None: No budget override for the test workflow.
+        """
         return None
 
     async def call(self, messages: list[CanonicalMessage], **_kwargs: object) -> None:
         self.calls.append(list(messages))
 
-    def stream(self, *args: object, **kwargs: object):  # noqa: ANN201, ARG002
+    def stream(self, *args: object, **kwargs: object):
         raise AssertionError("this workflow does not stream")
 
 
 class _Emitter:
-    async def emit(self, signal: object) -> None:  # noqa: ARG002
+    async def emit(self, signal: object) -> None:
         return None
 
 
 class _Memory:
-    def __init__(self, turns=(), directives=(), results=()) -> None:  # noqa: ANN001
+    def __init__(self, turns=(), directives=(), results=()) -> None:
         self._turns, self._directives, self._results = list(turns), list(directives), list(results)
 
-    def get_directives_list(self):  # noqa: ANN201
+    def get_directives_list(self):
         return self._directives
 
-    def get_recent_turns(self, n: int):  # noqa: ANN201
+    def get_recent_turns(self, n: int):
         return self._turns[-n:]
 
 
-def _ctx(*, hits=(), memory=None, question="what is the limit?") -> WorkflowStepContext:  # noqa: ANN001
+def _ctx(*, hits=(), memory=None, question="what is the limit?") -> WorkflowStepContext:
     context = RequestContext(
         correlation_id="run-1", request_id="rid",
         received_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -107,7 +102,7 @@ def _ctx(*, hits=(), memory=None, question="what is the limit?") -> WorkflowStep
     return ctx
 
 
-def _hits(*texts: str):  # noqa: ANN202
+def _hits(*texts: str):
     return fuse(rank_within_sources([
         RetrievalHit(
             source=LEXICAL, carrier=DOCUMENT, carrier_id=f"d{index}", content=text,
@@ -149,7 +144,6 @@ def _estimated_request_tokens(messages: list[CanonicalMessage]) -> int:
 
 
 # The path, end to end
-# ---------------------------------------------------------------------------
 
 async def test_retrieved_material_reaches_the_model_call() -> None:
     model = await _run(_ctx(hits=_hits("The value is limited to 100 characters.")))
@@ -206,12 +200,7 @@ async def test_memory_and_retrieval_arrive_in_one_untrusted_context_message() ->
 
 
 async def test_the_prompt_stays_inside_the_budget_it_was_given() -> None:
-    """Budget pressure across both sources at once.
-
-    The passages here cost far more than the budget allows, so the reduction has
-    to give some of them up — and what it produces must actually fit, not merely
-    be smaller.
-    """
+    """Reduce retrieval and session context until the composed prompt fits its budget."""
     long_passages = _hits(*[f"passage number {n} " + ("x" * 400) for n in range(6)])
     memory = _Memory(turns=[TurnSummary(
         turn_nr=1, user_input="earlier", intent="ask", topic="t",
@@ -255,7 +244,6 @@ async def test_passthrough_forwards_exactly_what_it_was_given() -> None:
 
 
 # Which budget wins, and it is not the configuration
-# ---------------------------------------------------------------------------
 
 class _BudgetedModel(_RecordingModel):
     """A model that knows its own budget, the way a bound client does."""
@@ -283,18 +271,11 @@ async def _run_with(model: _RecordingModel, ctx: WorkflowStepContext,
 
 
 async def test_the_bound_model_outranks_the_workflow_configuration() -> None:
-    """The two are set far apart on purpose.
-
-    Before this, `prompt.compose` budgeted from configuration while the client
-    that would make the call held a different number — two truths that agree
-    until they do not. The client is the authority: it is the one that will
-    enforce `apply_budget_to_messages` afterwards, so a prompt composed against
-    anything else is checked against a limit it was never built for.
-    """
+    """Use the bound model budget when it differs from workflow configuration."""
     hits = _hits(*[f"passage {n} " + ("z" * 300) for n in range(6)])
     generous_config = {"max_system_prompt_tokens": "10000"}
 
-    # The client says 600 tokens of context window → a prompt_budget of 120.
+    # A 600-token client context window yields a prompt budget of 120.
     tight = _BudgetedModel(prompt_budget=120)
     messages = await _run_with(tight, _ctx(hits=hits), generous_config)
 
@@ -304,12 +285,7 @@ async def test_the_bound_model_outranks_the_workflow_configuration() -> None:
 
 
 async def test_a_client_with_no_budget_falls_back_to_the_configuration() -> None:
-    """A defined answer rather than an invented default.
-
-    `token_budget` returning `None` means "no budget from here" — a provider with
-    no known context window, or no model bound at all. The configuration is then
-    what there is, which is why it stays a fallback rather than being removed.
-    """
+    """Fall back to workflow configuration when the bound client has no budget."""
     hits = _hits(*[f"passage {n} " + ("z" * 300) for n in range(6)])
 
     silent = _BudgetedModel(prompt_budget=None)
@@ -328,12 +304,7 @@ async def test_with_neither_a_client_budget_nor_a_configured_one_nothing_is_inve
 
 
 async def test_a_different_bound_model_gives_a_different_prompt() -> None:
-    """Compose sees the budget of the model actually bound to this run.
-
-    The same workflow, the same passages, two models with different context
-    windows — and the prompts differ accordingly. If they did not, the budget
-    would be coming from somewhere other than the client.
-    """
+    """Compose different prompts for models with different context budgets."""
     hits = _hits(*[f"passage {n} " + ("z" * 300) for n in range(6)])
 
     small = await _run_with(_BudgetedModel(prompt_budget=120), _ctx(hits=hits))

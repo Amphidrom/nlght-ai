@@ -13,10 +13,9 @@ class SessionBackend(Protocol):
     """Outbound port for session snapshot persistence.
 
     Used exclusively by ``HiveMindStoreCoordinatorFactory``.
-    Implementations: ``FileSystemBackend`` (JSON files),
-    future: ``PostgresSessionBackend``.
+    ``FileSystemBackend`` persists snapshots as JSON files.
 
-    ``SimpleStoreCoordinatorFactory`` does not use this port — it
+    ``SimpleStoreCoordinatorFactory`` does not use this port. It
     holds sessions in-memory with TTL eviction.
     """
 

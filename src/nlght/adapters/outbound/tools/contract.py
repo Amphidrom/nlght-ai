@@ -7,13 +7,14 @@ import inspect
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from nlght.core.model.trust import ContentOrigin, ContentTrust, SourceRef
 from nlght.core.tools.action import (
     ActionSemanticsResolver,
     ExecutionCapabilities,
     JsonValue,
     ToolArgumentBinder,
 )
-from nlght.core.tools.tool import ToolBase, ToolParameter
+from nlght.core.tools.tool import ToolBase, ToolOutput, ToolParameter
 
 
 class BoundToolContract:
@@ -88,9 +89,26 @@ class BoundToolContract:
 
     async def _execute_bound(self, arguments: Mapping[str, JsonValue]) -> object:
         fn = getattr(self._instance, self._method_name)
-        if inspect.iscoroutinefunction(fn):
-            return await fn(**arguments)
-        return fn(**arguments)
+        result = await fn(**arguments) if inspect.iscoroutinefunction(fn) else fn(**arguments)
+        return self._labelled(result)
+
+    def _labelled(self, result: object) -> object:
+        """Label plain text from a declared untrusted content source.
+
+        Args:
+            result (object): Raw result returned by the bound tool method.
+
+        Returns:
+            object: Unchanged result, or text wrapped in ``ToolOutput`` with
+            an untrusted source reference.
+        """
+        kind = getattr(self._instance, "UNTRUSTED_CONTENT_SOURCE", "")
+        if not kind or not isinstance(result, str):
+            return result
+        resource_id = str(getattr(self._instance, "resource_id", "") or self._resource_address)
+        return ToolOutput(result, ContentOrigin.of(SourceRef(
+            kind, resource_id, "", ContentTrust.UNTRUSTED, self._resource_address,
+        )))
 
 
 class CallbackToolContract:
@@ -98,7 +116,8 @@ class CallbackToolContract:
 
     For protocol tools that should only exist for the duration of a single
     Step run (e.g. set_theory in the SurfaceTheorist). Registered in a
-    ``TemporaryToolCatalog`` — never in the persistent ``AdapterToolCatalog``.
+    ``TemporaryToolCatalog`` for one step run. It is not added to the
+    persistent ``AdapterToolCatalog``.
     """
 
     def __init__(

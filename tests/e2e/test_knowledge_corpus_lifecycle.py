@@ -1,29 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""A corpus on disk, ingested repeatedly, while the sources change underneath.
+"""Exercise knowledge ingestion across repeated edits to a real file corpus.
 
-The lineage integration tests hand the repository a ``LineageWrite`` and check
-what it stores. That leaves the more interesting half untested: whether the
-pipeline *builds* the right write from a file. Between the file and the write
-sit the source, the processor, the parser, the extraction, the refinement chain
-and the review policy — and identity is decided by what all of them together
-hand over, not by the repository.
-
-So the whole chain runs here, over real files in a real directory, into a real
-database. Only two things are substituted, both because they are the network:
-the model, which is scripted so a rewording is a rewording and not a sampling
-accident, and the search index, which records what it was told to index.
-
-The four cases are the ones a maintained corpus actually produces:
-
-* nothing changed          → nothing is asked, nothing is written
-* a fact reworded          → the same assertion, no revision, new evidence
-* a rule reworded          → the same assertion, a revision, approval carried
-* a fact's claim changed   → a different assertion, the old one left standing
-
-The middle two look alike and end differently, which is the whole reason they
-sit next to each other.
+The workflow uses real files and a database with scripted model responses and
+an in-memory search-index substitute. It checks identity, revisions, evidence,
+and retraction across the complete pipeline.
 """
 
 from __future__ import annotations
@@ -76,35 +58,24 @@ from nlght.ports.outbound.model_client import ModelStreamEvent
 pytestmark = pytest.mark.e2e
 
 
-# ---------------------------------------------------------------------------
-# The corpus, and what the model says about it
-# ---------------------------------------------------------------------------
-
 STACK = "stack.md"
 POLICY = "policy.md"
 
-#: The claim itself, in two wordings. Same subject, same predicate, same object
-#: — only the sentence around them moved.
+#: The claim has two wordings with the same subject, predicate, and object.
+#: Only the surrounding sentence changed.
 JAVA_17 = "# Stack\n\nSpring requires Java 17.\n"
 JAVA_17_REWORDED = "# Stack\n\nFor Spring, Java 17 is a requirement.\n"
 #: The claim moved.
 JAVA_21 = "# Stack\n\nSpring requires Java 21.\n"
 
-#: A rule, in two wordings. Same subject and property — the wording *is* the
-#: rule's body, so moving it is the rule moving.
+#: The rule keeps its subject and property while its body wording changes.
 EXPENSES = "# Expenses\n\nExpenses above CHF 500 require approval.\n"
-#: Reworded, and the subject deliberately left alone. It read "Anything over CHF
-#: 500" until a live model called that a normative change and was right —
-#: *anything* is broader than *expenses*, so the rule had moved and this was
-#: never the rewording it claimed to be.
+#: Keep "Expenses" as the subject. "Anything" would broaden the rule's scope.
 EXPENSES_REWORDED = "# Expenses\n\nExpenses over CHF 500 must be signed off.\n"
-#: One claim with four roles. Splitting it destroys it — "Alice transfers CHF
-#: 500" and "Alice transfers to Bob" are neither of them what the sentence said —
-#: and the legacy row has no column for the fourth.
+#: Keep all four transfer roles together because the legacy row cannot hold them.
 TRANSFER = "# Transfer\n\nAlice transfers CHF 500 to Bob.\n"
-#: The same claim, and the model names its parts differently on the second pass —
-#: `sender`/`beneficiary` where it said `subject`/`recipient`. Nothing structural
-#: separates that from a role *swap*, so it is the one case that has to be judged.
+#: Renamed roles require a judge because structure alone cannot distinguish a
+#: renamed role from a swapped one.
 TRANSFER_RENAMED = "# Transfer\n\nAlice sends CHF 500 to the beneficiary Bob.\n"
 
 
@@ -127,7 +98,7 @@ def _rule(text: str) -> str:
 
 #: What the model answers, keyed by a phrase that only appears in one wording.
 #: Scripted rather than sampled, because the point of the reworded cases is that
-#: the *proposition* is identical — a model free to phrase its answer differently
+#: the *proposition* is identical. A model free to phrase its answer differently
 #: would make every run a new claim and prove nothing about the pipeline.
 SCRIPT: tuple[tuple[str, str], ...] = (
     (
@@ -160,7 +131,7 @@ class _ScriptedModel:
         self.equivalences = 0
         self.prompts: list[str] = []
 
-    def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):  # noqa: ANN001, ANN201
+    def stream(self, messages, tools=None, tool_choice=None):
         self.calls += 1
         prompt = str(messages[0]["content"])
         self.prompts.append(prompt)
@@ -168,19 +139,14 @@ class _ScriptedModel:
         # reworded preamble once turned this branch into a no-op, and the
         # `equivalences == 1` assertion below is what noticed.
         if "Do A and B assert the same thing" in prompt:
-            # Whether two differently named structures are one claim. Scripted to
-            # `yes` because the corpus below really does say one thing twice —
-            # and because nothing structural could answer it: a role rename and a
-            # role swap look identical from the outside, which is why this
-            # question is delegated at all.
+            # A role rename and a role swap look alike structurally. The judge
+            # answers `yes` because both wordings below express the same claim.
             self.equivalences += 1
             response = "yes"
         elif "Answer with exactly one word" in prompt:
-            # The chain asks one other question: whether a changed body is the
-            # same claim said differently. Every edit in this corpus is, and a
-            # stub that did not answer it would land on `ambiguous` — correctly,
-            # since an unreadable answer is doubt, but it would turn this file
-            # into a test of that fallback instead of the lifecycle.
+            # The changed rule bodies in this corpus are rewrites. An unreadable
+            # judge answer would exercise the ambiguity fallback instead of the
+            # corpus lifecycle.
             self.classifications += 1
             response = "rewrite"
         else:
@@ -191,31 +157,26 @@ class _ScriptedModel:
                     break
             # A candidate's wording has to occur in the unit it came from, so a
             # stub answering one canned sentence for every unit would model a
-            # model that misquotes — which the pipeline is right to reject.
+            # model that misquotes, which the pipeline is right to reject.
             response = response.replace("{quote}", quote_from(prompt))
 
-        async def _gen():  # noqa: ANN202
+        async def _gen():
             yield ModelStreamEvent(kind="token", content=response)
             yield ModelStreamEvent(kind="done")
 
         return _gen()
 
-    async def call(self, messages, *, temperature=None) -> None: ...  # noqa: ANN001
+    async def call(self, messages) -> None: ...
 
-    def append_tool_turn(self, messages, tool_calls_raw, results, assistant_text=""):  # noqa: ANN001, ANN201
+    def append_tool_turn(self, messages, tool_calls_raw, results, assistant_text=""):
         return messages
 
 
-# ---------------------------------------------------------------------------
-# The two seams that are the network, and nothing else
-# ---------------------------------------------------------------------------
-
 class _Writer:
-    """Stands in for OpenSearch, and owns the real knowledge database.
+    """Provide the real knowledge repository through a search-index substitute.
 
-    The step reaches its repository through the writer resource on purpose —
-    there is no central fallback connection — so the substitution has to carry
-    the real repository rather than replace it.
+    The workflow obtains its repository from the writer resource, so this test
+    keeps that activation boundary while replacing only network indexing.
     """
 
     KIND = "knowledge_index_writer"
@@ -246,7 +207,7 @@ class _Loader:
     def __init__(self, instance: object) -> None:
         self._instance = instance
 
-    def instantiate(self, *, kind, provider, name, config, **runtime_deps):  # noqa: ANN001, ANN003, ANN201
+    def instantiate(self, *, kind, provider, name, config, **runtime_deps):
         return self._instance
 
 
@@ -275,18 +236,18 @@ def _substitute_writer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(persist_module, "KnowledgeIndexWriterTool", _Writer)
 
 
-# ---------------------------------------------------------------------------
-# The pipeline
-# ---------------------------------------------------------------------------
-
 @pytest_asyncio.fixture
 async def engine(tmp_path: Path):
-    """A file-backed database, so the runs really are separate runs."""
+    """A file-backed database, so the runs really are separate runs.
+
+    Args:
+        tmp_path (Path): Temporary test directory.
+    """
     url = f"sqlite+aiosqlite:///{(tmp_path / 'knowledge.db').as_posix()}"
     engine = create_async_engine(url)
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -307,7 +268,7 @@ def corpus(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def writer(engine) -> _Writer:  # noqa: ANN001
+def writer(engine) -> _Writer:
     return _Writer(SqlAlchemyKnowledgeRepository(engine))
 
 
@@ -340,7 +301,7 @@ def _ctx(model: _ScriptedModel, run_id: str) -> WorkflowStepContext:
     )
 
 
-async def ingest(corpus: Path, writer: _Writer, model: _ScriptedModel, run_id: str):  # noqa: ANN201
+async def ingest(corpus: Path, writer: _Writer, model: _ScriptedModel, run_id: str):
     """One full pass over the corpus, through the steps a workflow would run.
 
     The refinement chain is included rather than skipped: canonicalisation and
@@ -351,6 +312,12 @@ async def ingest(corpus: Path, writer: _Writer, model: _ScriptedModel, run_id: s
     a configured workflow draws back to it: the step takes one batch of units
     per invocation so a long document cannot hold a lease open. Running it once
     would extract the first batch and quietly drop the rest.
+
+    Args:
+        corpus (Path): Corpus fixture used for ingestion.
+        writer (_Writer): Knowledge writer used by the test.
+        model (_ScriptedModel): Model stub used during ingestion.
+        run_id (str): Ingestion run identifier.
     """
     ctx = _ctx(model, run_id)
     extract = KnowledgeExtractStep(
@@ -404,22 +371,26 @@ async def ingest(corpus: Path, writer: _Writer, model: _ScriptedModel, run_id: s
     return ctx
 
 
-async def _rows(engine, model):  # noqa: ANN001, ANN201
+async def _rows(engine, model):
     async with AsyncSession(engine) as session:
         return list((await session.execute(select(model))).scalars().all())
 
 
-async def _assertion(engine, *, kind: str):  # noqa: ANN001, ANN201
+async def _assertion(engine, *, kind: str):
     rows = [row for row in await _rows(engine, KnowledgeAssertion) if row.kind == kind]
     assert len(rows) == 1, f"expected exactly one {kind}, found {len(rows)}"
     return rows[0]
 
 
-async def _revisions(engine, assertion_id: str):  # noqa: ANN001, ANN201
+async def _revisions(engine, assertion_id: str):
     """The revisions of an assertion, reached the way the chain stores them.
 
     Revisions hang off the variant, not off the assertion: a claim can hold in
     one scope and not another, and each scope carries its own history.
+
+    Args:
+        engine (Any): Database engine used by the test.
+        assertion_id (str): Assertion whose revisions are read.
     """
     variants = {
         row.variant_id
@@ -430,14 +401,10 @@ async def _revisions(engine, assertion_id: str):  # noqa: ANN001, ANN201
     return sorted(rows, key=lambda row: row.revision)
 
 
-async def _evidence(engine, assertion_id: str):  # noqa: ANN001, ANN201
+async def _evidence(engine, assertion_id: str):
     revisions = {row.revision_id for row in await _revisions(engine, assertion_id)}
     return [row for row in await _rows(engine, KnowledgeEvidence) if row.revision_id in revisions]
 
-
-# ---------------------------------------------------------------------------
-# The first pass
-# ---------------------------------------------------------------------------
 
 async def test_a_file_on_disk_becomes_an_assertion_with_lineage(
     corpus: Path, writer: _Writer, engine
@@ -465,11 +432,9 @@ async def test_a_file_on_disk_becomes_an_assertion_with_lineage(
 async def test_the_document_id_survives_an_edit_but_the_revision_does_not(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """Everything downstream rests on this.
+    """Keep document identity stable while changing its revision after an edit.
 
-    A document identified by its content would be a different document after
-    every edit, so no claim could ever be followed across one — and a revision
-    that did *not* move would make the second sighting invisible.
+    Claims can be tracked across edits only when the document ID remains stable.
     """
     await ingest(corpus, writer, _ScriptedModel(), "run-1")
     before = await _rows(engine, KnowledgeEvidence)
@@ -490,10 +455,6 @@ async def test_the_document_id_survives_an_edit_but_the_revision_does_not(
     }
     assert len(moved) == 1, "exactly the edited file should have a new revision"
 
-
-# ---------------------------------------------------------------------------
-# Nothing changed
-# ---------------------------------------------------------------------------
 
 async def test_a_second_pass_over_an_untouched_corpus_changes_nothing(
     corpus: Path, writer: _Writer, engine
@@ -519,19 +480,13 @@ async def test_a_second_pass_over_an_untouched_corpus_changes_nothing(
     assert current.evidence == baseline.evidence
 
 
-# ---------------------------------------------------------------------------
-# A source that changed
-# ---------------------------------------------------------------------------
-
 async def test_a_reworded_fact_keeps_its_claim_and_records_the_new_wording(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """A fact's identity is its proposition, so a rewording is not a change.
+    """Keep a fact assertion and record new evidence after source rewording.
 
-    The sentence moved; the claim did not. There is nothing new to record about
-    the claim — but there is something new to record about the corpus: a later
-    revision of the document still asserts it. That is evidence, and it is what
-    licenses not retracting the claim when the diff eventually runs.
+    Its structured proposition is unchanged, while the new document revision
+    establishes that the source still supports it.
     """
     await ingest(corpus, writer, _ScriptedModel(), "run-1")
     before = await _assertion(engine, kind="fact")
@@ -540,7 +495,7 @@ async def test_a_reworded_fact_keeps_its_claim_and_records_the_new_wording(
     model = _ScriptedModel()
     await ingest(corpus, writer, model, "run-2")
 
-    # The edited file was re-read; the untouched one was not.
+    # The edited file was re-read. The untouched one was not.
     assert model.calls - model.classifications == 1
     after = await _assertion(engine, kind="fact")
     assert after.assertion_id == before.assertion_id
@@ -567,11 +522,10 @@ async def test_a_reworded_fact_keeps_its_claim_and_records_the_new_wording(
 async def test_a_reworded_rule_writes_a_revision_and_keeps_its_approval(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """A rule is identified by its subject and property; its wording is state.
+    """Add a rule revision while preserving assertion identity and approval.
 
-    So the same rule said in other words is that rule at a new state — a
-    revision. The approval given against the earlier wording carries, which is
-    the entire reason the assertion id is a surrogate and not the content.
+    A rule's subject and property identify it, while observed wording records a
+    new state of that same rule.
     """
     await ingest(corpus, writer, _ScriptedModel(), "run-1")
     before = await _assertion(engine, kind="rule")
@@ -590,21 +544,10 @@ async def test_a_reworded_rule_writes_a_revision_and_keeps_its_approval(
 async def test_a_changed_claim_opens_a_new_assertion_and_retires_the_old(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """Java 17 became Java 21, which is a different claim, not a new wording.
+    """Create a new assertion and retire the old one after a claim changes.
 
-    Two things happen, and they are easy to confuse. A new assertion opens,
-    because the proposition moved. And the old one is *retired*, because the
-    slot that carried it no longer does — the source stopped saying it, which is
-    the only thing that legitimately takes knowledge back.
-
-    Retired, not deleted, and its evidence untouched: a reader following a
-    citation needs to find what was asserted and that it stopped being asserted.
-    Nothing about the new claim makes the old one never have been asserted.
-
-    No succession is recorded either. That one claim took another's place cannot
-    be read off the words, and nothing in this chain has looked at the source to
-    decide it — the two happen to be about Java only because a person can see
-    that. The slot lineage will propose it later.
+    Java 17 and Java 21 are different propositions. Preserve the old assertion's
+    evidence without inferring succession from wording alone.
     """
     await ingest(corpus, writer, _ScriptedModel(), "run-1")
     before = await _assertion(engine, kind="fact")
@@ -625,10 +568,6 @@ async def test_a_changed_claim_opens_a_new_assertion_and_retires_the_old(
     assert writer.removed
 
 
-# ---------------------------------------------------------------------------
-# A claim the old row cannot hold
-# ---------------------------------------------------------------------------
-
 TRANSFER_CLAIM = {
     "subject": "Alice",
     "predicate": "transfers",
@@ -640,34 +579,10 @@ TRANSFER_CLAIM = {
 async def test_a_four_role_claim_survives_the_whole_chain(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """"Alice transfers CHF 500 to Bob", from a file on disk to a query result.
+    """Preserve a four-role claim from source file through retrieval.
 
-    The claim this slice began with, and the one the chain used to throw away.
-    Four roles do not fit `subject`/`predicate`/`object`, so extraction counted a
-    correct reading as malformed and the corpus kept only the claims an old table
-    happened to have space for.
-
-    Every link is asserted, because each was a place it could be lost:
-
-        not malformed        the extraction gate asks whether the kind can hold
-                             the claim, not whether a legacy row can
-        stored whole         `knowledge_propositions` has all four roles
-        an assertion exists  it takes part in lineage, diffing and retraction
-                             like any other claim
-        the revision names   and the *revision* does, not the assertion and not
-        the structure        the graph node. One assertion has many revisions and
-                             each records the form the claim took at the time, so
-                             a claim that is reworded twice keeps three
-                             structures. Hanging one proposition on the assertion
-                             would flatten that history into "one proposition per
-                             assertion" and overwrite every earlier form.
-        retrieval sees it    reached through that revision, so a query returns
-                             four fields rather than an empty payload — stored
-                             where nothing looks would have been no better than
-                             the malformed rejection, only quieter
-        no legacy row        and that is correct, not a gap: a row saying "Alice
-                             transfers CHF 500" is well-formed, reads as true,
-                             and is not what the source said
+    The proposition retains every role on its revision. It participates in
+    lineage and retrieval without being reduced to a legacy three-field row.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeFact,
@@ -699,24 +614,10 @@ async def test_a_four_role_claim_survives_the_whole_chain(
 async def test_a_renamed_role_continues_the_assertion_once_a_judge_says_so(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """The gate that was unreachable until equivalence was wired.
+    """Continue an assertion only after equivalence judgment confirms renamed roles.
 
-    The source says one thing twice and the model names its parts differently on
-    the second pass — `subject`/`recipient`, then `sender`/`beneficiary`. Every
-    rung of the matching ladder fails, correctly: the wording moved, the entity
-    key is built from the fields the model chose, and nothing in the *structure*
-    separates a renamed role from a swapped one.
-
-    So it is asked, once, of that pair — and only because the ladder found
-    nothing and the two carry the same quantities. What follows is the ordering
-    that matters:
-
-        the assessment is recorded first, whatever it says
-        `yes` continues the assertion; anything else leaves the claims apart
-
-    And the earlier structure survives, which is the point of hanging a
-    proposition on the revision: one assertion, two revisions, two propositions,
-    both readable.
+    Record the assessment first. A yes verdict joins the new observation to the
+    existing assertion while both revision propositions remain readable.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeEquivalenceAssessment,
@@ -732,7 +633,7 @@ async def test_a_renamed_role_continues_the_assertion_once_a_judge_says_so(
     model = _ScriptedModel()
     await ingest(corpus, writer, model, "run-2")
 
-    # Asked, and asked once — not once per differing fingerprint.
+    # Asked, and asked once, not once per differing fingerprint.
     assert model.equivalences == 1
 
     # Recorded before anything was joined, with the judge that reached it.
@@ -759,29 +660,24 @@ async def test_a_renamed_role_continues_the_assertion_once_a_judge_says_so(
 async def test_without_a_yes_the_two_claims_stay_apart(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """The same corpus, with a judge that will not say yes.
+    """Keep two claims separate unless the equivalence judge returns yes.
 
-    `no`, `ambiguous` and `unjudged` are three different findings and one
-    behaviour: the claims stay apart. Two wrongly joined lose one of them and
-    nothing afterwards shows which, so doubt leaves them separate — the opposite
-    of the semantic-change judgement, where doubt costs a reviewer a minute.
-
-    The assessment is still written. "These were judged different" is evidence,
-    and a trail that kept only the joins would show a judge that never disagreed.
+    No, ambiguous, and unjudged outcomes remain distinct audit records, but none
+    merges the assertions.
     """
     from nlght.adapters.outbound.persistence.knowledge_models import (
         KnowledgeEquivalenceAssessment,
     )
 
     class _Unsure(_ScriptedModel):
-        def stream(self, messages, tools=None, tool_choice=None, *, temperature=None):  # noqa: ANN001, ANN201
+        def stream(self, messages, tools=None, tool_choice=None):
             if "Do A and B assert the same thing" in str(messages[0]["content"]):
-                async def _gen():  # noqa: ANN202
+                async def _gen():
                     yield ModelStreamEvent(kind="token", content="uncertain")
                     yield ModelStreamEvent(kind="done")
 
                 return _gen()
-            return super().stream(messages, tools, tool_choice, temperature=temperature)
+            return super().stream(messages, tools, tool_choice)
 
     (corpus / STACK).write_text(TRANSFER, encoding="utf-8")
     (corpus / POLICY).unlink()
@@ -800,28 +696,23 @@ async def test_without_a_yes_the_two_claims_stay_apart(
 async def test_the_report_can_name_every_document_it_saw(
     corpus: Path, writer: _Writer, engine
 ) -> None:
-    """The link an expectation file stands on, through the real chain.
+    """Carry document identities through knowledge-only ingestion into reports.
 
-    It failed live for a reason no unit test could have caught: the report looked
-    names up in `ingestion_documents`, and a knowledge-only flow never writes
-    that table. Every case reported "in neither snapshot" and nothing was
-    checked — the checker was right and had nothing to work with.
-
-    So the name travels with the sighting, and this asserts it survives the whole
-    chain: source, processor, parser, extraction, refinement, persistence.
+    The report cannot resolve claim sources through data-ingestion tables that a
+    knowledge-only workflow never writes.
     """
     await ingest(corpus, writer, _ScriptedModel(), "run-1")
 
     report = await writer.repository.lineage_report()
 
-    # The source's own path, alias and all — which is why an expectation names a
+    # The source's own path, alias and all, which is why an expectation names a
     # file by suffix rather than having to know where the corpus was mounted.
     assert sorted(report.document_paths.values()) == [f"corpus/{POLICY}", f"corpus/{STACK}"]
     # And the id side is what the diff uses, so both halves are present.
     assert set(report.document_paths) == set(report.documents)
 
     # End to end: a case naming the bare file finds it.
-    from nlght.core.knowledge.expectations import (  # noqa: PLC0415
+    from nlght.core.knowledge.expectations import (
         CaseExpectation,
         check_expectations,
     )

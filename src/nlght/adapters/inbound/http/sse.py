@@ -11,7 +11,14 @@ from fastapi.responses import StreamingResponse
 
 
 def sse_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
-    """Wrap an async string generator into a proper SSE StreamingResponse."""
+    """Wrap generated text events in a streaming HTTP response.
+
+    Args:
+        generator (AsyncGenerator[str, None]): Async source of SSE frames.
+
+    Returns:
+        StreamingResponse: Response with SSE media type and no buffering.
+    """
     return StreamingResponse(
         generator,
         media_type="text/event-stream",
@@ -24,7 +31,18 @@ def sse_response(generator: AsyncGenerator[str, None]) -> StreamingResponse:
 
 
 async def sse_event(data: object, event: str | None = None) -> str:
-    """Format a single SSE event frame."""
+    """Encode one JSON value as an SSE event frame.
+
+    Args:
+        data (object): JSON-serializable event payload.
+        event (str | None): Optional SSE event name.
+
+    Returns:
+        str: Frame with optional event line and JSON data line.
+
+    Raises:
+        TypeError: The payload cannot be serialized as JSON.
+    """
     lines = []
     if event:
         lines.append(f"event: {event}")
@@ -33,11 +51,13 @@ async def sse_event(data: object, event: str | None = None) -> str:
 
 
 async def invocation_stream(payload: dict[str, Any]) -> AsyncGenerator[str, None]:
-    """Placeholder streaming generator.
+    """Yield an invocation payload followed by the terminal SSE marker.
 
-    Yields the resolved invocation as a single SSE data event followed by
-    the OpenAI-style [DONE] sentinel.  Replace this generator with a real
-    workflow-executor stream once the execution layer is implemented.
+    Args:
+        payload (dict[str, Any]): JSON-serializable invocation payload.
+
+    Yields:
+        str: One data event, then the ``[DONE]`` marker.
     """
     yield await sse_event(payload)
     yield "data: [DONE]\n\n"

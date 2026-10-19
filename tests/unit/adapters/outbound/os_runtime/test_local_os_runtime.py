@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for LocalOsRuntime.
+"""Test local process execution and filesystem operations.
 
-Exec-Tests verwenden ``sys.executable`` damit sie plattformunabhängig laufen.
-Dateisystem-Tests verwenden ``tmp_path`` (pytest built-in fixture).
+Process tests use sys.executable. Filesystem tests use pytest tmp_path.
 """
 from __future__ import annotations
 
@@ -14,10 +13,6 @@ from pathlib import Path
 import pytest
 
 from nlght.adapters.outbound.os_runtime.local import LocalOsRuntime
-
-# ---------------------------------------------------------------------------
-# exec()
-# ---------------------------------------------------------------------------
 
 
 async def test_exec_returns_exit_code_zero_on_success(tmp_path: Path) -> None:
@@ -78,11 +73,6 @@ async def test_exec_uses_default_workdir(tmp_path: Path) -> None:
     assert str(tmp_path) in stdout
 
 
-# ---------------------------------------------------------------------------
-# read_text / write_text
-# ---------------------------------------------------------------------------
-
-
 async def test_write_text_creates_file(tmp_path: Path) -> None:
     runtime = LocalOsRuntime()
     target = tmp_path / "out.txt"
@@ -121,11 +111,6 @@ async def test_read_write_roundtrip(tmp_path: Path) -> None:
     assert result == "roundtrip"
 
 
-# ---------------------------------------------------------------------------
-# file_exists
-# ---------------------------------------------------------------------------
-
-
 async def test_file_exists_true_for_existing_file(tmp_path: Path) -> None:
     runtime = LocalOsRuntime()
     f = tmp_path / "exists.txt"
@@ -138,11 +123,6 @@ async def test_file_exists_false_for_missing_file(tmp_path: Path) -> None:
     runtime = LocalOsRuntime()
 
     assert await runtime.file_exists(str(tmp_path / "nope.txt")) is False
-
-
-# ---------------------------------------------------------------------------
-# list_dir
-# ---------------------------------------------------------------------------
 
 
 async def test_list_dir_returns_direct_children(tmp_path: Path) -> None:
@@ -165,11 +145,6 @@ async def test_list_dir_does_not_recurse(tmp_path: Path) -> None:
 
     assert "nested.txt" not in entries
     assert "sub" in entries
-
-
-# ---------------------------------------------------------------------------
-# make_dir
-# ---------------------------------------------------------------------------
 
 
 async def test_make_dir_creates_directory(tmp_path: Path) -> None:
@@ -199,11 +174,6 @@ async def test_make_dir_idempotent(tmp_path: Path) -> None:
     await runtime.make_dir(str(d))
 
     assert d.is_dir()
-
-
-# ---------------------------------------------------------------------------
-# delete
-# ---------------------------------------------------------------------------
 
 
 async def test_delete_removes_file(tmp_path: Path) -> None:

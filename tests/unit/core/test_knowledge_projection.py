@@ -1,19 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Being told a shape does not fit, rather than being handed a shortened claim.
+"""Report when a complete proposition does not fit a requested shape.
 
-Generic retrieval already delivers a claim whole — measured separately, in
-`tests/unit/adapters/outbound/stores/test_knowledge_delivers_whole.py`. What was
-missing is narrower: a way for a consumer that asked for a particular *shape* to
-be told, as a value it must handle, that this claim does not fit in it.
-
-**The shape is the caller's, never this module's.** An earlier version defined
-`as_triple` and sorted claims by whether they had parts "beyond subject,
-predicate and object" — which made the legacy payload the privileged form inside
-core, during a slice whose entire point is that no representation has been
-chosen. So the tests below invent their own shape and do their own deciding; core
-only carries the answer.
+The caller supplies the shape. Projection must not shorten a claim to make it
+fit that shape.
 """
 
 from __future__ import annotations
@@ -33,7 +24,14 @@ class _Pair:
 
 
 def _as_pair(content: dict[str, Any]) -> Represented[_Pair] | NotRepresentable:
-    """One caller's projection, with one caller's idea of what fits."""
+    """One caller's projection, with one caller's idea of what fits.
+
+    Args:
+        content (dict[str, Any]): Content supplied to the projection or step.
+
+    Returns:
+        Represented[_Pair] | NotRepresentable: Projected pair or the reason it cannot be represented.
+    """
     if set(content) == {"left", "right"}:
         return Represented(_Pair(left=content["left"], right=content["right"]))
     return NotRepresentable(
@@ -78,13 +76,8 @@ def test_a_refusal_reads_as_a_sentence() -> None:
 
 
 def test_core_knows_no_shapes_of_its_own() -> None:
-    """The guard on the correction that produced this file.
-
-    Nothing in core may name a privileged form while the representation question
-    is open — a shape sitting here is how that decision gets made without anybody
-    taking it.
-    """
-    import nlght.core.knowledge.projection as projection  # noqa: PLC0415
+    """Keep caller-specific projection shapes out of the knowledge core."""
+    import nlght.core.knowledge.projection as projection
 
     exported = {name for name in dir(projection) if not name.startswith("_")}
 

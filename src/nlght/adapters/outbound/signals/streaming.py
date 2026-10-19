@@ -17,17 +17,12 @@ class QueuedSignalEmitter(SignalEmitter):
 
     The step machine runs as an asyncio Task (producer).
     The HTTP response generator iterates via ``__aiter__`` (consumer).
-    Both sides run concurrently inside the same event loop — signals are
+    Both sides run concurrently inside the same event loop. Signals are
     forwarded to the client as they are emitted, without waiting for the
     step machine to finish.
 
-    Usage::
-
-        emitter = QueuedSignalEmitter()
-        task = asyncio.create_task(run_step_machine(..., emitter))
-        async for signal in emitter:
-            yield serialise_to_sse(signal)
-        await task
+    The queue closes when ``close()`` sends its sentinel after the producer's
+    final signal.
     """
 
     def __init__(self, maxsize: int = 100) -> None:

@@ -16,15 +16,42 @@ class OsRuntimeFactory(Protocol):
     """Factory that creates and releases an isolated OsRuntime instance per invocation."""
 
     def bind(self, cid: str) -> OsRuntime:
-        """Returns a lazy runtime — the container/resource is only created on first access."""
+        """Bind an invocation to a lazily created runtime.
+
+        Args:
+            cid (str): Invocation correlation ID.
+
+        Returns:
+            OsRuntime: Bound OS runtime.
+
+        Side Effects:
+            May cache the bound runtime in the factory.
+        """
         ...
 
     async def create(self, name: str) -> OsRuntime:
-        """Creates and starts a new runtime instance (e.g. a Docker container) with the given name."""
+        """Create an isolated runtime for one invocation.
+
+        Args:
+            name (str): Runtime instance name.
+
+        Returns:
+            OsRuntime: OS runtime ready for use.
+
+        Side Effects:
+            May start and cache an isolated runtime resource.
+        """
         ...
 
     async def release(self, runtime: OsRuntime) -> None:
-        """Stops and cleans up the runtime instance after the invocation completes."""
+        """Release a runtime after its invocation.
+
+        Args:
+            runtime (OsRuntime): Runtime instance to release.
+
+        Side Effects:
+            May stop and clean up the runtime resource.
+        """
         ...
 
 
@@ -32,13 +59,12 @@ class OsRuntimeFactory(Protocol):
 class OsRuntime(Protocol):
     """Abstract interface for an isolated OS execution environment.
 
-    Implementations provide command execution and filesystem access —
+    Implementations provide command execution and filesystem access,
     regardless of whether the command runs locally, in Docker, or in
     Kubernetes.
 
-    Tools that use this port receive an instance via ``ToolBase.__init__``
-    (injected by the ``ToolCatalogBuilder``). They never call the
-    implementation directly — only this interface.
+    ``ToolCatalogBuilder`` injects this port through ``ToolBase.__init__``.
+    Tools call the interface provided here.
     """
 
     async def exec(
@@ -48,46 +74,120 @@ class OsRuntime(Protocol):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> tuple[int, str, str]:
-        """Executes a command. Returns ``(exit_code, stdout, stderr)``."""
+        """Execute a command in the isolated environment.
+
+        Args:
+            command (list[str]): Command arguments without a shell string.
+            cwd (str | None): Optional runtime working directory.
+            env (dict[str, str] | None): Optional process environment.
+
+        Returns:
+            tuple[int, str, str]: Exit code, standard output, and standard error.
+
+        Side Effects:
+            Starts a process and applies its command effects.
+        """
         ...
 
     def add_env(self, env: dict[str, str]) -> None:
-        """Adds env variables that are carried along with every subsequent ``exec``."""
+        """Set environment values for subsequent commands.
+
+        Args:
+            env (dict[str, str]): Environment variable mapping.
+
+        Side Effects:
+            Changes the runtime's command environment.
+        """
         ...
 
     async def read_text(self, path: str) -> str:
-        """Reads a text file."""
+        """Read text from the runtime filesystem.
+
+        Args:
+            path (str): File path.
+
+        Returns:
+            str: File contents as text.
+
+        Side Effects:
+            Reads the runtime filesystem.
+        """
         ...
 
     async def write_text(self, path: str, content: str) -> None:
-        """Writes a text file (creates missing directories)."""
+        """Write text in the runtime filesystem.
+
+        Args:
+            path (str): Destination path in the runtime.
+            content (str): Text to write.
+
+        Side Effects:
+            Creates missing directories and writes the file.
+        """
         ...
 
     async def file_exists(self, path: str) -> bool:
-        """Returns ``True`` if the path exists."""
+        """Check for a path in the runtime filesystem.
+
+        Args:
+            path (str): File path.
+
+        Returns:
+            bool: Whether the path exists.
+
+        Side Effects:
+            Reads filesystem metadata.
+        """
         ...
 
     async def list_dir(self, path: str) -> list[str]:
-        """Lists the contents of a directory (direct children only)."""
+        """List direct children of a runtime directory.
+
+        Args:
+            path (str): Directory path.
+
+        Returns:
+            list[str]: Names of direct children.
+
+        Side Effects:
+            Reads the runtime filesystem.
+        """
         ...
 
     async def make_dir(self, path: str) -> None:
-        """Creates a directory including all missing parents."""
+        """Create a runtime directory.
+
+        Args:
+            path (str): Directory path.
+
+        Side Effects:
+            Creates the directory and missing parents.
+        """
         ...
 
     async def delete(self, path: str) -> None:
-        """Deletes a file or an empty directory."""
+        """Remove a file or empty runtime directory.
+
+        Args:
+            path (str): File or directory path.
+
+        Side Effects:
+            Deletes the specified filesystem entry.
+        """
         ...
 
     def shell(self) -> tuple[str, str]:
-        """Returns ``(executable, flag)`` for shell command execution.
+        """Select the shell invocation for this runtime.
 
-        Examples:
-          ``("powershell", "-Command")`` on Windows
-          ``("sh", "-c")`` on Linux / macOS / Docker
+        Returns:
+            tuple[str, str]: Executable and command flag, such as ``("sh", "-c")``.
         """
         ...
 
     def security_capabilities(self) -> ExecutionCapabilities:
-        """Return guarantees enforced by this runtime, never operator intent."""
+        """Report capabilities enforced by this runtime.
+
+        Returns:
+            ExecutionCapabilities: Execution capability contract.
+        """
         ...

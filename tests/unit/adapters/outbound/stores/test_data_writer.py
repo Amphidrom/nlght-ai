@@ -5,15 +5,15 @@ from __future__ import annotations
 
 import pytest
 
-# The writer builds qdrant model objects at call time; without the extra there
+# The writer builds qdrant model objects at call time. Without the extra there
 # is nothing to assert against, so skip rather than fail in a pruned env.
 pytest.importorskip("qdrant_client")
 
-from qdrant_client.models import FilterSelector  # noqa: E402
+from qdrant_client.models import FilterSelector
 
-from nlght.adapters.outbound.stores import data_writer as dw  # noqa: E402
-from nlght.adapters.outbound.stores.connections import StoreConnections  # noqa: E402
-from nlght.core.ingestion import ChunkProjection  # noqa: E402
+from nlght.adapters.outbound.stores import data_writer as dw
+from nlght.adapters.outbound.stores.connections import StoreConnections
+from nlght.core.ingestion import ChunkProjection
 
 
 class _FakeConnections(StoreConnections):
@@ -38,8 +38,7 @@ class _FakeVector:
     def __init__(self, *, fail_delete: bool = False) -> None:
         self.calls: list[dict] = []
         self.upserts: list[dict] = []
-        # The order the writer touched the store in — the difference between
-        # replacing a document and briefly removing it.
+        # Upsert must precede deletion to avoid a gap in document availability.
         self.order: list[str] = []
         self._fail_delete = fail_delete
 
@@ -74,7 +73,7 @@ def _make_writer(
     return dw.DataIndexWriterTool(
         name="w",
         config={
-            # Lazy engine — never connected in this test.
+            # Lazy engine, never connected in this test.
             "pg_url": "sqlite+aiosqlite:///:memory:",
             "qdrant_url": "http://qdrant",
             "opensearch_url": "http://opensearch",
@@ -184,7 +183,7 @@ async def test_a_document_is_never_absent_while_it_is_replaced(
 async def test_the_prune_removes_only_the_previous_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A constant-size filter — same document, any revision but this one — so a
+    # A constant-size filter covers the same document at any other revision, so a
     # document whose chunk count shrank keeps no orphans and a document with
     # thousands of chunks needs no list of them.
     vector = _FakeVector()
@@ -273,14 +272,7 @@ async def test_a_refused_tombstone_removal_raises(monkeypatch: pytest.MonkeyPatc
 async def test_a_chunk_payload_names_the_span_it_came_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without the locator a chunk hit names no part of its document.
-
-    The payload keeps its own copy of the text for ranking and for reading a
-    point by eye, but that copy is not what a reader answers with — the span is
-    cut from the stored revision (ADR-0062). These three numbers are what make
-    that cut possible at all, and they used to be computed and then dropped at
-    the `DocumentChunk` → `EmbeddedChunk` boundary.
-    """
+    """Store a chunk locator so retrieval can read its source span."""
     fake_vector = _FakeVector()
     writer = _make_writer(monkeypatch, vector=fake_vector)
 
@@ -315,13 +307,7 @@ async def test_a_chunk_payload_names_the_span_it_came_from(
 def test_swapping_the_embedding_model_changes_the_projection_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The case that used to reindex nothing.
-
-    Neither hash describes the projection, and the generation only rotates when
-    a collection is created — so before this value existed, a model swap left
-    every document reading as current and the collection holding vectors from a
-    model the queries were no longer embedded with.
-    """
+    """Change the projection fingerprint when the embedding model changes."""
     writer = _make_writer(monkeypatch, vector=_FakeVector())
 
     before = writer.projection_fingerprint(provider="local", model="minilm", dimension=384)

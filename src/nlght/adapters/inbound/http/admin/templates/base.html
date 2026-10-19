@@ -28,22 +28,11 @@
     .badge-cancelled { background: #fef3c7; color: #92400e; }
     .badge-expired   { background: #fee2e2; color: #991b1b; }
     .muted { color: var(--pico-muted-color); }
-    /* Pico gives every form element a bottom margin, which is right for a
-       stacked form and wrong for a row — and every button in this UI is in a
-       row, beside a link, a heading, a select or another button. The margin is
-       invisible but it is part of the box, so a centred row centres it too and
-       the button ends up a few pixels high; an end-aligned row puts it a few
-       pixels low. Nothing anchors a button to a line here, so the margin goes.
-       Rows that want space between their controls say so with `gap`. */
+    /* Remove Pico's bottom button margin so controls align in horizontal rows.
+       Rows set their own spacing with gap. */
     button, [role="button"] { margin-bottom: 0; }
-    /* A form's action row. Pico gives an <a role="button"> twice the horizontal
-       padding of a real <button> (2rem against 1rem), so Save and Cancel came
-       out visibly different sizes while sitting side by side. Same row, same
-       button — whatever element it happens to be.
-       Descendant, not child: a button wrapped in a <form> to carry its CSRF
-       token is not a child of the row, and used to escape this reset entirely
-       while its neighbours got it. The wrapper becomes a flex item that centres
-       what it holds, so wrapping changes nothing about where a button sits. */
+    /* Match link and button padding. Use descendant selectors because forms
+       wrap action buttons to carry CSRF tokens. */
     .form-actions { display: flex; gap: 1rem; margin-top: 1rem; align-items: center; flex-wrap: wrap; }
     .form-actions button,
     .form-actions [role="button"] { --pico-form-element-spacing-horizontal: 1rem; width: auto; margin: 0; }
@@ -51,31 +40,15 @@
     .form-actions label,
     .form-actions select,
     .form-actions input { margin-bottom: 0; }
-    /* A checkbox is the same control wherever it appears, so it is the same
-       size wherever it appears. Pico sizes it `1.25em` square, which makes it
-       two different things at once: `em` ties it to whatever font-size it lands
-       in, so one inside a `.mono` cell or a `<small>` comes out smaller than the
-       one in the form beside it; and a checkbox in a flex label is a flex item,
-       so `flex-shrink` squeezes it narrower than it is tall as soon as the
-       label's text runs long — which is exactly what the four flex labels on the
-       step form do.
-       `rem` fixes the size to the page rather than to the neighbourhood, and
-       `flex: none` stops a long label taking width out of it. Switches are
-       excluded because a switch is deliberately wider than it is tall, and the
-       admin has none today: this is so that adding one does not quietly get
-       flattened into a square. */
+    /* Use rem to keep controls equal across font sizes, and prevent flex
+       labels from shrinking them. Exclude switches, which need a wider shape. */
     input[type="checkbox"]:not([role="switch"]),
     input[type="radio"] { width: 1.25rem; height: 1.25rem; flex: none; }
     .nowrap { white-space: nowrap; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; }
     pre.diagnostics { background: var(--pico-card-sectioning-background-color); padding: .75rem; border-radius: .35rem; overflow-x: auto; max-height: 20rem; }
     table { width: 100%; }
-    /* A table cell's actions: a plain text link beside a small button. Left to
-       themselves they align on the *baseline*, so the two pieces of text line
-       up while the button's box — taller, with its own padding — hangs below
-       it. Aligning middles instead puts the boxes on one line, which is what
-       the eye reads. The cell stays a table cell; making it a flex container
-       would take the column's width with it. */
+    /* Align action boxes at their middles without changing table-cell layout. */
     .actions { white-space: nowrap; }
     .actions a,
     .actions button,
@@ -109,7 +82,7 @@
   });
 </script>
 <nav>
-  <a class="brand" href="/admin/">⚙ nlght Admin</a>
+  <a class="brand" href="/admin/">nlght Admin</a>
   <a href="/admin/workflows">Workflows</a>
   <a href="/admin/resources">Resources</a>
   <a href="/admin/policies">Access Policies</a>

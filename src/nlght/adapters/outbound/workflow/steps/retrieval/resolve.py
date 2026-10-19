@@ -3,7 +3,7 @@
 
 """Findings become what they actually say, read from the authority.
 
-Search says "these systems found these things" and hands over locators; this
+Search says "these systems found these things" and hands over locators. This
 turns each locator into the text its source really holds. It exists as its own
 step for two reasons, and both are boundaries rather than preferences.
 
@@ -15,14 +15,14 @@ fetch happens before it, and `passages_from` keeps receiving findings whose
 
 **And it happens after the ranking, not during discovery.** Deciding whether a
 candidate is still current needs identity only, and the store already did that
-before anything was ranked (ADR-0062). Reading *content* is the expensive half —
-whole documents, and a document can be an eight-thousand-line file — so it is
-spent on the findings a ranking selected rather than on every candidate a search
+before anything was ranked (ADR-0062). Reading *content* is expensive because
+documents can be thousands of lines long. Read content for findings selected
+by ranking instead of every candidate a search
 looked at. With the default `fetch_k` that is twenty reads instead of a hundred.
 
 Assertions pass through untouched. `knowledge_store` resolves its identities
 against PostgreSQL during discovery, because a claim is small and its quarantine
-has to be enforced before it is ranked at all — so a knowledge hit's `content`
+has to be enforced before it is ranked at all. A knowledge hit's `content`
 is already authoritative when it arrives here.
 """
 
@@ -54,15 +54,15 @@ NOTHING_RESOLVED = "unresolved"
 """Verdict when no finding could be answered from the corpus.
 
 Distinct from finding nothing: the search *did* find something and the corpus
-cannot say what it says. A pipeline that wants to notice that — a corpus indexed
-before its content was stored, say — routes this verdict somewhere.
+cannot say what it says. A pipeline can route this verdict when, for example,
+the corpus was indexed before its content was stored.
 """
 
 
 class RetrievalResolveStep(StepBase):
     """Replaces each finding's text with what its source actually holds.
 
-    Reads and rewrites ``retrieval.hits``; writes ``retrieval.resolved`` with
+    Reads and rewrites ``retrieval.hits``. Writes ``retrieval.resolved`` with
     the counts. Place it between ``retrieval.search`` and ``prompt.compose``.
 
     Step config:
@@ -72,11 +72,16 @@ class RetrievalResolveStep(StepBase):
     index payload. The payload is a projection: it can be rebuilt, re-mapped or
     dropped, it holds a document in two different shapes across two backends,
     and no offset addresses it. Quietly substituting it would hand a model a
-    projection while a citation claimed the corpus — so the finding leaves
+    projection while a citation claimed the corpus. The finding leaves
     instead, and the count says how many did.
     """
 
     TYPE = "retrieval.resolve"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        NOTHING_RESOLVED = NOTHING_RESOLVED
 
     def __init__(
         self,
@@ -150,7 +155,7 @@ class RetrievalResolveStep(StepBase):
         }
         if dropped:
             logger.warning(
-                "[%s] retrieval.resolve.dropped | count=%d — the corpus holds no text "
+                "[%s] retrieval.resolve.dropped | count=%d: the corpus holds no text "
                 "for these revisions, so they were left out rather than answered from "
                 "the index payload; reindex to make them readable",
                 ctx.correlation_id, dropped,
@@ -160,15 +165,25 @@ class RetrievalResolveStep(StepBase):
             ctx.correlation_id, resolved, claims, dropped, len(groups),
         )
         return StepResult(
-            ctx=ctx, verdict=None if groups else NOTHING_RESOLVED
+            ctx=ctx, verdict=None if groups else self.Verdict.NOTHING_RESOLVED
         )
 
     async def _store(self, caller: RequestContext | None) -> Any:  # noqa: ANN401
-        """The data store whose corpus answers these findings.
+        """Activate the data store used to resolve retrieval findings.
 
-        Required, so every failure here is an error: unnamed is a
-        misconfiguration, unresolvable is a misconfiguration, and denied is a
-        denial. None of them is a reason to answer from the index payload.
+        Args:
+            caller (RequestContext | None): Caller used for resource access checks.
+
+        Returns:
+            Any: Configured data store activation.
+
+        Raises:
+            WorkflowConfigurationError: The data store name or activator is
+                missing, or the resource cannot be resolved uniquely.
+            ResourceAccessDeniedError: Access policy denies the caller.
+
+        Side Effects:
+            Resolves and activates the named data store resource.
         """
         name = str(self.config.get("data_store", "")).strip()
         if not name:

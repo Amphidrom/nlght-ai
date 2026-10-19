@@ -285,31 +285,15 @@ async def test_worker_streams_a_streaming_execution_through_the_broker() -> None
     assert repository.results[0]["choices"][0]["message"]["content"] == "hello"
 
 
-# ---------------------------------------------------------------------------
-# What is worth attempting again, and what is not
-# ---------------------------------------------------------------------------
-
 def test_a_permanent_failure_is_classified_by_type_and_not_by_message() -> None:
-    """The rule, asserted where it would be undone.
-
-    A timeout, a refused connection and a busy backend are worth another
-    attempt. A misconfigured step and a write the domain refuses are not:
-    retrying burns attempts on an outcome that cannot change, and where a model
-    produced the input a retry can succeed *by accident* and hide the fault
-    instead of surfacing it — a kind conflict caught that way stays caught until
-    it recurs on a corpus somebody cares about.
-
-    By type, because classifying on message text is a guess about wording that
-    breaks when somebody rephrases an error and cannot separate two failures
-    that read alike.
-    """
+    """Classify permanent worker failures by exception type rather than text."""
     import inspect
 
     from nlght.application.execution import worker as worker_module
     from nlght.core.errors.errors import PermanentError, WorkflowConfigurationError
     from nlght.core.knowledge import KnowledgeKindConflictError
 
-    source = inspect.getsource(worker_module.ExecutionWorker._execute)  # noqa: SLF001
+    source = inspect.getsource(worker_module.ExecutionWorker._execute)
     [line] = [row.strip() for row in source.splitlines() if "retry_at =" in row]
 
     assert "isinstance(exc, PermanentError)" in line

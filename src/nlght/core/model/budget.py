@@ -11,11 +11,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Fallback table for the local Ollama provider — used when /api/show fails or
+# Use this fallback table when the local Ollama /api/show request fails or
 # returns no context_length (e.g. cloud-passthrough models not present locally).
 # Source: model documentation / Ollama defaults. Treat as last resort.
-# ---------------------------------------------------------------------------
 _FALLBACK_CONTEXT_WINDOWS: dict[str, int] = {
     "qwen3-coder:480b": 262144,
     "qwen3-coder:30b": 262144,
@@ -31,7 +29,7 @@ _FALLBACK_CONTEXT_WINDOWS: dict[str, int] = {
 
 _DEFAULT_CONTEXT_WINDOW = 32768
 
-# Per-process cache — /api/show is called at most once per model per process.
+# Cache each model's /api/show response once per process.
 _context_window_cache: dict[str, int] = {}
 
 
@@ -89,22 +87,20 @@ async def _fetch_context_window(
 
 
 class TokenBudget:
-    """Token budget for a single LLM call.
+    """Per-call token limits from one provider context window (ADR-0012).
 
-    Partitioning (per ADR-0012) — all values in tokens:
+    Allocation in tokens for window M:
 
-      store_budget   (40% of M)  -- Store / Hive-Mind injection
-      prompt_budget  (20% of M)  -- trusted instructions + context
-      output_budget  (20% of M)  -- LLM response reserve
-      _safety_margin (20% of M)  -- overhead / buffer
+    | Field | Allocation | Use |
+    |---|---:|---|
+    | `store_budget` | 40% of M | Store and Hive Mind input |
+    | `prompt_budget` | 20% of M | Trusted instructions and context |
+    | `output_budget` | up to 20% of M | Model response reserve |
+    | `_safety_margin` | 20% of M | Overhead reserve |
 
-    Bound model clients use ``get_available_for_input()`` as the hard-cap
-    limit. Context assembly reads ``prompt_budget`` from the same object and
-    trims budgetable context before the call.
-
-    Provider backends own context-window resolution. Ollama Local may use the
-    async ``for_model()`` factory to query ``/api/show``; cloud providers build
-    the same type from provider-specific model metadata or fallback tables.
+    Bound clients enforce the input cap from this object. Context assembly
+    uses the same object's `prompt_budget`. Ollama Local can discover M through
+    `for_model()`. Other providers supply their own context-window values.
     """
 
     def __init__(
@@ -131,22 +127,17 @@ class TokenBudget:
             M, self.store_budget, self.prompt_budget, self.output_budget, self._safety_margin,
         )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def get_available_for_input(self, system_prompt_tokens: int = 0) -> int:
-        """Tokens available for combined user input + store injection.
+        """Calculate the hard cap for input and store content.
 
-        Used by the LLM client hard cap to detect overflow.
-        Can also be used by the Store as a constraint basis.
+        Args:
+            system_prompt_tokens (int): Token count for separately reserved system prompt text.
+
+        Returns:
+            int: Nonnegative available input token count.
         """
         reserved = self.output_budget + self._safety_margin + system_prompt_tokens
         return max(0, self.total - reserved)
-
-    # ------------------------------------------------------------------
-    # Async factory
-    # ------------------------------------------------------------------
 
     @staticmethod
     async def for_model(
@@ -157,11 +148,20 @@ class TokenBudget:
         client_max_tokens: int | None = None,
         headers: dict[str, str] | None = None,
     ) -> TokenBudget:
-        """Creates a TokenBudget by querying the real context window via
-        Ollama ``/api/show``.
+        """Build a budget from Ollama context-window metadata.
 
-        Results are cached per process — ``/api/show`` is called at most
-        once per model.
+        Args:
+            model (str): Model whose context window is requested.
+            base_url (str): Ollama server URL.
+            http_client (httpx2.AsyncClient): Client used for the metadata request.
+            client_max_tokens (int | None): Optional client output-token cap.
+            headers (dict[str, str] | None): Optional request headers.
+
+        Returns:
+            TokenBudget: Budget based on discovered or fallback context size.
+
+        Side Effects:
+            Queries /api/show once per model and process, caches the result, and logs fallback.
         """
         context_window = await _fetch_context_window(
             model, base_url=base_url, http_client=http_client, headers=headers

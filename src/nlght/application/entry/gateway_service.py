@@ -93,7 +93,7 @@ class GatewayService:
 
         if self._workflow_repository is None:
             raise WorkflowNotFoundError(
-                f"No workflow repository configured — cannot route operation '{trigger.operation}'."
+                f"No workflow repository configured. Cannot route operation '{trigger.operation}'."
             )
 
         lookup_name = workflow_name if workflow_name is not None else trigger.operation

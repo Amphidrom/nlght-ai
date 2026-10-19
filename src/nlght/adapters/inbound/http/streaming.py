@@ -1,45 +1,60 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Shared, protocol-agnostic streaming source for the HTTP adapters.
+"""Supply workflow signals to HTTP adapters and encode OpenAI SSE frames.
 
-Every streaming request draws its ``Signal``s from the same place: a worker,
-when a durable queue and a local worker are available, otherwise the executor
-inline in the request. The adapter keeps its own wire serialization (OpenAI SSE,
-Ollama NDJSON); only the source of signals is shared.
-
-Scope follows the configured transport. The in-process broker carries signals
-from the *local* worker only, so with it the durable path requires a local worker
-and anything else runs inline. A distributed transport (``is_distributed``)
-carries them between nodes, so a gateway-only node can relay a run claimed by a
-remote worker. The adapter asks the broker rather than inspecting it, so adding a
-transport does not touch this module.
+The source uses durable dispatch when a worker is reachable through the
+configured broker. Otherwise it streams from the local executor.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Protocol
 
 from nlght.core.execution import ExecutionSubmission
 
 if TYPE_CHECKING:
     from nlght.core.signals.signal import Signal
     from nlght.core.workflow.workflow import WorkflowInvocation
+    from nlght.ports.outbound.execution_dispatcher import ExecutionDispatcher
+    from nlght.ports.outbound.execution_stream import ExecutionStreamBroker
+    from nlght.ports.outbound.workflow_executor import WorkflowExecutor
+
+
+class _StreamingServices(Protocol):
+    """Services the HTTP streaming adapter reads from its runtime container."""
+
+    @property
+    def execution_dispatcher(self) -> ExecutionDispatcher | None: ...
+
+    @property
+    def execution_stream_broker(self) -> ExecutionStreamBroker | None: ...
+
+    @property
+    def execution_worker(self) -> object | None: ...
+
+    @property
+    def workflow_executor(self) -> WorkflowExecutor | None: ...
 
 
 async def stream_execution_signals(
-    container: Any,  # noqa: ANN401 - the bootstrap Container, untyped here by design
+    container: _StreamingServices,
     invocation: WorkflowInvocation,
 ) -> AsyncIterator[Signal]:
-    """Yield a streaming workflow's signals through a worker, or inline.
+    """Stream signals through durable dispatch or the local executor.
 
-    Durable path (dispatcher + broker, and a worker this gateway can hear —
-    a local one, or any worker when the transport is distributed): submit the run
-    and subscribe to its stream, so the workflow executes on a worker and this
-    gateway relays what it emits. Otherwise run the executor inline — the
-    single-process fallback when persistence or a worker is not configured.
+    Args:
+        container (_StreamingServices): Runtime services and transport configuration.
+        invocation (WorkflowInvocation): Resolved workflow request.
+
+    Yields:
+        Signal: Signals emitted by the claimed worker or local executor.
+
+    Side Effects:
+        Submit an execution when a dispatcher and reachable broker exist.
+        Otherwise run the executor inline.
     """
     dispatcher = getattr(container, "execution_dispatcher", None)
     broker = getattr(container, "execution_stream_broker", None)
@@ -53,7 +68,7 @@ async def stream_execution_signals(
                 workflow_id=invocation.workflow.workflow_id,
                 workflow_version_id=invocation.version.version_id,
                 trigger=invocation.trigger,
-                # A streaming caller rarely sends its own key; the request id
+                # A streaming caller rarely sends its own key. The request id
                 # makes a retried connection idempotent.
                 idempotency_key=invocation.trigger.context.request_id,
                 required_capabilities=tuple(invocation.workflow.capabilities or ()),
@@ -71,7 +86,14 @@ async def stream_execution_signals(
 
 
 def _openai_sse_frame(signal: Signal) -> bytes:
-    """One OpenAI-compatible SSE frame for a signal (matches the executor's)."""
+    """Encode one workflow signal as an OpenAI-compatible SSE frame.
+
+    Args:
+        signal (Signal): Signal to send to the client.
+
+    Returns:
+        bytes: JSON delta frame, or the ``[DONE]`` marker.
+    """
     if signal.kind == "done":
         return b"data: [DONE]\n\n"
     payload = {
@@ -83,7 +105,14 @@ def _openai_sse_frame(signal: Signal) -> bytes:
 
 
 async def relay_openai_sse(signals: AsyncIterator[Signal]) -> AsyncIterator[bytes]:
-    """Serialize a signal stream to OpenAI SSE, terminating with ``[DONE]``."""
+    """Relay workflow signals as OpenAI SSE and terminate the stream.
+
+    Args:
+        signals (AsyncIterator[Signal]): Signals from the execution source.
+
+    Yields:
+        bytes: Encoded frames, ending with ``[DONE]`` if the source omitted it.
+    """
     sent_done = False
     async for signal in signals:
         if signal.kind == "done":

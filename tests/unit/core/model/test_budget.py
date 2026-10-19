@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for TokenBudget — core token-budget management type."""
+"""Check token budget accounting and limits."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -11,18 +11,9 @@ import pytest
 import nlght.core.model.budget as budget_module
 from nlght.core.model.budget import TokenBudget
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _budget(context_window: int, client_max_tokens: int | None = None) -> TokenBudget:
     return TokenBudget(context_window, client_max_tokens=client_max_tokens)
-
-
-# ---------------------------------------------------------------------------
-# Partition ratios
-# ---------------------------------------------------------------------------
 
 
 def test_store_budget_is_40_percent() -> None:
@@ -51,11 +42,6 @@ def test_minimum_context_window_floor() -> None:
     assert b.store_budget > 0
 
 
-# ---------------------------------------------------------------------------
-# client_max_tokens caps output_budget
-# ---------------------------------------------------------------------------
-
-
 def test_client_max_tokens_caps_output_when_smaller() -> None:
     b = _budget(1000, client_max_tokens=50)
     assert b.output_budget == 50
@@ -63,7 +49,7 @@ def test_client_max_tokens_caps_output_when_smaller() -> None:
 
 def test_client_max_tokens_ignored_when_larger_than_20_percent() -> None:
     b = _budget(1000, client_max_tokens=500)
-    # 20% of 1000 = 200; client cap 500 > 200 so not applied
+    # 20% of 1000 = 200. Client cap 500 > 200 so not applied
     assert b.output_budget == 200
 
 
@@ -72,13 +58,8 @@ def test_client_max_tokens_none_uses_full_output_budget() -> None:
     assert b.output_budget == 200
 
 
-# ---------------------------------------------------------------------------
-# get_available_for_input
-# ---------------------------------------------------------------------------
-
-
 def test_available_for_input_equals_total_minus_output_and_safety() -> None:
-    # M=1000: output=200, safety=200, reserved=400 → available=600
+    # M=1000: output=200, safety=200, reserved=400, available=600.
     b = _budget(1000)
     assert b.get_available_for_input() == 600
 
@@ -93,11 +74,6 @@ def test_available_for_input_never_negative() -> None:
     b = _budget(1000)
     # passing enormous system tokens
     assert b.get_available_for_input(system_prompt_tokens=10000) == 0
-
-
-# ---------------------------------------------------------------------------
-# for_model — async factory
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -157,7 +133,7 @@ async def test_for_model_caches_per_process() -> None:
     await TokenBudget.for_model("test-model", base_url="http://ollama:11434", http_client=http_client)
     await TokenBudget.for_model("test-model", base_url="http://ollama:11434", http_client=http_client)
 
-    # /api/show called only once — second call served from cache
+    # Cache the /api/show result so the second call needs no request.
     assert http_client.post.await_count == 1
 
 

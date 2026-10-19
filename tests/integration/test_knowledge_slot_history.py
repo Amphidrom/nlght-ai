@@ -64,7 +64,7 @@ async def repository():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
-    def _enforce_foreign_keys(dbapi_connection, _record):  # noqa: ANN001, ANN202
+    def _enforce_foreign_keys(dbapi_connection, _record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
@@ -72,12 +72,12 @@ async def repository():
     async with engine.begin() as conn:
         await conn.run_sync(KnowledgeBase.metadata.create_all)
     repository = SqlAlchemyKnowledgeRepository(engine)
-    repository._test_engine = engine  # noqa: SLF001
+    repository._test_engine = engine
     yield repository
     await engine.dispose()
 
 
-def _section(  # noqa: ANN201
+def _section(
     anchor: str,
     strength: str = DERIVED_ANCHOR,
     unit: str = "s:doc-a:0",
@@ -91,7 +91,7 @@ def _section(  # noqa: ANN201
     )
 
 
-def _pair(run_id: str, unit: str = "s:doc-a:0", fact: str = "java 17"):  # noqa: ANN201
+def _pair(run_id: str, unit: str = "s:doc-a:0", fact: str = "java 17"):
     lineage = LineageWrite(
         entity=entity_key("fact", predicate="requires", subject="spring", object=fact),
         kind="fact", scope=(), text=CLAIM, fingerprint=f"fp-{fact}",
@@ -108,7 +108,7 @@ def _pair(run_id: str, unit: str = "s:doc-a:0", fact: str = "java 17"):  # noqa:
     return graph, lineage
 
 
-async def _run(repository, *sections, run_id: str = "run-1"):  # noqa: ANN001, ANN002, ANN201
+async def _run(repository, *sections, run_id: str = "run-1"):
     return await repository.record_document(
         document_id=DOC,
         sections=[
@@ -122,8 +122,8 @@ async def _run(repository, *sections, run_id: str = "run-1"):  # noqa: ANN001, A
     )
 
 
-async def _anchors(repository):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _anchors(repository):
+    async with AsyncSession(repository._test_engine) as session:
         rows = (
             await session.execute(
                 select(KnowledgeSlotAnchor).order_by(KnowledgeSlotAnchor.valid_from)
@@ -132,14 +132,10 @@ async def _anchors(repository):  # noqa: ANN001, ANN201
         return list(rows)
 
 
-async def _slots(repository):  # noqa: ANN001, ANN201
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+async def _slots(repository):
+    async with AsyncSession(repository._test_engine) as session:
         return list((await session.execute(select(KnowledgeSlot))).scalars().all())
 
-
-# ---------------------------------------------------------------------------
-# The history moves only when something moved
-# ---------------------------------------------------------------------------
 
 async def test_a_first_sighting_mints_a_slot_and_its_first_anchor(repository) -> None:
     await _run(repository, _section("/expenses"))
@@ -165,7 +161,7 @@ async def test_a_repeated_run_writes_no_second_row(repository) -> None:
 
 
 async def test_a_rename_closes_the_old_anchor_and_opens_a_new_one(repository) -> None:
-    # The section is recognised by its content, so the slot continues — and the
+    # The section is recognised by its content, so the slot continues, and the
     # path it is now found by is recorded rather than the old one being edited.
     await _run(repository, _section("/expenses"))
 
@@ -180,12 +176,7 @@ async def test_a_rename_closes_the_old_anchor_and_opens_a_new_one(repository) ->
 
 
 async def test_a_path_that_comes_back_is_a_third_row(repository) -> None:
-    """A → B → A, and not the first row reopened.
-
-    Reopening it would say the anchor was valid the whole time, which is the one
-    thing the history exists to be able to deny. Three rows answer "which anchor
-    was valid in March"; one row with a reopened range answers it wrongly.
-    """
+    """Record a returning anchor as a new history row after its absence."""
     await _run(repository, _section("/expenses"))
     await _run(repository, _section("/spending"), run_id="run-2")
 
@@ -214,12 +205,7 @@ async def test_an_upgrade_to_an_authored_anchor_is_recorded(repository) -> None:
 
 
 async def test_a_degradation_is_recorded_rather_than_hidden(repository) -> None:
-    """`authored → derived`: the id was removed and only the path is left.
-
-    The slot continues, because it is the same section. What must not happen is
-    continuing while the history still claims an authored anchor — a lineage
-    carried across a change nobody could see.
-    """
+    """Record a change from authored to derived anchor strength."""
     await _run(repository, _section("expenses-policy", AUTHORED_ANCHOR))
 
     await _run(repository, _section("/expenses"), run_id="run-2")
@@ -232,10 +218,6 @@ async def test_a_degradation_is_recorded_rather_than_hidden(repository) -> None:
     assert len(await _slots(repository)) == 1
 
 
-# ---------------------------------------------------------------------------
-# What is written against the claim
-# ---------------------------------------------------------------------------
-
 async def test_the_evidence_records_the_slot_and_not_the_ordinal(repository) -> None:
     """The point of the whole registry.
 
@@ -246,7 +228,7 @@ async def test_the_evidence_records_the_slot_and_not_the_ordinal(repository) -> 
     await _run(repository, _section("/expenses"))
 
     slot = (await _slots(repository))[0]
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session:
         evidence = (await session.execute(select(KnowledgeEvidence))).scalars().all()
 
     assert [row.slot_id for row in evidence] == [slot.slot_id]
@@ -254,13 +236,7 @@ async def test_the_evidence_records_the_slot_and_not_the_ordinal(repository) -> 
 
 
 async def test_a_section_with_nothing_to_be_found_by_gets_no_slot(repository) -> None:
-    """PDF and prose, permanently.
-
-    An id nothing can resolve back to would be new on every run, retiring and
-    recreating everything it holds each time — worse than no slot, because it
-    claims a stability it does not have. Those documents keep the document as
-    their smallest dependable diff boundary.
-    """
+    """Leave sections without stable anchors at document scope."""
     await _run(
         repository,
         ObservedSection.as_read(
@@ -273,9 +249,9 @@ async def test_a_section_with_nothing_to_be_found_by_gets_no_slot(repository) ->
 
     assert await _slots(repository) == []
     assert await _anchors(repository) == []
-    async with AsyncSession(repository._test_engine) as session:  # noqa: SLF001
+    async with AsyncSession(repository._test_engine) as session:
         evidence = (await session.execute(select(KnowledgeEvidence))).scalars().all()
-    # Still recorded, still diffable at the document level — just not slotted.
+    # The claim remains recorded and diffable at document scope without a slot.
     assert [row.slot_id for row in evidence] == ["s:doc-a:0"]
 
 
@@ -309,13 +285,7 @@ async def test_two_identical_sections_stay_two_slots(repository) -> None:
 async def test_a_section_keeps_its_slot_when_a_paragraph_is_inserted_above(
     repository,
 ) -> None:
-    """The regression the whole registry exists for, at the persisted level.
-
-    The ordinal renumbers; the anchor does not. The slot the claim was written
-    against must be the same row before and after, or retraction narrowed back to
-    the slot would retire everything below an insertion — which is exactly what
-    it did before the container was widened to the document.
-    """
+    """Keep the same slot when an earlier paragraph changes section ordinals."""
     await _run(repository, _section("/expenses", unit="s:doc-a:0"))
     before = (await _slots(repository))[0].slot_id
 
@@ -352,9 +322,6 @@ async def test_recovery_that_finds_two_equally_good_slots_refuses(repository) ->
     assert minted < slots
 
 
-# ---------------------------------------------------------------------------
-# The slot's life, which is not the claim's life
-# ---------------------------------------------------------------------------
 #
 # Keeping the two apart is the point. A section can disappear while everything it
 # said is still asserted somewhere else, and a claim can be retired while the
@@ -402,7 +369,7 @@ async def test_a_retired_slot_keeps_its_anchors_closed(repository) -> None:
 
 
 async def test_a_renamed_section_keeps_its_slot_live(repository) -> None:
-    # Resolution succeeded, so nothing was lost — the slot is the same one under
+    # Resolution succeeded, so nothing was lost. The slot is the same one under
     # a different path.
     await _run(repository, _section("/expenses"))
 
@@ -415,11 +382,7 @@ async def test_a_renamed_section_keeps_its_slot_live(repository) -> None:
 async def test_a_section_that_lost_its_heading_retires_the_slot_not_the_claim(
     repository,
 ) -> None:
-    """`slot → unscoped`, and the two outcomes are deliberately different.
-
-    There is no section to be found any more, so the slot is over. The claim is
-    still asserted by the document, so it is not.
-    """
+    """Retire a lost section slot while preserving the document claim."""
     await _run(repository, _section("/expenses"))
 
     outcome = await _run(
@@ -467,17 +430,8 @@ async def test_a_retired_slot_is_not_reactivated_by_the_section_returning(
     assert len(rows) == 3, "the returning section is a new slot, deliberately"
 
 
-# ---------------------------------------------------------------------------
-# The support view, which decides nothing
-# ---------------------------------------------------------------------------
-
 async def test_support_says_where_a_claim_stopped_being_said(repository) -> None:
-    """The question a reviewer has when the number moves.
-
-    A slot losing a claim is not the claim going — it may have moved, or lost its
-    heading. What retirement asks is whether the document still carries it
-    anywhere; what this answers is *where* it stopped.
-    """
+    """Record the location where a claim stopped receiving support."""
     await _run(
         repository,
         _section("/expenses", unit="s:doc-a:0", content="A."),

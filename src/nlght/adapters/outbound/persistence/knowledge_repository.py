@@ -1,11 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""PostgreSQL knowledge graph adapter.
+"""Persist the knowledge graph through PostgreSQL transactions.
 
-Short transactions only; no external backend call happens here. Confidence
-merging follows the prototype's Bayesian odds multiplication so independent
-sightings reinforce one another (see ``reinforce_confidence``).
+Transactions stay local to PostgreSQL and make no external backend calls.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
+from nlght.adapters.outbound.persistence.ingestion_models import IngestionDocument
 from nlght.adapters.outbound.persistence.knowledge_models import (
     Knowledge,
     KnowledgeAssertion,
@@ -133,7 +132,7 @@ def _utcnow() -> datetime:
 
 # The review queue's order: least confident first, because the extractor's own
 # doubt is the best available guide to where a reviewer's attention is worth
-# most; newest first among equals; identity last so the order is total. Paging
+# most. Newest first among equals. Identity last so the order is total. Paging
 # and prev/next navigation both depend on there being no ties left over.
 _QUEUE_ORDER = (
     Knowledge.confidence.asc(),
@@ -171,12 +170,13 @@ def _payload_fields(payload: KnowledgePayload) -> dict[str, Any]:
 
 
 def _extraction_of(section: ObservedSection) -> str:
-    """The extraction version this section's claims were produced under.
+    """Read the extraction version shared by a section's claims.
 
-    One run asks one question, so every claim in a section carries the same
-    version; the first that has one answers for the section. Empty where the
-    section produced nothing, which is a section that cannot have gained a claim
-    anyway.
+    Args:
+        section (ObservedSection): Observed section with assertion-lineage pairs.
+
+    Returns:
+        str: First nonempty extraction version, or an empty string.
     """
     for _, lineage in section.assertions:
         if lineage is not None and lineage.extraction_version:
@@ -185,12 +185,30 @@ def _extraction_of(section: ObservedSection) -> str:
 
 
 def _wordings_of(held: Mapping[str, set[tuple[str, str]]], slot_id: str) -> set[str]:
-    """The folded wordings a slot already carries, whatever version read them."""
+    """Collect wording variants already held by a slot.
+
+    Args:
+        held (Mapping[str, set[tuple[str, str]]]): Wording and extraction-version pairs
+            keyed by slot ID.
+        slot_id (str): Slot whose wordings are requested.
+
+    Returns:
+        set[str]: Folded wording variants across extraction versions.
+    """
     return {wording for wording, _ in held.get(slot_id, set())}
 
 
 def _versions_of(held: Mapping[str, set[tuple[str, str]]], slot_id: str) -> set[str]:
-    """The extraction versions a slot has been read under."""
+    """Collect extraction versions already held by a slot.
+
+    Args:
+        held (Mapping[str, set[tuple[str, str]]]): Wording and extraction-version pairs
+            keyed by slot ID.
+        slot_id (str): Slot whose extraction versions are requested.
+
+    Returns:
+        set[str]: Extraction versions already held by the slot.
+    """
     return {version for _, version in held.get(slot_id, set())}
 
 
@@ -200,20 +218,16 @@ orm_aliased_revision = aliased(KnowledgeRevision)
 
 
 def _retired() -> ColumnElement[bool]:
-    """Whether the claim this node stands for has been retired.
+    """Test retirement through a node's exact revision lineage.
 
-    One hop: the node names its revision, the revision its variant, the variant
-    its assertion — and retirement is recorded on the assertion (ADR-0044).
+    Returns:
+        ColumnElement[bool]: Correlated SQL existence expression for a retired assertion.
 
-    It used to be "every assertion carrying this identity", quantified over the
-    revisions that happened to hash to the node's address, because there was no
-    edge to follow. The plural was never real: a claim two documents assert is
-    *one* assertion, and whether a second document still carries it is decided
-    inside retraction, before `retired_at` is ever set.
+    Side Effects:
+        None. Missing revision links do not imply retirement.
 
-    A node that names no revision is not retired — one written before lineage
-    existed, one written by a path that keeps none, or one whose pointer the
-    migration could not prove. Absence of a record is not evidence of withdrawal.
+    Notes:
+        Uses the Knowledge row in the surrounding SQL query.
     """
     return (
         select(KnowledgeAssertion.assertion_id)
@@ -228,26 +242,16 @@ def _retired() -> ColumnElement[bool]:
 
 
 def _superseded() -> ColumnElement[bool]:
-    """Whether this node records a state the claim has since moved past.
+    """Test whether a node's revision precedes its variant's latest.
 
-    A claim whose structure moves leaves a second node — the first keeps the
-    state the source used to be in. Both were canonical, and a retrieval could
-    return "must not exceed 30 seconds" beside "must not exceed 60 seconds" as
-    two live answers to one question. That is the same failure as returning a
-    retired claim: a state the corpus has moved past is not what the corpus says.
+    Returns:
+        ColumnElement[bool]: Correlated SQL existence expression for a later revision.
 
-    The node names its state, so the question is exactly "is this state the
-    latest of its variant" — one hop, and an exact answer.
+    Side Effects:
+        None. Missing revision links do not imply supersession.
 
-    It used to be "no revision carrying this node's fingerprint is the deepest of
-    its variant", which is a set standing in for the edge that did not exist.
-    Being a *set* it could only ever be conservative, and it had to be: two
-    revisions may legitimately carry one fingerprint — a revision is new when the
-    observed wording moves, and the structure it hashes may not have — so the
-    hash could not say which of them the node was.
-
-    A node that names no revision is not superseded, for the same reason it is
-    not retired.
+    Notes:
+        Uses the Knowledge row in the surrounding SQL query.
     """
     return (
         select(orm_aliased_revision.revision_id)
@@ -270,26 +274,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     # -- reads ---------------------------------------------------------------
 
     async def _payload_of(self, session: AsyncSession, node: Knowledge) -> dict[str, Any]:
-        """What this claim says, whole where the corpus has it whole.
+        """Resolve current claim fields from its revision or legacy payload.
 
-        Reached through the revision this node names, and not through a column on
-        the node. A node has one current state; an assertion has many revisions
-        and each recorded the form the claim took at the time, so the structure
-        belongs to the state. A `proposition_id` on the node would have read as
-        "one proposition per assertion" and quietly flattened that history — and
-        history is what this whole design is for.
+        Args:
+            session (AsyncSession): Active database session.
+            node (Knowledge): Knowledge node whose current fields are needed.
 
-        The join is `revision_id`, which is a relationship. It used to be the
-        fingerprint and a `deepest first` ordering over everything hashing to it,
-        which is a guess dressed as a lookup.
+        Returns:
+            dict[str, Any]: Proposition fields, legacy payload fields, or an empty mapping.
 
-        The legacy table stays the answer for the kinds that have no proposition,
-        for everything extracted before propositions existed, and for a candidate
-        with no lineage at all — that last one has no revision to hang a
-        structure on, so an n-ary claim written that way is stored complete in
-        `knowledge_propositions` and read back through the payload it does not
-        fit. That gap is real and narrow, and closing it means giving those
-        candidates lineage rather than giving the node a column.
+        Side Effects:
+            Reads revision, proposition, and legacy payload rows.
         """
         proposition_id = (
             (
@@ -320,17 +315,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         }
 
     async def _observed_text(self, session: AsyncSession, node: Knowledge) -> str:
-        """What the source said, in the state this node stands for.
+        """Read wording from the exact revision named by a node.
 
-        The node names its revision, so the wording is one hop away and never has
-        to be reassembled from the payload — which is the whole of ADR-0048
-        applied to the read side.
+        Args:
+            session (AsyncSession): Active database session.
+            node (Knowledge): Knowledge node naming the revision to inspect.
 
-        It used to be the deepest revision carrying the node's fingerprint, and
-        that reached the right row for the reason a set reaches it: usually. A
-        claim re-observed with the same structure keeps one node and gains
-        revisions, and which of them the node stood for was not recorded
-        anywhere. Now it is.
+        Returns:
+            str: Wording from that revision, or empty text without a revision.
+
+        Side Effects:
+            Reads a revision row.
         """
         if node.revision_id is None:
             return ""
@@ -348,24 +343,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _support(
         self, session: AsyncSession, node: Knowledge
     ) -> tuple[str, tuple[SupportingEvidence, ...]]:
-        """The claim behind this node, and the documents that carry its state now.
+        """Resolve a node's assertion and current document support.
 
-        One hop each, because the node names its revision (ADR-0051): the
-        revision's variant names the assertion, and support rows point straight
-        at the revision. Before that relationship existed this could only have
-        been asked as "evidence of some revision hashing to this address", which
-        is the set logic that made the question unanswerable.
+        Args:
+            session (AsyncSession): Active database session.
+            node (Knowledge): Knowledge node whose support is requested.
 
-        Read from `knowledge_document_support` and **not** from the evidence.
-        Evidence is append-only and answers "was observed here", which is the
-        right shape for an audit and the wrong one for a citation: a document
-        that has since removed the sentence stays in it forever, so an answer
-        built from evidence would send a reader to a file that no longer says it
-        while the claim is alive through a second document (ADR-0053).
+        Returns:
+            tuple[str, tuple[SupportingEvidence, ...]]: Assertion ID and ordered current
+                supporting evidence.
 
-        Ordered by document and section so two runs cite in the same order. It is
-        an order for reading, not a ranking: no sighting here outranks another,
-        and a claim two documents assert has two supports and no owner.
+        Side Effects:
+            Reads revision, variant, and document-support rows.
         """
         if node.revision_id is None:
             return "", ()
@@ -386,6 +375,11 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                     KnowledgeDocumentSupport.observed_document_revision,
                     KnowledgeDocumentSupport.document_path,
                     KnowledgeDocumentSupport.slot_id,
+                    IngestionDocument.source_id,
+                )
+                .outerjoin(
+                    IngestionDocument,
+                    IngestionDocument.document_id == KnowledgeDocumentSupport.document_id,
                 )
                 .where(KnowledgeDocumentSupport.revision_id == node.revision_id)
                 .order_by(
@@ -400,8 +394,9 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 observed_document_revision=str(document_revision or ""),
                 document_path=str(document_path or ""),
                 slot_id=str(slot_id or ""),
+                source_id=str(source_id or ""),
             )
-            for document_id, document_revision, document_path, slot_id in rows
+            for document_id, document_revision, document_path, slot_id, source_id in rows
         )
 
     async def _to_object(self, session: AsyncSession, node: Knowledge) -> KnowledgeObject:
@@ -441,10 +436,10 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 # Three ways to stop being canonical: still awaiting or refused
                 # by review, merged away into another assertion, or retired
                 # because the source stopped saying it. Retrieval must see none
-                # of them; a review surface must see all three.
+                # of them. A review surface must see all three.
                 #
                 # The third does not live on this row. Retirement is recorded on
-                # the assertion, and the graph node has no flag for it — so a
+                # the assertion, and the graph node has no flag for it, so a
                 # claim a document had dropped went on being handed out by the
                 # knowledge store, which a retrieval visibility test found. It
                 # is answered by asking the lineage rather than by adding a
@@ -455,7 +450,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 # record: migration `0018` could not prove which revision a
                 # lineage-backed node stands for. It may be a state the corpus
                 # moved past years ago, so it is withheld rather than guessed
-                # at — unlike a node with no lineage at all, which has always
+                # at. A node with no lineage has always
                 # been canonical and stays so, because absence of a record is
                 # not evidence of anything.
                 statement = statement.where(
@@ -467,7 +462,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 )
             rows = (await session.execute(statement)).scalars().all()
             by_identity = {row.identity: row for row in rows}
-            # Preserve caller order — the ranking comes from the search backend.
+            # Preserve caller order because ranking comes from the search backend.
             return [
                 await self._to_object(session, by_identity[identity])
                 for identity in identities
@@ -476,15 +471,14 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
     @staticmethod
     def _undecided() -> ColumnElement[bool]:
-        """Quarantined, and not reviewed since it last changed.
+        """Find quarantined assertions not reviewed since their last change.
 
-        Rejection keeps ``review_required`` set — that is what keeps the
-        assertion out of retrieval — so the flag alone cannot tell an unseen
-        assertion from a rejected one, and a queue built on it can never be
-        emptied. The decision history answers it instead: a review recorded at
-        or after the node's last change means somebody has ruled on this exact
-        version. Later evidence bumps ``updated_at`` past that review and
-        deliberately reopens the item.
+        Returns:
+            ColumnElement[bool]: SQL predicate for assertions awaiting review.
+
+        Notes:
+            Decision time is compared with the node's last update. The review
+            flag alone cannot distinguish unseen from rejected.
         """
         return ~(
             select(KnowledgeReview.review_id)
@@ -535,12 +529,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             return int(total or 0)
 
     async def queue_neighbours(self, identity: str) -> tuple[str | None, str | None]:
-        """The assertions before and after this one in the queue order.
+        """Find the assertions adjacent to one item in the review queue.
 
-        A keyset comparison rather than an offset, so a reviewer's position
-        survives other reviewers draining the queue underneath them. Deciding
-        an item removes it, which is why "next" is resolved from the item's own
-        sort key and not from a remembered index.
+        Args:
+            identity (str): Assertion identity.
+
+        Returns:
+            tuple[str | None, str | None]: Previous and next assertion IDs, or None at
+                queue boundaries.
+
+        Side Effects:
+            Reads PostgreSQL.
+
+        Notes:
+            Keyset navigation survives other reviewers draining the queue.
         """
         async with AsyncSession(self._engine) as session:
             node = await session.get(Knowledge, identity)
@@ -639,7 +641,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def canonical_page(
         self, *, limit: int = 200, offset: int = 0
     ) -> list[KnowledgeObject]:
-        """Assertions that may be found: reviewed, approved, not merged away."""
+        """Page assertions that may appear in search.
+
+        Args:
+            limit (int): Maximum page size.
+            offset (int): Number of rows to skip.
+
+        Returns:
+            list[KnowledgeObject]: Page of searchable knowledge objects.
+
+        Side Effects:
+            Reads PostgreSQL.
+        """
         if limit < 1:
             raise ValueError("canonical_page limit must be positive")
         if offset < 0:
@@ -662,12 +675,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def withdrawn_page(
         self, *, limit: int = 200, offset: int = 0
     ) -> list[tuple[str, str]]:
-        """Identity and kind of assertions that must not be findable.
+        """Page assertions that must leave the search index.
 
-        Only the two fields the removal needs. Loading a full object — payload,
-        metadata, one query each — to then delete it by id would be work done
-        for nothing, and this is the larger of the two sets while a review
-        backlog exists.
+        Args:
+            limit (int): Maximum page size.
+            offset (int): Number of rows to skip.
+
+        Returns:
+            list[tuple[str, str]]: Page of withdrawn assertion identity and kind pairs.
+
+        Side Effects:
+            Reads PostgreSQL.
         """
         if limit < 1:
             raise ValueError("withdrawn_page limit must be positive")
@@ -696,21 +714,23 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         reason: str | None = None,
         recorded_by: str | None = None,
     ) -> int:
-        """Record that one set of assertions took another's place.
+        """Record which assertions replace a predecessor set.
 
-        Sets rather than a pair, because succession is not one-to-one: a rule
-        splits into two, or two fold into one, and both happen routinely in a
-        corpus of policies. Every predecessor is linked to every successor and
-        retired.
+        Args:
+            predecessors (Sequence[str]): Assertions being replaced.
+            successors (Sequence[str]): Assertions taking their place.
+            reason (str | None): Optional explanation of supersession.
+            recorded_by (str | None): Optional identity of the decision maker.
 
-        A rewording does not come here — that keeps its assertion and adds a
-        revision. This is the other case: propositions that say different
-        things, where one took the other's place rather than arriving beside it.
-        Whether it did cannot be read off the words, so it is written down with
-        who decided it and why.
+        Returns:
+            int: Number of recorded predecessor-successor links.
 
-        The predecessors stay. Deleting one would take its evidence and its
-        review history with it, and a citation naming it would find nothing.
+        Side Effects:
+            Writes supersession and retirement rows in PostgreSQL.
+
+        Notes:
+            Every predecessor links to every successor. Rewordings keep their
+            assertion identity.
         """
         if not predecessors or not successors:
             raise ValueError("a supersession needs at least one assertion on each side")
@@ -777,7 +797,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             return written
 
     async def supersessions_of(self, assertion_id: str) -> tuple[str, ...]:
-        """What took this assertion's place, in the order it was recorded."""
+        """List successors of one assertion in recorded order.
+
+        Args:
+            assertion_id (str): Assertion identity.
+
+        Returns:
+            tuple[str, ...]: Successor assertion IDs in recorded order.
+
+        Side Effects:
+            Reads PostgreSQL.
+        """
         async with AsyncSession(self._engine) as session:
             rows = (
                 await session.execute(
@@ -792,27 +822,22 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         return tuple(str(row) for row in rows)
 
     async def lineage_report(self) -> LineageReport:
-        """One picture of the corpus, for holding a later run against.
+        """Summarize corpus state for comparison with a later run.
 
-        Read-only and cheap: counts plus one digest over every assertion's key,
-        case and state. It exists to be taken before a rerun and compared after,
-        which is the only way the design's acceptance metric — two runs over an
-        unchanged source change nothing — can actually be checked.
+        Returns:
+            LineageReport: Corpus counts and lineage digest.
 
-        The graph and the lineage are keyed to one another now (ADR-0051), so
-        "how much of the graph names no state" is a lookup rather than a
-        difference between two tallies. It is reported as two numbers, because
-        the two causes are unrelated: a node with no lineage at all cannot name a
-        business question and never will, while a node marked
-        `revision_unresolved` is a migration that has not finished and falls to
-        zero as the corpus is re-ingested.
+        Side Effects:
+            Reads PostgreSQL.
+
+        Notes:
+            The digest detects changes after a rerun of an unchanged source.
         """
         async with AsyncSession(self._engine) as session:
             # Every state with where it stands. The provenance is what lets a
             # later comparison say whether a revision appeared in a document
-            # somebody edited or in one nobody touched — the difference between
-            # the run working and the corpus drifting, which counts alone could
-            # never tell apart.
+            # somebody edited or in one nobody touched. That distinguishes an
+            # expected update from drift, which counts alone cannot do.
             rows = (
                 await session.execute(
                     select(
@@ -933,9 +958,9 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # the content hash: it was "no revision hashes to this address",
             # which is the set logic ADR-0051 removed and which could not
             # distinguish a node with no lineage from one whose state is
-            # unrecorded. Those two need separate numbers — the first is a
+            # unrecorded. Those two need separate numbers. The first is a
             # candidate that could never name a business question, the second is
-            # a migration that has not finished — so they get them.
+            # a migration that has not finished, so they get them.
             #
             # (It was also once "graph count minus assertion count", which stopped
             # being the same question the moment identity left the content hash: a
@@ -980,7 +1005,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # The document revision each was read at comes with it, and it is
             # what makes the reading *usable*. A fingerprint that is equal on
             # both sides of a comparison means "the section did not move" only
-            # where the section was read on both sides; a slot whose section was
+            # where the section was read on both sides. A slot whose section was
             # deleted is never read again and keeps its last fingerprint
             # unchanged forever, which read identically and meant the opposite.
             readings = (
@@ -1000,8 +1025,8 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # `document_id` is a hash, so a report naming only that could say a
             # document moved and never which one. The obvious source was
             # `ingestion_documents` and it is the wrong one: a knowledge-only
-            # flow leaves that table empty, so every name came back missing —
-            # and joining the two lifecycles to borrow a string is a decision of
+            # flow leaves that table empty, so every name came back missing.
+            # Joining the two lifecycles to borrow a string is a decision of
             # its own rather than a lookup.
             #
             # The latest sighting wins, so a renamed document is named by what it
@@ -1086,27 +1111,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         )
 
     async def record_lineage(self, write: LineageWrite) -> RecordedLineage:
-        """Place one sighting: which assertion, which case, which state.
+        """Record one assertion sighting and its lineage.
 
-        Four decisions in one short transaction, each answered before the next:
+        Args:
+            write (LineageWrite): Lineage sighting to persist.
 
-        1. **Which assertion.** The entity key resolves deterministically. A hit
-           is that assertion; no score is consulted, because a similarity
-           deciding identity is what the surrogate exists to prevent.
-        2. **Which case.** The scope resolves against the assertion's existing
-           variants by the ladder in `resolve_variant` — exact, then a single
-           unambiguous widening or narrowing, then a new one marked ambiguous.
-        3. **Which state.** A fingerprint that matches the variant's latest
-           revision is the same state seen again: no revision is written, which
-           is what makes a second run over an unchanged source leave the corpus
-           alone.
-        4. **Whether the approval survives.** Only when a revision is written,
-           and only from the caller's `normative_change` — a rewording keeps it,
-           a moved value does not.
+        Returns:
+            RecordedLineage: The recorded assertion, variant, revision, and evidence linkage.
 
-        Evidence is recorded either way and is unique per revision, document and
-        run, so a retried step that re-writes the same sighting does not record
-        it twice.
+        Side Effects:
+            Writes lineage and evidence in one PostgreSQL transaction.
+
+        Notes:
+            Entity keys decide identity. Matching fingerprints reuse the current
+                revision and evidence is idempotent.
         """
         async with AsyncSession(self._engine, expire_on_commit=False) as session, session.begin():
             return await self._record_lineage(session, write, _utcnow())
@@ -1115,16 +1133,21 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _candidates(
         session: AsyncSession, write: LineageWrite
     ) -> list[Candidate]:
-        """What this proposition could be continuing.
+        """Gather assertions that an arriving sighting may continue.
 
-        Two populations, because the ladder needs both: everything already
-        asserted by this document — which is where a claim that merely moved
-        between sections is found — and the assertions carrying this entity key
-        anywhere, which is how the same claim asserted by a second document
-        reinforces one node instead of duplicating it.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            write (LineageWrite): Arriving lineage sighting.
 
-        Each candidate is described by its *current* wording, not its first: the
-        question is what the corpus says now.
+        Returns:
+            list[Candidate]: Current candidate assertions for the lineage write.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+
+        Notes:
+            Candidates include claims from this document and claims sharing the entity
+                key. Current wording is compared.
         """
         rows = (
             await session.execute(
@@ -1164,7 +1187,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 )
             if slot_id:
                 slots.setdefault(assertion_id, set()).add(slot_id)
-            # An assertion asserted by several documents is still one assertion;
+        # An assertion supported by several documents remains one assertion.
             # the document recorded here is only what lets the ladder tell "this
             # document's claims" from the rest.
             if document_id == write.document_id:
@@ -1188,7 +1211,19 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _record_lineage(
         self, session: AsyncSession, write: LineageWrite, now: datetime
     ) -> RecordedLineage:
-        """The lineage write, without its transaction — see `_upsert`."""
+        """Apply a lineage write inside the caller transaction.
+
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            write (LineageWrite): Lineage sighting to persist.
+            now (datetime): Timestamp for this write.
+
+        Returns:
+            RecordedLineage: Recorded lineage for this sighting.
+
+        Side Effects:
+            Writes lineage through the supplied transaction.
+        """
         # A key the corpus already holds under a different scheme stops the write
         # before anything is decided. Both silent readings are wrong: treating it
         # as a match reads an old scheme's key as if the new one had produced it,
@@ -1196,7 +1231,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         # twice. This sits ahead of the ladder rather than behind it, because the
         # ladder would often continue the claim on its wording alone and a corpus
         # half-migrated one sentence at a time is what the version exists to
-        # prevent. Migration is a deliberate act; this is what makes somebody
+        # prevent. Migration is a deliberate act. This is what makes somebody
         # perform it.
         other_scheme = (
             await session.execute(
@@ -1213,9 +1248,9 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 f"migrate the existing assertions before writing the new scheme"
             )
 
-        # Which assertion this is, decided by where it stands and what it says —
-        # never by the fields the model chose to describe it with. Those change
-        # between runs over an unedited sentence, and identity followed them.
+        # Decide the assertion from its location and wording, never from fields
+        # chosen by the model. Those fields change between runs over an unedited
+        # sentence, and identity used to follow them.
         candidates = await self._candidates(session, write)
         decision = match_proposition(
             entity_key=write.entity.key,
@@ -1228,20 +1263,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         )
         # The ladder first, always. An equivalence judgement is consulted only
         # where exact agreement found nothing, so a model can never override what
-        # the source plainly said — and it was reached before this transaction
+        # the source plainly said, and it was reached before this transaction
         # opened, because asking a model here would hold row locks across the
         # network.
         #
         # Which is exactly why it is checked again here. The judgement was formed
-        # against the slot this section was *expected* to resolve to; the
+        # against the slot this section was *expected* to resolve to. The
         # authoritative placement happens inside this transaction and can land
-        # elsewhere — the registry moved, or recovery answered differently.
+        # elsewhere if the registry moved or recovery answered differently.
         # Applying it anyway would let a verdict reached about slot A continue an
         # assertion standing in slot B, which is the one thing the slot scope
         # exists to prevent.
         #
         # Judged yes is not applied yes. The assessment stays in the audit either
-        # way, because the judge really was asked and really did answer; what it
+        # way, because the judge really was asked and really did answer. What it
         # does not get to do is outlive the premise it was asked under.
         continues = decision.assertion_id
         if continues is None and write.continues is not None:
@@ -1249,7 +1284,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # there are two. A candidate found in this slot was judged as a claim
             # standing here, so it has to still be standing here. One found
             # across documents was judged as a live claim sharing enough
-            # structure to be worth asking about — slot membership was never part
+            # structure to be worth asking about. Slot membership was never part
             # of that, and demanding it would discard every cross-document
             # verdict as stale, which is how the widened reach first appeared to
             # do nothing at all.
@@ -1344,25 +1379,25 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         # sentence: an edit that reworded a claim without moving its
         # subject/predicate/object hashed identically, so no revision was written
         # and the corpus went on quoting a sentence the document no longer
-        # contained — measured live, on `defaults to the same as` becoming `is by
+        # contained. A live case changed `defaults to the same as` into `is by
         # default identical to`.
         #
         # And the fingerprint may not decide it in the other direction either. A
         # model that describes an unedited sentence with different fields has
-        # changed its description, not the state; writing a revision for that is
+        # changed its description, not the state. Writing a revision for that is
         # the drift ADR-0043 removed, arriving through the history instead of
         # through identity.
         #
         # So: the wording alone, folded for whitespace, because a parser may
         # rewrap a line and that changes no word. Anything a reader would see is
-        # a new state — which is what a revision is for, and what keeps
+        # a new state, which is what a revision is for, and what keeps
         # `semantic_change` able to say whether the approval survives it.
         unchanged = latest is not None and (
             fold_whitespace(latest.text) == fold_whitespace(write.text)
         )
         # Every sighting is an observation, not only the ones a judgement was
         # asked about. Without this a candidate has no historical row to point
-        # at, and the comparison would have to invent one — which is how a
+        # at, and the comparison would have to invent one, which is how a
         # sighting becomes a sighting per comparison.
         #
         # Reused where `_assess` already recorded it: the same sighting, seen
@@ -1373,7 +1408,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
         # The complete structure this sighting carried, written before the
         # revision that names it. Content-addressed, so the same structure seen
-        # in two documents is one row — storage economy and not identity: whether
+        # in two documents is one row for storage economy, not identity. Whether
         # two *different* structures are one claim is a judgement with a table of
         # its own.
         proposition_id = (
@@ -1394,13 +1429,13 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 revision.proposition_id = proposition_id
         else:
             # Whether the approval given to the previous state still covers this
-            # one. The caller may say so outright; beyond that, only here is the
+            # one. The caller may say so outright. Beyond that, only here is the
             # previous state known, so only here can the change be seen at all.
             #
             # A quantity that moved is a normative change: CHF 500 becoming CHF
             # 550 continues the same rule and a person approved five hundred, not
             # five fifty. A rewording that leaves the quantities alone is not, and
-            # its approval carries — which is the whole reason the assertion id is
+            # its approval carries, which is the whole reason the assertion id is
             # a surrogate. Compared as quantities rather than by resemblance
             # because resemblance inverts the two: the reworded rule scores 0.46
             # against its predecessor and the changed threshold 0.97.
@@ -1415,7 +1450,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 #
                 # Historical revisions predating this keep their `NULL` and stay
                 # readable through their legacy payload. What must never happen
-                # is *backfilling* one from that payload — and not because the
+                # is *backfilling* one from that payload, and not because the
                 # payload lost something: a stored projection is lossless, which
                 # is what `Represented | NotRepresentable` guarantees. What is not
                 # guaranteed is the inverse. Reading a payload back does not
@@ -1433,7 +1468,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 fingerprint=write.fingerprint,
                 extraction_version=write.extraction_version,
                 # A first sighting is approved-by-policy like any other new
-                # assertion; the review policy upstream is what quarantines it,
+                # assertion. The review policy upstream is what quarantines it,
                 # not the lineage.
                 review_state=NEEDS_REVIEW if normative else APPROVED,
                 supersedes=latest.revision if latest is not None else None,
@@ -1446,7 +1481,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
         # The slot is part of what makes a sighting distinct. Two sections of one
         # document saying the same thing are two sightings, and a key without the
-        # slot recorded only the first — which left the support view unable to say
+        # slot recorded only the first, which left the support view unable to say
         # which section had stopped carrying a claim, because it never knew both
         # had. A retried step still records nothing twice: the run, the document
         # and the slot are all the same on a retry.
@@ -1520,12 +1555,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         )
 
     async def similar(self, identity: str, *, limit: int = 5) -> list[KnowledgeObject]:
-        """Other assertions of the same kind and type.
+        """Find same-kind assertions for a review decision.
 
-        A reviewer deciding whether a claim is a duplicate or a contradiction
-        needs to see its neighbours; quarantined ones are included, because a
-        pair of near-identical pending assertions is exactly what a reviewer
-        must be shown before approving either.
+        Args:
+            identity (str): Assertion identity.
+            limit (int): Maximum page size.
+
+        Returns:
+            list[KnowledgeObject]: Nearby assertions of the same kind and type.
+
+        Side Effects:
+            Reads PostgreSQL.
         """
         async with AsyncSession(self._engine) as session:
             node = await session.get(Knowledge, identity)
@@ -1593,31 +1633,21 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def persist(
         self, write: KnowledgeWrite, lineage: LineageWrite | None = None
     ) -> tuple[KnowledgeObject, RecordedLineage | None]:
-        """The graph and the lineage, in one transaction.
+        """Persist an assertion and its optional lineage atomically.
 
-        During the transition both records of an assertion are written, and they
-        must not be able to disagree. Two transactions would let one land
-        without the other — a split brain arriving precisely while identity is
-        being migrated, which is the worst moment for the two to diverge. A
-        failure on either side therefore rolls back both.
+        Args:
+            write (KnowledgeWrite): Knowledge graph write to persist.
+            lineage (LineageWrite | None): Optional lineage write accompanying a graph write.
 
-        ``lineage`` is optional and its absence is the caller's decision, not a
-        fallback taken here. An assertion whose kind cannot yet say which
-        business question it is has no entity key, and the honest record of that
-        is no lineage row — never a substitute key invented from its wording,
-        which a later run would then fail to match.
+        Returns:
+            tuple[KnowledgeObject, RecordedLineage | None]: Stored knowledge object and
+                optional recorded lineage.
 
-        Optional for a payload, not for a claim. A fact keeps its structure on
-        the revision a sighting produces, so a write carrying a proposition and
-        no lineage has nowhere to put what it says: it produced a graph row with
-        no payload, no proposition and no revision — a node asserting nothing,
-        which is a quieter failure than dropping the claim rather than a milder
-        one. By the time it reaches here that is a programming error and not a
-        data condition, because extraction rejects a fact that cannot name what
-        it claims and the persist step counts and skips one whose evidence names
-        no document. So it raises, and the invariant holds by construction:
+        Side Effects:
+            Writes graph and lineage in one PostgreSQL transaction.
 
-            every stored fact proposition is reachable through a revision
+        Notes:
+            Graph and lineage roll back together. A fact proposition requires a lineage record.
         """
         if lineage is None and write.proposition is not None:
             raise ValueError(
@@ -1644,11 +1674,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             return node, recorded
 
     async def _assertions_in(self, session: AsyncSession, document_id: str) -> set[str]:
-        """The live assertions this document currently carries.
+        """List live assertions carried by one document.
 
-        The whole document rather than one of its sections. A section's id is its
-        position, so scoping this to a slot made an inserted paragraph retire
-        every unchanged claim below it.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+
+        Returns:
+            set[str]: IDs of live assertions supported by this document.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+
+        Notes:
+            Retraction is document-wide because inserting a section can renumber slots.
         """
         rows = (
             await session.execute(
@@ -1667,12 +1706,21 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _carried_elsewhere(
         self, session: AsyncSession, assertion_id: str, document_id: str
     ) -> bool:
-        """Whether another document still asserts this claim.
+        """Check whether another document still supports a claim.
 
-        Deliberately conservative: any evidence from a different document holds
-        the claim up. Erring towards keeping a claim that no longer has a source
-        costs a stale row a reviewer can retire; erring the other way deletes
-        knowledge a second document was carrying all along.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            assertion_id (str): Assertion identity.
+            document_id (str): Source document identity.
+
+        Returns:
+            bool: Whether another document supplies evidence for this assertion.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+
+        Notes:
+            Any evidence from another document conservatively keeps the assertion live.
         """
         return (
             await session.execute(
@@ -1702,11 +1750,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _propositions_of(
         self, session: AsyncSession, assertion_ids: Sequence[str]
     ) -> dict[str, tuple[uuid.UUID, Proposition, str]]:
-        """What each of these assertions currently says, whole.
+        """Read the current structured claim for each assertion.
 
-        The latest revision that recorded a structure — not the first, because
-        the question is what the corpus says now, and not every revision has one:
-        anything written before propositions existed has none.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            assertion_ids (Sequence[str]): Assertion identities to inspect.
+
+        Returns:
+            dict[str, tuple[uuid.UUID, Proposition, str]]: Current revision,
+                proposition, and kind by assertion ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
         """
         if not assertion_ids:
             return {}
@@ -1718,7 +1773,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                     KnowledgeProposition.proposition_id,
                     KnowledgeProposition.fields,
                     # The sentence the candidate was read from. Context for the
-                    # judge, so it can tell what a field means — never the thing
+                    # judge, so it can tell what a field means, never the thing
                     # compared, since one sentence can carry two claims.
                     KnowledgeRevision.text,
                 )
@@ -1743,16 +1798,14 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
     @staticmethod
     def _observed(write: LineageWrite) -> AssertionObservation | None:
-        """This sighting as the judgement receives it.
+        """Build the judge's observation from extracted source content.
 
-        One contract for every kind: what it is, what the source said, and the
-        structured claim. The representation used to be kind-specific — a fact's
-        proposition, and for the others a pair synthesised out of the wording and
-        the entity key — which meant a rule was compared on something no
-        extraction produced.
+        Args:
+            write (LineageWrite): A lineage write with kind, observed text, and proposition.
 
-        `None` where there is nothing to compare: no wording, or no proposition.
-        Both are counted elsewhere, and neither is invented here.
+        Returns:
+            AssertionObservation | None: AssertionObservation or None when wording or
+                structure is absent.
         """
         if not write.text.strip() or write.proposition is None:
             return None
@@ -1765,18 +1818,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _sightings_of(
         self, session: AsyncSession, assertion_ids: Sequence[str]
     ) -> dict[str, uuid.UUID]:
-        """The observation each candidate was last recorded as.
+        """Read each assertion candidate's latest recorded sighting.
 
-        The candidate's side of an assessment must point at the row that
-        actually recorded it. Building one at comparison time would make a
-        sighting into a sighting per comparison, and stamp a claim seen last
-        week with the run that merely looked at it today — an audit that is
-        complete and historically false, which is worse than incomplete because
-        it reads as evidence.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            assertion_ids (Sequence[str]): Assertion identities to inspect.
 
-        Absent for anything written before revisions named their sighting.
-        Nothing is invented for those: a fabricated event in an audit is the one
-        thing worse than a missing one.
+        Returns:
+            dict[str, uuid.UUID]: Latest observation ID by assertion ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+
+        Notes:
+            Missing legacy sightings remain absent. Comparison must not invent audit events.
         """
         if not assertion_ids:
             return {}
@@ -1810,12 +1865,17 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _observations_of(
         self, session: AsyncSession, candidates: Sequence[Candidate]
     ) -> dict[str, AssertionObservation]:
-        """What each candidate currently says, as an observation.
+        """Read each candidate as a current assertion observation.
 
-        A fact reads its representation from the proposition its revision names;
-        every other kind has none, so its structured fields are what the matcher
-        already carries. Both end as the same contract, which is the point —
-        one question, asked the same way for every kind.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            candidates (Sequence[Candidate]): Assertions eligible for this comparison.
+
+        Returns:
+            dict[str, AssertionObservation]: Current observation by candidate assertion ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
         """
         if not candidates:
             return {}
@@ -1845,7 +1905,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
     #: How far a plausible-candidate search may reach, and how little it may
     #: accept. Two shared terms is the smallest overlap that is a signal rather
-    #: than a coincidence — one shared subject is true of half a corpus — and the
+    #: than a coincidence. One shared subject is true of half a corpus, and the
     #: cap is what keeps "not global" a property of the code rather than of the
     #: corpus size.
     PLAUSIBLE_MINIMUM_TERMS = 2
@@ -1858,27 +1918,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         *,
         exclude: set[str],
     ) -> list[Candidate]:
-        """Claims elsewhere in the corpus this sighting might be continuing.
+        """Retrieve bounded same-kind candidates beyond the current slot.
 
-        Retrieval, and nothing more. It decides which pairs are worth a question
-        and never what the answer is: two claims reaching each other here are
-        still two assertions until the judge says otherwise, and the terms they
-        share confer no identity of their own.
+        Args:
+            session (AsyncSession): Active database session.
+            write (LineageWrite): Arriving assertion sighting.
+            exclude (set[str]): Assertion IDs already considered.
 
-        The guardrail this widens used to read "equivalence only within one
-        slot". That was too narrow for the case it broke on — one sentence in two
-        documents, read as `uses` in one and `uses_port` in the other, which are
-        two entity keys and so never met. Model vocabulary decided identity,
-        which is exactly what `Proposition` and the judge exist to prevent.
+        Returns:
+            list[Candidate]: At most eight live same-kind candidates with shared field values.
 
-        What the guardrail actually protects against is an *unbounded* search: a
-        judgement ranging over every proposition would be a merge engine looking
-        for pairs. So the reach is bounded twice — same kind, and at least
-        `PLAUSIBLE_MINIMUM_TERMS` shared field values — and capped.
-
-        Uniform across kinds on purpose. The per-kind projection tables carry the
-        same signal in indexed columns, and reaching for them would put a
-        fifth kind-specific path in the resolver.
+        Side Effects:
+            Reads assertion, revision, proposition, and evidence rows.
         """
         if write.proposition is None or not write.kind:
             return []
@@ -1978,25 +2029,24 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         assess: EquivalenceJudge | None,
         slot_id: str | None,
     ) -> tuple[str | None, list[tuple[uuid.UUID, uuid.UUID, str]], uuid.UUID | None, str]:
-        """Whether some claim already in this slot is this claim said differently.
+        """Assess same-slot candidates when deterministic matching fails.
 
-        Asked only where the matching ladder found nothing, and only of the
-        candidates standing **in the same slot**. Never over the corpus: a claim
-        is continued because the source keeps saying it in the place it stood,
-        and a judgement ranging over every proposition would be a merge engine
-        looking for pairs rather than a resolver placing one sighting.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            write (LineageWrite): Arriving lineage sighting.
+            candidates (Sequence[Candidate]): Assertions eligible for this comparison.
+            assess (EquivalenceJudge | None): Optional equivalence judge.
+            slot_id (str | None): Section slot identity.
 
-        Two further limits on when the model is asked at all. `settled` answers
-        first — identical structures are the same claim and a moved quantity is a
-        different one, neither of which needs to know what words mean — so a
-        differing fingerprint is not by itself a question. And the whole of this
-        runs outside any transaction, because a model round trip while holding
-        row locks is how one slow answer becomes a stalled corpus.
+        Returns:
+            tuple[str | None, list[tuple[uuid.UUID, uuid.UUID, str]], uuid.UUID | None, str]:
+                Matching assertion ID, assessment links, observation ID, and verdict.
 
-        Returns the assertion the judgements permit continuing, and every
-        assessment reached on the way. Both, because the assessments are recorded
-        whatever the answer: "these were judged different" is a finding, and a
-        trail that kept only the joins would show a model that never disagreed.
+        Side Effects:
+            May call the equivalence judge. Reads through the supplied session.
+
+        Notes:
+            Only candidates in the same slot are judged, outside a write transaction.
         """
         if slot_id is None:
             return None, [], None, ""
@@ -2030,7 +2080,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             ours, run_id=write.run_id, document_id=write.document_id, slot_id=slot_id
         )
         # And the candidates bring theirs. A candidate was seen in an earlier
-        # run and already has a row; re-recording it here would stamp it with
+        # run and already has a row. Re-recording it here would stamp it with
         # the run that compared rather than the run that saw.
         sightings = await self._sightings_of(session, list(known))
         verdicts: list[tuple[str, str]] = []
@@ -2039,7 +2089,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             theirs = sightings.get(assertion_id)
             # The model is asked only for the band nothing else can answer.
             # Identical structures are the same claim and a moved quantity is a
-            # different one — neither needs to know what words mean, and asking
+            # different one. Neither needs semantic interpretation, and asking
             # anyway would spend a round trip per differing fingerprint.
             answer = (
                 await assess.classify(ours, candidate)
@@ -2057,9 +2107,9 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             else:
                 # Judged, and not recordable: this candidate predates revisions
                 # naming their sighting, so there is no row to point at. The
-                # verdict still counts — refusing to judge an older claim would
+                # verdict still counts. Refusing to judge an older claim would
                 # make the corpus behave differently on either side of a
-                # migration — but nothing fabricates an event to file it under.
+                # migration, but nothing fabricates an event to file it under.
                 logger.info(
                     "knowledge.equivalence.unrecordable | assertion=%s verdict=%s run=%s",
                     assertion_id, verdict, write.run_id,
@@ -2080,16 +2130,26 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         run_id: str | None = None,
         slot_id: str | None = None,
     ) -> list[tuple[KnowledgeWrite, LineageWrite | None]]:
-        """Decide, for each changed body, whether the approval survives it.
+        """Resolve changed claim bodies before persistence.
 
-        Read-only and outside any transaction. For every write that continues an
-        assertion whose current wording differs, the change is put to
-        `semantic_change` — which settles what it can from the wording and the
-        quantities and asks the classifier only for the band where meaning is the
-        only difference left.
+        Args:
+            writes (Sequence[tuple[KnowledgeWrite, LineageWrite | None]]): Graph writes
+                paired with optional lineage writes.
+            classify (Callable[[str, str], Awaitable[str]] | None): Optional classifier
+                for changed wording.
+            assess (EquivalenceJudge | None): Optional equivalence judge.
+            run_id (str | None): Observation run identity.
+            slot_id (str | None): Section slot for the changed claims, when known.
 
-        A write of a claim the corpus has not seen carries no approval, so there
-        is nothing to spend and nothing to ask.
+        Returns:
+            list[tuple[KnowledgeWrite, LineageWrite | None]]: Writes paired with their
+                resolved lineage decisions.
+
+        Side Effects:
+            May call the classifier and equivalence judge. Reads PostgreSQL.
+
+        Notes:
+            Classifier and judge calls finish before write transactions begin.
         """
         judged: list[tuple[KnowledgeWrite, LineageWrite | None]] = []
         assessments: list[tuple[uuid.UUID, uuid.UUID, str]] = []
@@ -2128,7 +2188,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 if lineage.normative_change:
                     judged.append((graph, lineage))
                     continue
-                # Against whichever assertion this sighting will continue —
+                # Against whichever assertion this sighting continues,
                 # including one reached by equivalence, which carries an approval
                 # like any other and must be able to lose it the same way.
                 previous = next(
@@ -2163,13 +2223,16 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         return judged
 
     async def record_proposition(self, proposition: Proposition) -> uuid.UUID:
-        """Keep one extracted claim, exactly as it arrived.
+        """Store one complete structured proposition.
 
-        Content-addressed, so one claim seen twice is one row. The id it returns
-        is a surrogate and **not** an assertion's identity — whether two
-        propositions are one claim is a judgement, recorded separately, and
-        reading it off this table would be the content-derived identity this
-        design removed.
+        Args:
+            proposition (Proposition): Complete structured proposition.
+
+        Returns:
+            uuid.UUID: ID of the stored proposition.
+
+        Side Effects:
+            Writes PostgreSQL.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             fingerprint = proposition.fingerprint
@@ -2195,12 +2258,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _record_observation(
         self, session: AsyncSession, write: LineageWrite, slot_id: str
     ) -> uuid.UUID | None:
-        """This sighting, inside the caller's transaction.
+        """Record a sighting inside the caller transaction.
 
-        The public `record_observation` opens its own session, which is right
-        when the assessment must land before the claim and wrong here — the
-        graph write already holds one, and a second on the same engine would
-        contend with it.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            write (LineageWrite): Lineage sighting to record.
+            slot_id (str): Section slot identity.
+
+        Returns:
+            uuid.UUID | None: ID of the recorded observation, or None when absent.
+
+        Side Effects:
+            Writes through the supplied PostgreSQL transaction.
         """
         observed = self._observed(write)
         if observed is None:
@@ -2225,27 +2294,19 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         document_id: str = "",
         slot_id: str = "",
     ) -> uuid.UUID:
-        """Keep one sighting of one assertion, before anything is decided.
+        """Record each assertion sighting before an equivalence decision.
 
-        The unit an equivalence judgement compares, and it has to be durable
-        first: an assessment written after the merge can only *describe* what
-        happened, and a reader cannot tell a judgement that caused a
-        continuation from one reconstructed to explain it.
+        Args:
+            observation (AssertionObservation): Assertion state observed in this run.
+            run_id (str): Identity of the observation run.
+            document_id (str): Source document identity, if available.
+            slot_id (str): Source section slot, if available.
 
-        Nothing downstream could serve. `knowledge_evidence` hangs off a
-        revision, and the revision exists only once the matcher and the judge
-        have already answered — the assessment would have to wait for the thing
-        it justifies.
+        Returns:
+            uuid.UUID: Unique ID for this sighting.
 
-        For every kind, which is the other half. `knowledge_propositions` holds a
-        fact and nothing else, so an audit keyed on it leaves `rule`, `decision`
-        and `pattern` unauditable.
-
-        **Not deduplicated, and deliberately.** An observation is an event: two
-        runs that read one sentence saw it twice, and collapsing them would lose
-        which run saw what — the question an audit is asked. That is also what
-        separates this from `knowledge_propositions`, which is content-addressed
-        because it holds what a claim *is* rather than that somebody looked.
+        Side Effects:
+            Inserts a new observation event without deduplicating it.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             row = KnowledgeAssertionObservation(
@@ -2269,21 +2330,29 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         judge: Judge | None = None,
         run_id: str | None = None,
     ) -> uuid.UUID:
-        """Append one judgement about one pair, as it was actually made.
+        """Append a judgement about two observations.
 
-        Append-only, and nothing is checked against an earlier answer. The same
-        judge asked twice can answer differently, and that is a finding worth
-        keeping: refusing the second row would delete the evidence that a model
-        is unstable, which is what anyone auditing this would most want to see.
+        Args:
+            left (uuid.UUID): First observation identity.
+            right (uuid.UUID): Second observation identity.
+            verdict (str): Equivalence verdict to record.
+            judge (Judge | None): Judge that made the decision.
+            run_id (str | None): Observation run identity.
 
-        Reusing a decision instead of asking again is a cache, and a cache is a
-        different table. This one answers what was decided.
+        Returns:
+            uuid.UUID: ID of the new equivalence assessment.
+
+        Side Effects:
+            Writes a judgement to PostgreSQL.
+
+        Notes:
+            Judgements are append-only, including repeated or conflicting assessments.
         """
         async with AsyncSession(self._engine) as session, session.begin():
             row = KnowledgeEquivalenceAssessment(
                 # Canonical, because "X is equivalent to Y" is the same question
                 # as "Y is equivalent to X". The assertions themselves stay
-                # directed; only the *relation between them* is symmetric.
+                # directed. Only the *relation between them* is symmetric.
                 left_observation_id=min(left, right, key=str),
                 right_observation_id=max(left, right, key=str),
                 verdict=verdict,
@@ -2299,7 +2368,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _known_slots(
         self, session: AsyncSession, document_id: str
     ) -> dict[str, dict[str, Any]]:
-        """This document's slots, as the resolver reads them."""
+        """Read the slots of one document for resolution.
+
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+
+        Returns:
+            dict[str, dict[str, Any]]: Slot attributes keyed by slot ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+        """
         slots = (
             await session.execute(
                 select(KnowledgeSlot).where(KnowledgeSlot.document_id == document_id)
@@ -2337,7 +2417,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _slot_support(
         self, session: AsyncSession, document_id: str
     ) -> set[tuple[str, str]]:
-        """Which claims this document currently supports, and from which slot."""
+        """Read document support by assertion and slot.
+
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+
+        Returns:
+            set[tuple[str, str]]: Supported assertion and slot pairs.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+        """
         rows = (
             await session.execute(
                 select(KnowledgeVariant.assertion_id, KnowledgeEvidence.slot_id)
@@ -2357,17 +2448,20 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _slot_readings(
         self, session: AsyncSession, document_id: str
     ) -> dict[str, str]:
-        """What each of this document's sections was, exactly, when last read.
+        """Read the last exact parser input for each slot.
 
-        The exact parser input and not the normalised section fingerprint —
-        these readings decide whether the model was asked the same question, and
-        a hash that folds punctuation cannot answer that.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
 
-        The slot's own `content_fingerprint` cannot answer this either: `_place`
-        overwrites it with the current value every run, so by the time a
-        retraction is decided it already holds what this run saw. The readings
-        are a log rather than a state, and the latest of them is the previous
-        run's.
+        Returns:
+            dict[str, str]: Latest exact section text by slot ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
+
+        Notes:
+            These are exact parser inputs, not normalized fingerprints.
         """
         rows = (
             await session.execute(
@@ -2384,14 +2478,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _slot_texts(
         self, session: AsyncSession, document_id: str
     ) -> dict[str, set[tuple[str, str]]]:
-        """What each of this document's sections already says, and under which
-        extraction version it was read.
+        """Read observed wording and extraction versions by slot.
 
-        The wording is the observation (ADR-0048), so it is what says whether a
-        claim arriving now is one the section was already known to carry. The
-        extraction version travels with it because an unchanged section asked a
-        *different* question may legitimately answer differently — refusing that
-        would freeze the corpus against every improvement to the contract.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+
+        Returns:
+            dict[str, set[tuple[str, str]]]: Observed wording and extraction-version
+                pairs by slot ID.
+
+        Side Effects:
+            Reads through the supplied PostgreSQL session.
         """
         rows = (
             await session.execute(
@@ -2424,32 +2522,22 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         unchanged: set[str],
         now: datetime,
     ) -> None:
-        """Replace what this document currently carries with what this run saw.
+        """Reconcile support after a full-document observation.
 
-        Called only from `record_document`, and therefore only for a document
-        observed in full. A partial run cannot say what a document currently
-        carries — it did not see all of it — so it writes evidence and leaves
-        this untouched. That is the same gate retraction uses, which is the
-        point: two mechanisms deciding currency by different rules is how a
-        corpus starts contradicting itself.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+            carries (Mapping[tuple[str, str], LineageWrite]): Claims observed in the
+                document, keyed by assertion and slot.
+            unchanged (set[str]): Slots protected from retraction by stable input.
+            now (datetime): Timestamp for this write.
 
-        **A section the stable-slot guard protected keeps its support.** The
-        guard exists because a model asked twice about byte-identical text
-        answered differently (ADR-0044), and it refuses to retire what came back
-        missing. Support has to agree with that: dropping the row for a claim
-        the same run refused to retire would say the document no longer carries
-        something the corpus insists it still asserts, and a citation would
-        vanish over a model's nondeterminism.
+        Side Effects:
+            Replaces document support through the supplied transaction.
 
-        Those kept rows keep the document revision they were last *extracted* at
-        rather than the one the document has now. That is the truthful answer —
-        it is where this was last actually seen to be said — and inventing a
-        newer one would claim an observation nobody made.
-
-        Removal is decided per document and never per section. A slot that was
-        renamed, split, or lost its heading has not stopped the document
-        asserting anything (ADR-0044); what removes a row is the document being
-        read in full and no longer producing that state.
+        Notes:
+            Only a full-document read can replace support. Protected unchanged slots
+                keep their prior evidence revision.
         """
         existing = (
             await session.execute(
@@ -2492,21 +2580,22 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _retire_slots(
         self, session: AsyncSession, document_id: str, resolved: set[str], now: datetime
     ) -> list[str]:
-        """Slots this document no longer has a section for.
+        """Retire section slots absent from a full document read.
 
-        A slot's life and a claim's life are separate, and keeping them separate
-        is the point. A section that lost its heading has no slot any more and
-        everything it said is still asserted — so this retires the slot and never
-        touches the assertions, which are decided document-wide and afterwards.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+            resolved (set[str]): Slot IDs resolved during this run.
+            now (datetime): Timestamp for this write.
 
-        Only for a document observed in full, like everything else here: a
-        partial run would read as a document that lost every section it did not
-        get to.
+        Returns:
+            list[str]: IDs of slots retired by this full-document observation.
 
-        Retired rather than deleted, and its anchors closed rather than dropped:
-        a section that comes back must be distinguishable from one that was never
-        there, and it is not reactivated automatically — that decision is
-        deliberate or it is not taken.
+        Side Effects:
+            Retires slots and closes anchors through the supplied transaction.
+
+        Notes:
+            Retiring a slot does not retire its document-wide claims.
         """
         rows = (
             await session.execute(
@@ -2543,31 +2632,29 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         claimed: set[str],
         now: datetime,
     ) -> str:
-        """Which slot this section is, minting one and moving the history if so.
+        """Resolve a section to a slot and record real anchor transitions.
 
-        The history is advanced **only on a real transition**. A run over an
-        unchanged document resolves every section exactly and writes nothing; a
-        rename resolves through an alias or the content, and *then* the current
-        anchor is closed and the new one opened. Writing a row per run would turn
-        an audit trail into a log of runs.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            document_id (str): Source document identity.
+            section (ObservedSection): Arriving observed section.
+            known (dict[str, dict[str, Any]]): Known slot values for this document.
+            claimed (set[str]): Slot IDs already claimed in this run.
+            now (datetime): Timestamp for this write.
 
-        A section that comes back under a path it once had gets a third row
-        rather than the first one reopened:
+        Returns:
+            str: Resolved or newly created slot ID.
 
-            A  [t1, t2)
-            B  [t2, t3)
-            A  [t3, ∞)
+        Side Effects:
+            May write a slot and its anchor history through the supplied transaction.
 
-        which is what makes "which anchor was valid in March" answerable.
-
-        In the same transaction as the claims, deliberately. A slot continued
-        while its history still described the previous state is a corpus that
-        disagrees with itself, and the disagreement would be invisible.
+        Notes:
+            Anchor history advances only when a section actually changes place or name.
         """
         # A slot another section of *this* run already took is not a candidate.
-        # Recovery exists to find a slot from a previous run; offering it a
+        # Recovery exists to find a slot from a previous run. Offering it a
         # sibling would let two sections of one document, alike in text and
-        # different in heading, collapse into one — and which of them won would
+        # different in heading, collapse into one, and which of them won would
         # depend on the order they happened to be written in.
         available = {
             slot_id: value for slot_id, value in known.items() if slot_id not in claimed
@@ -2607,7 +2694,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
         row_for_slot = await session.get(KnowledgeSlot, match.slot_id)
         if row_for_slot is not None:
-            # The section's text moves with every edit; the anchor usually does
+            # The section's text moves with every edit. The anchor usually does
             # not. Keeping it current is what lets the next rename be recovered.
             row_for_slot.content_fingerprint = section.content_fingerprint
 
@@ -2640,7 +2727,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             )
         )
         if degraded(existing, section.anchor_strength):
-            # The slot continues — it is the same section — but it stopped being
+            # The slot continues as the same section, but it stopped being
             # anchored on something the source wrote, and continuing without
             # noticing is how a lineage gets carried across a change nobody sees.
             logger.info(
@@ -2668,39 +2755,26 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         classify: Callable[[str, str], Awaitable[str]] | None = None,
         assess: EquivalenceJudge | None = None,
     ) -> DocumentOutcome:
-        """Everything one fully observed document says, and what it stopped saying.
+        """Reconcile every claim of one fully observed document.
 
-        **Only call this for a document observed in full.** A claim is gone
-        because the source no longer contains it, which is knowable only once
-        everything the source *does* contain has arrived. A partial observation —
-        the normal case, since an unchanged document is skipped whole and yields
-        nothing — would read as a document that lost everything.
+        Args:
+            document_id (str): Identity of the fully observed document.
+            sections (Sequence[ObservedSection]): Every section produced by this document read.
+            run_id (str): Observation run identity.
+            classify (Callable[[str, str], Awaitable[str]] | None): Optional classifier
+                for changed wording.
+            assess (EquivalenceJudge | None): Optional equivalence judge.
 
-        The container is the document and not the slot, and that distinction was
-        paid for. A slot id is a section's position, so inserting a paragraph
-        renumbers every section below it: slot-scoped retraction then retired
-        each unchanged claim from the slot it used to occupy and re-created it in
-        the one it had moved to, taking its approval and its history with it. An
-        edit that touched none of those claims destroyed all of them. The slot
-        remains what *matches* a claim; the document is what decides one is gone.
+        Returns:
+            DocumentOutcome: Outcome of the complete document observation.
 
-        One transaction for the whole document. Writes landing without their
-        retractions, or the reverse, leave the corpus asserting and denying the
-        same thing with nothing able to say which half was right — and deciding
-        retraction per slot made the outcome depend on the order the slots
-        happened to be written in, which is not a property anything should rest
-        on.
+        Side Effects:
+            Writes claims, evidence, support, and retractions in one transaction.
+            May call judges.
 
-        Evidence is never deleted. It answers what document D at revision R
-        asserted, which is the question the whole diff is built on, and a claim
-        that stopped being asserted did not stop having been asserted. What is
-        recorded is that the assertion is retired.
-
-        A section that has something to be found by resolves to a slot, and its
-        claims are written against that slot rather than against the ordinal the
-        parser produced. One that has not — a format with no headings — never
-        gets a registry row and keeps the label it arrived with: an id nothing
-        can resolve back to would be new on every run.
+        Notes:
+            Call only after a complete document read. Claims and retractions
+            share one transaction, and evidence is retained.
         """
         # Asked before the transaction opens, never inside it. This module keeps
         # its transactions short and free of external calls, and a model round
@@ -2710,7 +2784,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         # *there*. The parser's ordinal renumbers whenever a paragraph is
         # inserted above it, so scoping by that would have compared this
         # section's claims against whatever now happens to sit at its old
-        # number — and usually against nothing at all.
+        # number, and usually against nothing at all.
         #
         # A guess, deliberately, and one nothing rests on: the authoritative
         # placement still happens inside the transaction, and being wrong here
@@ -2772,8 +2846,8 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 placements.append(slot_id)
                 if slot_id is not None:
                     # The *exact* input, never the section fingerprint. That one
-                    # is normalised on purpose — a reflowed section is still the
-                    # same section — so using it here answered "is this probably
+                    # is normalised on purpose. A reflowed section is still the
+                    # same section, so using it here answered "is this probably
                     # the same section" to a question that asked "was the model
                     # shown exactly this", and a sentence given a full stop
                     # froze the slot instead of producing a revision.
@@ -2792,7 +2866,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                     # What this run was given to read, kept rather than
                     # overwritten. `_place` has just moved the slot's
                     # `content_fingerprint` to the current value so the recovery
-                    # rung can match against what the section says now — which is
+                    # rung can match against what the section says now, which is
                     # exactly why that column cannot answer "was this section
                     # edited between two pictures": after the run it is already
                     # the new value.
@@ -2824,7 +2898,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             recorded: list[RecordedLineage] = []
             matched: set[str] = set()
             supported_now: set[tuple[str, str]] = set()
-            #: What this document carries now: (revision, slot) → the sighting
+            #: What this document carries now: each (revision, slot) names the sighting
             #: whose provenance a citation will quote.
             carries: dict[tuple[str, str], LineageWrite] = {}
             for (_, writes), slot_id in zip(judged, placements, strict=True):
@@ -2844,7 +2918,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                         stored.append(await self._upsert(session, write, now))
                         continue
                     # Lineage first, because it decides which state this sighting
-                    # is — and the graph node is then addressed by that state.
+                    # is, and the graph node is then addressed by that state.
                     #
                     # It used to be addressed by the candidate's own content
                     # hash, which covers the whole content block while the state
@@ -2861,7 +2935,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                     # a third claim. Absence and arrival are the same fact about
                     # the model, and only one of them was being refused.
                     #
-                    # Reinforcement still lands — a sighting of something the
+                    # Reinforcement still lands because a sighting of something the
                     # slot already holds is evidence, and welcome. What is
                     # refused is wording the slot has never carried.
                     if (
@@ -2908,7 +2982,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                 if await self._carried_elsewhere(session, assertion_id, document_id):
                     continue
                 # The section this claim stood in says exactly what it said
-                # before, so the source did not drop it — the model did not
+                # before, so the source did not drop it. The model did not
                 # mention it this time. Retracting on that turns the model's
                 # nondeterminism into lost knowledge, and a live run did exactly
                 # that: an unedited paragraph was read twice with an identical
@@ -2966,7 +3040,18 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
     async def _record_proposition(
         self, session: AsyncSession, proposition: Proposition
     ) -> uuid.UUID:
-        """Content-addressed, inside a caller's transaction."""
+        """Store a proposition inside the caller transaction.
+
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            proposition (Proposition): Complete structured proposition.
+
+        Returns:
+            uuid.UUID: ID of the stored proposition.
+
+        Side Effects:
+            Writes through the supplied PostgreSQL transaction.
+        """
         existing = (
             await session.execute(
                 select(KnowledgeProposition).where(
@@ -2993,19 +3078,22 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         now: datetime,
         revision_id: str = "",
     ) -> KnowledgeObject:
-        """The graph write, without its transaction.
+        """Upsert the knowledge graph row inside the caller transaction.
 
-        Split out so it can share one with the lineage write. During the
-        transition both are written, and two transactions would let one land
-        without the other — a split brain arriving precisely while identity is
-        being migrated, which is the worst possible moment for the two records
-        of one assertion to disagree.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            write (KnowledgeWrite): Knowledge graph write to apply.
+            now (datetime): Timestamp for this write.
+            revision_id (str): Revision reached by the lineage write, when available.
 
-        `revision_id` is the state this write landed on, and the node is pointed
-        at it. Empty where the caller has no lineage — a candidate that could not
-        name its business question, or the administrative `upsert` — and then the
-        pointer is left exactly as it was: a write that knows nothing about the
-        state must not be able to say the state is unknown.
+        Returns:
+            KnowledgeObject: Stored knowledge object.
+
+        Side Effects:
+            Writes graph rows through the supplied transaction.
+
+        Notes:
+            A graph write without lineage leaves the existing revision pointer unchanged.
         """
         node = await session.get(Knowledge, write.identity, with_for_update=True)
 
@@ -3013,7 +3101,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         # changed because it decides whether this is *evidence* at all.
         #
         # Keyed on the source and not on the run. A later run over the same
-        # document is the same document saying the same thing again — not
+        # document is the same document saying the same thing again, not
         # independent corroboration, and not new information about a claim a
         # reviewer already judged. Treating a rerun as fresh evidence made a
         # claim grow more certain for being re-read and handed a rejected
@@ -3061,7 +3149,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
 
             # No legacy row where the derivation would have lost something. The
             # claim is already stored whole above, and retrieval reads it from
-            # there — so this is a view that is sometimes absent, never a claim
+            # there, so this is a view that is sometimes absent, never a claim
             # that is sometimes missing.
             if write.payload is not None:
                 table = _PAYLOAD_TABLES[write.kind]
@@ -3072,15 +3160,14 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
                     f"knowledge '{write.identity}' already exists as kind '{node.kind}'; "
                     f"refusing to rewrite it as '{write.kind}'"
                 )
-            # Independent sightings reinforce; the payload itself is immutable
+            # Independent sightings reinforce. The payload itself is immutable
             # because identity is derived from it. A repeat of one this run
-            # already recorded is not independent and leaves belief alone —
-            # otherwise a claim grows more certain for having been
-            # interrupted.
+            # already recorded is not independent and leaves belief alone.
+            # Otherwise a claim grows more certain for having been interrupted.
             if not source_seen_before:
                 # A different document asserting the same thing is independent
                 # corroboration, and it is new information about a claim a
-                # reviewer has already refused — so the queue predicate has to
+                # reviewer has already refused, so the queue predicate has to
                 # see the node as changed. The same document again is neither.
                 node.confidence = reinforce_confidence(node.confidence, write.confidence)
                 node.updated_at = now
@@ -3091,34 +3178,34 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # Ingestion says what a source asserts. It does not get to say
             # whether a person has ruled on it, and it used to say both. Raising
             # the flag again undid an approval on the next run over an unchanged
-            # page — the review policy flags every candidate, so an approved
+                # page. The review policy flags every candidate, so an approved
             # assertion was re-quarantined and left retrieval for a document
             # nobody had touched.
             #
             # Stamping `updated_at` did the same through a quieter door. A
             # rejection keeps the flag set, so the queue tells an unseen
             # assertion from a judged one by comparing the review against the
-            # node's last change; moving that timestamp on every sighting made
+            # node's last change. Moving that timestamp on every sighting made
             # the node look changed and handed the rejected assertion back to a
             # reviewer, on every run, forever.
             #
             # Neither is a change to what the assertion says. Identity is
             # derived from content, so an existing node with this identity says
-            # exactly what it said before; only the belief in it moved, and
+            # exactly what it said before. Only the belief in it moved, and
             # belief is not a claim.
             #
             # The state it stands for is the one thing that does move here, and
             # it is not a change to the claim either.
             #
-            # This node is the one the *arriving* state addresses — its identity
-            # is that revision's fingerprint — so the pointer only ever moves
+            # This node is the one the *arriving* state addresses. Its identity
+            # is that revision's fingerprint, so the pointer only ever moves
             # between revisions of one structured state: a wording corrected by
             # a full stop is the plain case. A claim whose structure moved
             # addresses a different node and never reaches this line, which is
             # what keeps the older node truthfully on the older revision.
             #
             # Leaving the pointer behind in the first case would have retrieval
-            # quote a sentence the source has replaced; moving it in the second
+            # quote a sentence the source has replaced. Moving it in the second
             # would have a record whose content is P1 claim to represent R2.
             if revision_id:
                 node.revision_id = uuid.UUID(revision_id)
@@ -3163,22 +3250,23 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         target_identity: str,
         now: datetime,
     ) -> dict[str, Any]:
-        """Fold one assertion into another, evidence and all.
+        """Merge one assertion into another while retaining its history.
 
-        The source row survives. Deleting it would cascade away its observations
-        and its decision history, and any index entry still naming it would find
-        nothing — so it stays, points at the target, and stops being canonical.
+        Args:
+            session (AsyncSession): Active PostgreSQL session.
+            source (Knowledge): Assertion being merged into another.
+            target_identity (str): Identity of the merge target.
+            now (datetime): Timestamp for this write.
 
-        Its observations move. They are why the reviewer judged the two claims
-        equivalent, and leaving them behind would strip the target of the
-        evidence that justified the merge. The unique key is
-        ``(identity, run_id, source_id)``, so a sighting the target already has
-        from the same run and source is dropped rather than counted twice.
+        Returns:
+            dict[str, Any]: Summary of the merged source and target.
 
-        The target's confidence then reinforces against the source's: two
-        independently extracted wordings of one claim are exactly the case the
-        Bayesian merge exists for, and it is what an identical re-extraction
-        would have done automatically.
+        Side Effects:
+            Moves evidence and updates assertion rows through the supplied transaction.
+
+        Notes:
+            The source row survives as a noncanonical handle while its evidence
+            moves to the target.
         """
         if target_identity == source.identity:
             raise ValueError("an assertion cannot be merged into itself")
@@ -3246,26 +3334,28 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
         merge_into: str | None = None,
         supersede: bool = False,
     ) -> Review:
-        """Audit a decision, and apply a reviewer's corrections with it.
+        """Record a version-guarded review and apply its corrections.
 
-        ``payload`` and ``confidence`` belong to ``EDITED``; ``merge_into``
-        belongs to ``MERGED``. Each correction and the record of who made it are
-        one transaction, so the graph can never hold a changed assertion with no
-        account of who changed it.
+        Args:
+            identity (str): Assertion identity to review.
+            reviewer_id (str): Identity of the reviewer.
+            decision (ReviewDecision): Review decision to apply.
+            comment (str | None): Optional review explanation.
+            changes (dict[str, object] | None): Optional field corrections.
+            payload (dict[str, Any] | None): Optional replacement payload.
+            confidence (float | None): Optional corrected confidence.
+            merge_into (str | None): Optional target assertion for a merge.
+            supersede (bool): Whether to replace a prior decision on this version.
 
-        The identity does not move. It was derived from the extracted wording,
-        and rederiving it here would orphan the assertion's observations,
-        decision history, and every index entry pointing at it — so after an
-        edit the identity is a stable handle rather than a hash of the current
-        content. The audit row keeps the previous values.
+        Returns:
+            Review: Persisted review decision.
 
-        A second decision on a version somebody already judged is refused with
-        ``ReviewConflictError`` unless ``supersede`` says otherwise. Refusing is
-        not pedantry: the write below is unconditional, so without it the last
-        writer wins and approve-then-reject and reject-then-approve end
-        differently for no reason a reviewer could see. ``supersede`` exists so
-        that correcting one's own misclick stays possible — deliberately, and
-        with both decisions in the history rather than one of them lost.
+        Side Effects:
+            Writes review history and corrections in one PostgreSQL transaction.
+
+        Notes:
+            A second decision on the same version needs supersede. The audit preserves
+                both decisions.
         """
         if not reviewer_id.strip():
             raise ValueError("reviewer_id must not be empty")
@@ -3284,8 +3374,8 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             # Before anything is mutated: has this version already been judged?
             # The row is held FOR UPDATE, so two reviewers pressing at once
             # queue here and the second sees the first's decision rather than
-            # overwriting it. The predicate is the one the queue already uses —
-            # a review at or after the node's last change — so an assertion that
+            # overwriting it. The predicate is the one the queue already uses:
+            # a review at or after the node's last change, so an assertion that
             # gained evidence since is deliberately open again.
             if not supersede:
                 existing = (
@@ -3344,7 +3434,7 @@ class SqlAlchemyKnowledgeRepository(KnowledgeRepository):
             )
             session.add(review)
 
-            # Approving or editing lifts the quarantine; rejecting keeps the
+            # Approving or editing lifts the quarantine. Rejecting keeps the
             # assertion out of every retrieval path. Merging needs neither: the
             # source is excluded because it points at a target, not because it
             # is quarantined.

@@ -1,15 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Asking the index a question.
-
-Search, and only search. Three systems are asked, each keeps its own
-granularity and its own score semantics, and their *rankings* are fused — never
-their numbers. What comes out is "these systems found these things", ranked.
-
-Which of those findings becomes text a model is shown is a different question,
-with a token budget and a context window in it, and it is not answered here.
-"""
+"""Retrieval hits, source plans, and rank fusion."""
 
 from nlght.core.retrieval.fusion import (
     DEFAULT_DAMPING,

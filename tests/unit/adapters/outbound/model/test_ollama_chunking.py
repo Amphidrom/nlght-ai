@@ -22,10 +22,6 @@ from nlght.adapters.outbound.model._context_chunking import (
 from nlght.adapters.outbound.signals.buffering import BufferingSignalEmitter
 from nlght.core.model.budget import TokenBudget
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _budget(context_window: int) -> TokenBudget:
     return TokenBudget(context_window)
@@ -50,11 +46,6 @@ def _post_mock(content: str = "ok") -> MagicMock:
     return resp
 
 
-# ---------------------------------------------------------------------------
-# estimate_tokens / total_message_tokens
-# ---------------------------------------------------------------------------
-
-
 def test_estimate_tokens_at_least_one() -> None:
     assert estimate_tokens("") == 1
 
@@ -75,11 +66,6 @@ def test_total_message_tokens_handles_none_content() -> None:
     assert total_message_tokens(msgs) == 1
 
 
-# ---------------------------------------------------------------------------
-# apply_budget_to_messages
-# ---------------------------------------------------------------------------
-
-
 def test_apply_budget_keeps_all_when_fits() -> None:
     b = _budget(10000)
     msgs = [_msg("system", "sys"), _msg("user", "u1"), _msg("assistant", "a1"), _msg("user", "u2")]
@@ -91,7 +77,7 @@ def test_apply_budget_always_keeps_system_message() -> None:
     b = _budget(1024)
     system_content = "s" * 1
     last_content = "l" * 1
-    filler = "x" * 3500  # ~1000 tokens — fills middle
+    filler = "x" * 3500  # About 1000 tokens fill the middle of the test window.
 
     msgs = [
         _msg("system", system_content),
@@ -129,11 +115,6 @@ def test_apply_budget_empty_messages() -> None:
     assert total == 0
 
 
-# ---------------------------------------------------------------------------
-# needs_chunking
-# ---------------------------------------------------------------------------
-
-
 def test_needs_chunking_false_when_under_threshold() -> None:
     b = _budget(10000)
     msgs = [_msg("user", "hello")]
@@ -142,15 +123,10 @@ def test_needs_chunking_false_when_under_threshold() -> None:
 
 def test_needs_chunking_true_when_over_threshold() -> None:
     b = _budget(1024)
-    # threshold = 1024 * 0.85 = 870 tokens; content >> 870
+    # threshold = 1024 * 0.85 = 870 tokens. Content >> 870
     large = "x" * 4000  # ~1142 tokens
     msgs = [_msg("user", large)]
     assert needs_chunking(msgs, b) is True
-
-
-# ---------------------------------------------------------------------------
-# _split_message_content
-# ---------------------------------------------------------------------------
 
 
 def test_split_returns_single_chunk_when_small() -> None:
@@ -178,11 +154,6 @@ def test_split_no_empty_chunks() -> None:
     content = "hello\n\n\n\nworld\n\n" * 50
     chunks = _split_message_content(content, 20)
     assert all(c.strip() for c in chunks)
-
-
-# ---------------------------------------------------------------------------
-# prepare_chunked_session
-# ---------------------------------------------------------------------------
 
 
 def test_prepare_extracts_system_and_task() -> None:
@@ -217,11 +188,6 @@ def test_prepare_creates_chunks_from_middle_messages() -> None:
     ]
     _, chunks, _ = prepare_chunked_session(msgs, b)
     assert len(chunks) >= 1
-
-
-# ---------------------------------------------------------------------------
-# BoundOllamaCloudClient — budget integration
-# ---------------------------------------------------------------------------
 
 
 async def test_bound_client_without_budget_calls_normally() -> None:

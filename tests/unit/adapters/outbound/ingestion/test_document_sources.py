@@ -263,13 +263,7 @@ async def test_confluence_source_marks_permanent_failure_and_document_cap_incomp
 async def test_filesystem_source_reports_a_renamed_file_as_a_different_document(
     tmp_path: Path,
 ) -> None:
-    """Identity is the path, so moving a file replaces one document with another.
-
-    The snapshot must stay `complete` across the rename. Only a complete
-    snapshot may tombstone what it does not mention, and a rename is exactly the
-    case where something has to be tombstoned — the old path is gone and nothing
-    else will ever report it again.
-    """
+    """Treat a renamed filesystem path as a new document in a complete snapshot."""
     root = tmp_path / "repository"
     (root / "docs").mkdir(parents=True)
     (root / "readme.md").write_text("# Title\n\nUnchanged prose.\n", encoding="utf-8")
@@ -287,7 +281,7 @@ async def test_filesystem_source_reports_a_renamed_file_as_a_different_document(
     assert [document.external_id for document in before.documents] == ["fs:repo/readme.md"]
     assert [document.external_id for document in after.documents] == ["fs:repo/docs/guide.md"]
     assert after.complete
-    # The bytes never changed — only where they live. Whatever tells the two
+    # The bytes never changed, only where they live. Whatever tells the two
     # documents apart, it cannot be the content.
     assert before.documents[0].content == after.documents[0].content
     assert before.documents[0].document_id != after.documents[0].document_id
@@ -295,18 +289,7 @@ async def test_filesystem_source_reports_a_renamed_file_as_a_different_document(
 
 @pytest.mark.asyncio
 async def test_confluence_document_identity_survives_a_retitled_and_moved_page() -> None:
-    """A document's identity has to be as stable as the slots that hang off it.
-
-    Slot matching is scoped to `document_id`, so a document that changes
-    identity takes every slot, assertion and approval underneath it: the old
-    document is reported as deleted and the new one as never seen before, for a
-    page somebody merely renamed.
-
-    Confluence hands out a page id that survives a retitle, a move to another
-    space and the URL change that follows. This pins that the id is what
-    identity is built from — a version derived from the title or the URL would
-    pass every other test in this file.
-    """
+    """Keep Confluence document identity stable across title and location changes."""
     def _page(title: str, space: str) -> dict:
         return {
             "id": "827361",
@@ -328,7 +311,6 @@ async def test_confluence_document_identity_survives_a_retitled_and_moved_page()
 
     assert before.external_id == after.external_id == "confluence:827361"
     assert before.document_id == after.document_id
-    # The things that did change are metadata, and the path follows the space —
-    # neither may reach identity.
+    # Title and space path are metadata. Neither may affect document identity.
     assert before.metadata["title"] != after.metadata["title"]
     assert before.path != after.path

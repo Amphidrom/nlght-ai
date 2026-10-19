@@ -35,7 +35,8 @@ from nlght.core.model.messages import (
     compose_messages,
     compose_prompt,
 )
-from nlght.core.tools.tool import ToolParameter
+from nlght.core.model.trust import ContentLedger, ContentOrigin
+from nlght.core.tools.tool import ToolOutput, ToolParameter
 from nlght.ports.outbound.tool_catalog import ToolCatalog, ToolContract
 
 SCHEMA_VERSION = 1
@@ -468,19 +469,28 @@ class RecordingToolCatalog(ToolCatalog):
     def names(self) -> list[str]:
         return self._inner.names()
 
+    @property
+    def ledger(self) -> ContentLedger:
+        return self._inner.ledger
+
+    async def execute_with_origin(
+        self,
+        tc: dict[str, Any],
+        *,
+        context_origin: ContentOrigin | None = None,
+    ) -> ToolOutput:
+        name = tc.get("name")
+        if isinstance(name, str):
+            self.proposed_names.append(name)
+        return await self._inner.execute_with_origin(tc, context_origin=context_origin)
+
     async def execute(
         self,
         tc: dict[str, Any],
         *,
-        has_external_untrusted_input: bool = True,
+        context_origin: ContentOrigin | None = None,
     ) -> str:
-        name = tc.get("name")
-        if isinstance(name, str):
-            self.proposed_names.append(name)
-        return await self._inner.execute(
-            tc,
-            has_external_untrusted_input=has_external_untrusted_input,
-        )
+        return (await self.execute_with_origin(tc, context_origin=context_origin)).content
 
 
 def make_eval_catalog() -> RecordingToolCatalog:

@@ -1,38 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Executable specification for slot identity — where an assertion stands.
+"""Specify stable slot identity for document sections.
 
-A slot is the container that carries the incremental diff. Two runs compare the
-assertions of one slot against the assertions of the same slot, so if a slot
-loses its identity every assertion inside it is retracted and recreated, and
-every approval goes with them. That makes this the third surrogate in the model,
-and for the same reason as the other two:
-
-    document_id   the document a slot belongs to; matching never crosses it
-    slot_id       persisted UUID, minted once. Never derived.
-    anchors       every path this slot has been found by, and what each was worth
-    content       a recovery aid, and only that
-
-so the effective identity is `document_id + slot_id`, and the anchors and the
-content are aids for finding a slot again *within the same document*.
-
-An anchor carries its own strength rather than the slot carrying one for its
-whole life, because `authored → derived` is a degradation a single value cannot
-express: an authored id removed leaves a heading path, and a slot still claiming
-to be authored would carry a lineage across a change nobody could see. The
-history is temporal rather than "current plus a list of old ones", so a path that
-comes back — a heading renamed and renamed back — is two entries and not one.
-
-**The heading path is the primary signal.** A resolving anchor is the answer and
-nothing else is consulted. Content similarity is a *recovery aid* — reached only
-where the anchor no longer resolves, to work out which vanished slot the new
-section is. It never overrules an anchor and never merges two sections that both
-still have one.
-
-What this replaces: `split_into_units` builds `unit_id` from
-`f"{source_id}:{document_id}:{len(units)}"`, an ordinal, so inserting a paragraph
-renumbers everything after it and the whole document reads as rewritten.
+A slot belongs to one document. Heading anchors resolve it first. Content is
+used only to recover an otherwise unresolved slot within that document.
 """
 
 from __future__ import annotations
@@ -64,7 +36,17 @@ from nlght.core.knowledge.slot import (
 def _resolve_slot(
     document_id: str, anchor: str, content: str, known: dict[str, dict[str, Any]]
 ) -> str:
-    """The id alone, for the cases that only care which slot it is."""
+    """The id alone, for the cases that only care which slot it is.
+
+    Args:
+        document_id (str): Document identifier.
+        anchor (str): Anchor used for slot resolution.
+        content (str): Content supplied to the projection or step.
+        known (dict[str, dict[str, Any]]): Known slots available to the resolver.
+
+    Returns:
+        str: Identifier of the resolved slot.
+    """
     return resolve_slot(document_id, anchor, content, known).slot_id
 
 
@@ -87,6 +69,16 @@ def _slot(
     `strength` defaults to derived because a heading path is what most formats
     can offer, and defaulting to the stronger reading would make every test look
     better anchored than the corpus it stands for.
+
+    Args:
+        anchor (str): Anchor used for slot resolution.
+        content (str): Content supplied to the projection or step.
+        *aliases (str): Alternative anchors recorded for the slot.
+        document (str): Document or document identifier for the test.
+        strength (str): Anchor strength assigned to the slot.
+
+    Returns:
+        dict[str, Any]: Slot record with its anchor history.
     """
     return {
         "document_id": document,
@@ -101,7 +93,7 @@ def _slot(
     }
 
 
-#: Any past instant; the resolver only asks whether an anchor is still current.
+#: Any past instant. The resolver only asks whether an anchor is still current.
 _CLOSED = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -109,18 +101,8 @@ _TRAVEL = "Employees must book travel through the corporate agency."
 _EXPENSE = "Expenses above CHF 500 require approval by a line manager."
 
 
-# ---------------------------------------------------------------------------
-# 1. Renamed heading
-# ---------------------------------------------------------------------------
-
 def test_renaming_a_heading_keeps_the_slot_and_records_the_old_path() -> None:
-    """The case the alias history exists for.
-
-    Somebody retitles "## Travel approval" to "## Travel authorisation" and
-    changes nothing underneath. The primary signal fails — that path is new —
-    so content recovers the slot, and the new path is added to the slot rather
-    than replacing its identity.
-    """
+    """Keep slot identity and path history when a heading changes."""
     known = {"slot-91": _slot("/travel/approval", _TRAVEL)}
 
     resolved = _resolve_slot("doc-1", "/travel/authorisation", _TRAVEL, known)
@@ -137,10 +119,6 @@ def test_a_path_this_slot_had_before_resolves_without_looking_at_content() -> No
     assert _resolve_slot("doc-1", "/travel/approval", "wholly different text", known) == "slot-91"
 
 
-# ---------------------------------------------------------------------------
-# 2. Moved section
-# ---------------------------------------------------------------------------
-
 def test_a_section_moved_under_another_parent_keeps_its_slot() -> None:
     # /expenses/travel becomes /policy/travel-approval. Same section, different
     # place in the document. Its assertions must not be retracted for it.
@@ -148,10 +126,6 @@ def test_a_section_moved_under_another_parent_keeps_its_slot() -> None:
 
     assert _resolve_slot("doc-1", "/policy/travel-approval", _TRAVEL, known) == "slot-91"
 
-
-# ---------------------------------------------------------------------------
-# 3. Inserted paragraph — the ordinal problem
-# ---------------------------------------------------------------------------
 
 def test_inserting_a_section_leaves_every_other_slot_alone() -> None:
     """The defect today's `unit_id` has by construction.
@@ -180,13 +154,9 @@ def test_the_inserted_section_itself_is_a_new_slot() -> None:
     assert resolved not in known
 
 
-# ---------------------------------------------------------------------------
-# 4. Deleted section
-# ---------------------------------------------------------------------------
-
 def test_a_deleted_section_does_not_drag_its_neighbours_with_it() -> None:
     # /travel is gone from the document. The run resolves what remains, and
-    # nothing about the deletion may move /expenses — the assertions of a
+    # nothing about the deletion may move /expenses. The assertions of a
     # section nobody edited must survive the removal of the one above it.
     known = {
         "slot-1": _slot("/travel", _TRAVEL),
@@ -212,19 +182,8 @@ def test_a_deleted_section_is_not_recovered_onto_a_surviving_one() -> None:
     assert _resolve_slot("doc-1", "/travel/booking", _TRAVEL + " Book early.", known) == "slot-2"
 
 
-# ---------------------------------------------------------------------------
-# 5. Two sections with the same heading in one document
-# ---------------------------------------------------------------------------
-
 def test_two_sections_with_one_heading_stay_two_slots() -> None:
-    """Where the primary signal cannot decide on its own.
-
-    A handbook with "### Approval" under both Travel and Expenses gives two
-    sections one path. The anchor is ambiguous, so content decides which is
-    which — the second legitimate use of the recovery aid — and they stay two
-    slots. Collapsing them would merge two unrelated sets of assertions into one
-    diff, retracting each on every run because the other one replaced it.
-    """
+    """Disambiguate repeated headings by their section content."""
     known = {
         "slot-1": _slot("/handbook/approval", _TRAVEL),
         "slot-2": _slot("/handbook/approval", _EXPENSE),
@@ -234,22 +193,8 @@ def test_two_sections_with_one_heading_stay_two_slots() -> None:
     assert _resolve_slot("doc-1", "/handbook/approval", _EXPENSE, known) == "slot-2"
 
 
-# ---------------------------------------------------------------------------
-# 6. The negative case — similarity must not merge two living sections
-# ---------------------------------------------------------------------------
-
 def test_two_similar_sections_under_different_headings_stay_apart() -> None:
-    """The failure mode the recovery aid could introduce.
-
-    Two sections that read almost identically — a policy repeated for two
-    departments, boilerplate copied between chapters — each keep their own
-    anchor. Neither anchor is missing, so similarity is never consulted, and the
-    two never collapse onto one slot.
-
-    If they did, one section's assertions would replace the other's on every
-    run: each would be retracted as "no longer asserted here" and recreated,
-    the approvals lost, in a document nobody had edited.
-    """
+    """Keep distinct anchored sections apart despite similar content."""
     known = {
         "slot-1": _slot("/sales/expenses", _EXPENSE),
         "slot-2": _slot("/engineering/expenses", _EXPENSE),
@@ -279,10 +224,6 @@ def test_similarity_is_only_consulted_for_anchors_that_no_longer_resolve() -> No
     assert resolved not in known
 
 
-# ---------------------------------------------------------------------------
-# The slot id is a surrogate
-# ---------------------------------------------------------------------------
-
 def test_a_slot_id_is_not_derived_from_its_anchor() -> None:
     """The property a later "just hash the path" refactor would break.
 
@@ -300,9 +241,6 @@ def test_a_slot_id_is_not_derived_from_its_anchor() -> None:
     assert elsewhere != "slot-91"
 
 
-# ---------------------------------------------------------------------------
-# Slot matching is scoped to one document
-# ---------------------------------------------------------------------------
 #
 # Which makes the effective identity of a slot:
 #
@@ -312,20 +250,7 @@ def test_a_slot_id_is_not_derived_from_its_anchor() -> None:
 # finding a slot again *within the same document*.
 
 def test_two_pages_with_the_same_heading_and_the_same_text_are_two_slots() -> None:
-    """Two documents, identical in both signals, and still not one slot.
-
-        Page A: "Approval" / "Expenses above CHF 500 require approval."
-        Page B: "Approval" / "Expenses above CHF 500 require approval."
-
-    Both signals agree and both are irrelevant, because they are signals for
-    finding a slot again inside one document. A shared slot would mean the two
-    pages hold one diff: whatever A says, B is asked to have said too, so each
-    run retracts one page's assertions in favour of the other's and hands back
-    an approval for a document nobody edited.
-
-    Boilerplate repeated across pages is the normal case for this, not an
-    exotic one — a policy paragraph copied into every team's handbook.
-    """
+    """Keep identical sections in different documents as separate slots."""
     boilerplate = "Expenses above CHF 500 require approval."
     known: dict[str, dict[str, Any]] = {}
 
@@ -345,13 +270,7 @@ def test_an_existing_slot_is_never_matched_from_another_document() -> None:
 
 
 def test_a_vanished_slot_is_not_recovered_onto_another_document() -> None:
-    """Recovery is scoped too, not only exact resolution.
-
-    Deleting a section from one document must not rehang its slot onto a
-    similar section elsewhere. Without the scope the deletion would be recorded
-    as a move and the assertions would silently change document — so a citation
-    would point at a page that never made the claim.
-    """
+    """Limit slot recovery to the source document."""
     known = {"slot-91": _slot("/travel/approval", _TRAVEL)}
 
     resolved = _resolve_slot("doc-2", "/travel/authorisation", _TRAVEL, known)
@@ -359,9 +278,6 @@ def test_a_vanished_slot_is_not_recovered_onto_another_document() -> None:
     assert resolved != "slot-91"
 
 
-# ---------------------------------------------------------------------------
-# Retirement — a deleted slot is retired, not forgotten
-# ---------------------------------------------------------------------------
 #
 #     slot_id
 #     document_id
@@ -388,7 +304,7 @@ def test_a_slot_whose_section_is_gone_is_retired_rather_than_deleted() -> None:
 
 def test_a_retired_slot_keeps_the_paths_it_had() -> None:
     # Every path it was found by is what a later run would recognise it by, so
-    # they outlive the section itself — and each keeps the strength it had, so a
+    # they outlive the section itself, and each keeps the strength it had, so a
     # decision to continue the lineage can be taken knowing what it rests on.
     known = {"slot-91": _slot("/travel/authorisation", _TRAVEL, "/travel/approval")}
 
@@ -402,15 +318,7 @@ def test_a_retired_slot_keeps_the_paths_it_had() -> None:
 
 
 def test_a_retired_slot_is_not_resolved_into_by_accident() -> None:
-    """Retirement is a record, not a candidate list.
-
-    A section that comes back must not silently reattach to a slot that was
-    retired months ago — whether the old lineage continues is a decision worth
-    taking deliberately, and taking it implicitly through a similarity score is
-    exactly the kind of thing the surrogate ids exist to prevent. Resolution
-    therefore mints a new slot, and the retired one stays available to be
-    consulted rather than being matched into.
-    """
+    """Exclude retired slots from automatic recovery."""
     known = {
         "slot-91": {**_slot("/travel/approval", _TRAVEL), "status": "retired"},
     }
@@ -420,15 +328,12 @@ def test_a_retired_slot_is_not_resolved_into_by_accident() -> None:
     assert resolved != "slot-91"
 
 
-# ---------------------------------------------------------------------------
-# The ladder, and where it refuses to decide
-# ---------------------------------------------------------------------------
 #
 #     the anchor, exactly
-#     → the anchor, among several sharing it, disambiguated by content
-#     → a path this slot used to have
-#     → the content, when it points at exactly one slot
-#     → otherwise a new slot
+#     then the anchor disambiguated by content
+#     then a path this slot used to have
+#     then content identifying exactly one slot
+#     otherwise a new slot
 #
 # Every rung needs a unique answer. Two candidates anywhere mean the section is
 # new, because choosing between them is the heuristic that would decide identity.
@@ -446,13 +351,7 @@ def test_the_resolution_says_which_rung_answered() -> None:
 
 
 def test_boilerplate_repeated_in_one_document_recovers_nothing() -> None:
-    """The failure the uniqueness rule prevents.
-
-    The same paragraph appears under three headings. Two of them are known; a
-    third arrives under a path that does not resolve. Recovering it onto
-    whichever matched first would pull one section's assertions onto another,
-    and each run would then retract the loser's and recreate them.
-    """
+    """Reject ambiguous recovery from repeated boilerplate."""
     known = {
         "slot-1": _slot("/sales/policy", _EXPENSE),
         "slot-2": _slot("/engineering/policy", _EXPENSE),
@@ -495,10 +394,6 @@ def test_three_sections_under_one_heading_need_distinct_content() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Retirement keeps what a returning section would arrive under
-# ---------------------------------------------------------------------------
-
 def test_retiring_a_slot_closes_its_current_path_rather_than_dropping_it() -> None:
     """Its current path becomes a past one, because that is what a return uses.
 
@@ -529,10 +424,6 @@ def test_retiring_a_slot_that_is_not_there_is_an_error() -> None:
     with pytest.raises(KeyError, match="slot-91"):
         retire_slot("slot-91", {})
 
-
-# ---------------------------------------------------------------------------
-# What the match rested on
-# ---------------------------------------------------------------------------
 
 def test_an_authored_anchor_says_so_when_it_resolves() -> None:
     """The distinction one word could not carry.
@@ -600,13 +491,7 @@ def test_a_path_that_comes_back_is_two_entries_and_not_one() -> None:
 
 
 def test_a_degradation_is_visible_without_changing_the_answer() -> None:
-    """`authored → derived`, which a single strength per slot could not express.
-
-    The authored id was removed from the source, so the section arrives with a
-    heading path. It is still the same section and the slot still continues —
-    what must not happen is continuing while believing the anchor is as strong as
-    it was.
-    """
+    """Report anchor degradation while preserving the resolved slot."""
     known = {"slot-91": _slot("expenses-policy", _EXPENSE, strength=AUTHORED_ANCHOR)}
 
     assert degraded(known["slot-91"], DERIVED_ANCHOR) is True
@@ -614,8 +499,8 @@ def test_a_degradation_is_visible_without_changing_the_answer() -> None:
 
 
 def test_an_upgrade_is_not_a_degradation() -> None:
-    # derived → authored: somebody added an id to a heading. Very likely the same
-    # section, and nothing to warn about.
+    # Adding an authored ID to the heading strengthens the same section's
+    # anchor, so there is no degradation to report.
     known = {"slot-91": _slot("/expenses", _EXPENSE)}
 
     assert degraded(known["slot-91"], AUTHORED_ANCHOR) is False

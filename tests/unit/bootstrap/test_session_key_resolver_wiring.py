@@ -10,10 +10,6 @@ from nlght.adapters.outbound.session.header import HeaderSessionKeyResolver
 from nlght.adapters.outbound.session.query import QueryParamSessionKeyResolver
 from nlght.bootstrap.wiring import _build_single_resolver
 
-# ---------------------------------------------------------------------------
-# _build_single_resolver
-# ---------------------------------------------------------------------------
-
 
 def test_builds_header_resolver() -> None:
     r = _build_single_resolver({"resolver": "header", "key": "x-session-id"})

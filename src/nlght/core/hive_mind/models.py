@@ -11,17 +11,16 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
+from nlght.core.model.trust import ContentOrigin, origin_from_json, origin_to_json
+
 _logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
 
 class AtomType(StrEnum):
     """Built-in atom type vocabulary for WorkingMemory writes.
 
     This class is intentionally open: any plain string is a valid atom type.
-    Predefined members cover the core pipeline vocabulary; custom steps may
+    Predefined members cover the core pipeline vocabulary. Custom steps may
     pass arbitrary strings directly to ``WriteIntent.atom_type``.
 
     Convention for custom types
@@ -48,7 +47,17 @@ class AtomType(StrEnum):
 
     @classmethod
     def _missing_(cls, value: object) -> AtomType:
-        """Accept any string as a valid atom type (open extension point)."""
+        """Accept extension-defined string atom types.
+
+        Args:
+            value (object): Unknown enum value.
+
+        Returns:
+            AtomType: AtomType instance for that value.
+
+        Side Effects:
+            Constructs an enum value without changing registered members.
+        """
         obj = str.__new__(cls, value)
         obj._value_ = str(value)
         obj._name_ = str(value)
@@ -61,12 +70,6 @@ class PromotionStatus(StrEnum):
     SUPERSEDED = "SUPERSEDED"
 
 
-
-
-# ---------------------------------------------------------------------------
-# ConversationStore models
-# ---------------------------------------------------------------------------
-
 @dataclass
 class TurnSummary:
     turn_nr:        int
@@ -77,18 +80,18 @@ class TurnSummary:
     result_summary: str             = ""
     correction_of:  int | None   = None
     timestamp:      datetime        = field(default_factory=lambda: datetime.now(UTC))
+    #: The origin of the content this was made from, stamped by the
+    #: coordinator from the run's ledger (ADR-0074). ``None`` is not annotated,
+    #: and is read as untrusted.
+    origin:         ContentOrigin | None = None
 
-
-# ---------------------------------------------------------------------------
-# SessionResultStore models
-# ---------------------------------------------------------------------------
 
 @dataclass
 class SessionResult:
     """A finished, validated result or artefact of a session.
 
-    ``content`` is always a plain string — the stores are string-based.
-    File-backed payloads are a HiveMind-adapter concern; the core model
+    ``content`` is always a plain string because the stores are string-based.
+    File-backed payloads are a HiveMind-adapter concern. The core model
     only carries ``workspace_path`` and ``content_hash`` as optional
     metadata fields so the adapter can track them without core changes.
     """
@@ -102,6 +105,10 @@ class SessionResult:
     id:             str             = field(default_factory=lambda: str(uuid4()))
     workspace_path: str | None   = None
     content_hash:   str | None   = None
+    #: The origin of the content this was made from, stamped by the
+    #: coordinator from the run's ledger (ADR-0074). ``None`` is not annotated,
+    #: and is read as untrusted.
+    origin:         ContentOrigin | None = None
 
     def is_file_backed(self) -> bool:
         return self.workspace_path is not None
@@ -110,14 +117,12 @@ class SessionResult:
         return self.content[:chars] if self.content else f"[file: {self.workspace_path}]"
 
 
-# ---------------------------------------------------------------------------
-# SessionSnapshot — persistence-agnostic session state + (de)serialisation
+# SessionSnapshot: persistence-agnostic session state and serialisation
 #
 # Moved here from adapters/outbound/hive_mind/persistence.py: it's a plain
 # data shape built from other core types with json/datetime-only
 # serialisation helpers, no I/O. The SessionBackend port (ports/outbound/
 # session_backend.py) needs this type, and ports must not import adapters.
-# ---------------------------------------------------------------------------
 
 def _ser_turn(t: TurnSummary) -> dict[str, Any]:
     return {
@@ -126,6 +131,7 @@ def _ser_turn(t: TurnSummary) -> dict[str, Any]:
         "entities": t.entities, "result_summary": t.result_summary,
         "correction_of": t.correction_of,
         "timestamp": t.timestamp.isoformat(),
+        "origin": origin_to_json(t.origin),
     }
 
 
@@ -136,6 +142,7 @@ def _de_turn(data: dict[str, Any]) -> TurnSummary:
         entities=data.get("entities", []),
         result_summary=data.get("result_summary", ""),
         correction_of=data.get("correction_of"),
+        origin=origin_from_json(data.get("origin")),
     )
     t.timestamp = datetime.fromisoformat(data["timestamp"])
     return t
@@ -147,6 +154,7 @@ def _ser_result(r: SessionResult) -> dict[str, Any]:
         "entities": r.entities, "tags": r.tags, "turn_nr": r.turn_nr,
         "status": r.status.value, "created_at": r.created_at.isoformat(),
         "workspace_path": r.workspace_path, "content_hash": r.content_hash,
+        "origin": origin_to_json(r.origin),
     }
 
 
@@ -157,6 +165,7 @@ def _de_result(data: dict[str, Any]) -> SessionResult:
         status=PromotionStatus(data["status"]),
         workspace_path=data.get("workspace_path"),
         content_hash=data.get("content_hash"),
+        origin=origin_from_json(data.get("origin")),
     )
     r.id = data["id"]
     r.created_at = datetime.fromisoformat(data["created_at"])
@@ -164,7 +173,14 @@ def _de_result(data: dict[str, Any]) -> SessionResult:
 
 
 def _slots_to_json(slots: dict[str, Any]) -> dict[str, Any]:
-    """Return a copy of *slots* containing only JSON-serialisable values."""
+    """Copy only JSON-serializable slot values.
+
+    Args:
+        slots (dict[str, Any]): Coordinator slot mapping.
+
+    Returns:
+        dict[str, Any]: Filtered JSON-compatible slot dictionary.
+    """
     result: dict[str, Any] = {}
     for k, v in slots.items():
         try:
@@ -188,7 +204,7 @@ class SessionSnapshot:
     #:
     #: Empty means **unowned**, and that is not a permission. A session written
     #: before ownership existed has no owner and cannot be given one by whoever
-    #: asks for it next — "first caller wins" would be an account-takeover
+    #: asks for it next. "First caller wins" would be an account-takeover
     #: migration (ADR-0061).
     owner_principal_id:   str = ""
 
@@ -218,24 +234,20 @@ class SessionSnapshot:
         )
 
 
-# ---------------------------------------------------------------------------
-# WorkingMemory models
-# ---------------------------------------------------------------------------
-
 @dataclass
 class WorkingAtom:
     atom_type:         str   # AtomType member or any "namespace:label" string
     content:           str
     task_id:           str
     #: What this atom is about. The caller has always supplied them on
-    #: `WriteIntent`, and every `write()` implementation dropped them here — so
+    #: `WriteIntent`, and every `write()` implementation dropped them here. Thus,
     #: proximity scored every atom against an empty list and returned the same
     #: floor for all of them (ADR-0057). Carried now, and nothing else changes:
     #: the field the caller already fills reaches the scorer that already reads
     #: it.
     entities:          list[str] = field(default_factory=list)
     tags:              list[str] = field(default_factory=list)
-    #: What this atom is *about*, as a stable short name — a `MemoryCandidate`'s
+    #: What this atom is *about*, as a stable short name. A `MemoryCandidate`'s
     #: key. It has always existed upstream and reached the atom only as a prefix
     #: inside `content`, which is a shorthand hiding in free text: readable to a
     #: person, unusable to anything that wants to say the same thing briefly.
@@ -243,7 +255,7 @@ class WorkingAtom:
     #: Empty for an atom written by anything that has no such name, and an
     #: adapter offers no short form for those rather than parsing one back out.
     key:               str      = ""
-    #: What sort of remembered thing it is — fact, artifact, relation, request.
+    #: What sort of remembered thing it is: fact, artifact, relation, or request.
     #: **Not** `atom_type`: that says where in the pipeline this was
     #: written (SPEC, RESULT, EVAL), which is a different axis entirely. An
     #: artifact can be written at any stage and a SPEC can be about anything.
@@ -251,11 +263,10 @@ class WorkingAtom:
     promote_to_parent: bool     = False
     created_at:        datetime = field(default_factory=lambda: datetime.now(UTC))
     id:                str      = field(default_factory=lambda: str(uuid4()))
+    #: The origin of the content this atom was written from (ADR-0074).
+    #: ``None`` is not annotated, and is read as untrusted.
+    origin:            ContentOrigin | None = None
 
-
-# ---------------------------------------------------------------------------
-# StoreCoordinator write interface
-# ---------------------------------------------------------------------------
 
 @dataclass
 class WriteIntent:
@@ -281,10 +292,6 @@ class ConflictReport:
     conflicting_entities:  list[str]
     resolution:            str = "UNRESOLVED"
 
-
-# ---------------------------------------------------------------------------
-# Diagnostics (tool output)
-# ---------------------------------------------------------------------------
 
 class Severity(StrEnum):
     error   = "error"
@@ -350,10 +357,6 @@ class Diagnostics:
             )
 
 
-# ---------------------------------------------------------------------------
-# Orient: Relevance scoring
-# ---------------------------------------------------------------------------
-
 class ScoringStrategy(StrEnum):
     LINEAR           = "linear"
     WEIGHTED_SIGMOID = "weighted_sigmoid"
@@ -402,13 +405,9 @@ class RelevanceScore:
     def __repr__(self) -> str:
         return (
             f"RelevanceScore(r={self.recency:.2f} p={self.proximity:.2f} "
-            f"v={self.volatility:.2f} d={self.dependency:.2f} → {self.total:.2f})"
+            f"v={self.volatility:.2f} d={self.dependency:.2f} -> {self.total:.2f})"
         )
 
-
-# ---------------------------------------------------------------------------
-# Orient: Scored wrappers
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ScoredAtom:
@@ -421,10 +420,6 @@ class ScoredResult:
     result: SessionResult
     score:  RelevanceScore
 
-
-# ---------------------------------------------------------------------------
-# Orient: Mental Model
-# ---------------------------------------------------------------------------
 
 @dataclass
 class MentalModel:
@@ -441,8 +436,8 @@ class MentalModel:
     #: Knowledge that arrives already adapted, from wherever it came from.
     #:
     #: The four fields above are the session's own stores and keep their types.
-    #: This is for everything else the model should currently know — a retrieved
-    #: passage is the first — and it is deliberately **not** a second typed list
+    #: This is for everything else the model currently needs. A retrieved
+    #: passage is one example. It is deliberately **not** a second typed list
     #: per source: a `passages` field here would be the retrieval special case
     #: rebuilt one level up, and the next source would want its own.
     elements:      tuple[Any, ...]     = ()
@@ -464,18 +459,15 @@ class MentalModel:
         )
 
 
-# ---------------------------------------------------------------------------
-# Orient: one element, whatever it is made of
-# ---------------------------------------------------------------------------
 #
 # A turn, an atom, a session result and a retrieved passage are four different
-# things and stay four different things — they mean different things to
+# things and stay four different things because they mean different things to
 # a reader and to the business. What they have in common is only visible at the
 # moment a budget forces a choice: each is some information, worth something,
 # costing something, and expressible more cheaply or not at all.
 #
 # That common layer is what these types are. Everything type-specific lives in
-# the adapter that produces a `MentalElement`; nothing below this line knows what
+# the adapter that produces a `MentalElement`. Nothing below this line knows what
 # a SessionResult is, and no reduction rule may ever ask.
 
 
@@ -514,10 +506,10 @@ class Retention(StrEnum):
     #: Never omitted. It may still be compacted, and a mandatory set too large
     #: for the budget is reported rather than silently trimmed.
     MANDATORY = "mandatory"
-    #: Compacted before it is omitted — losing it entirely costs more than
+    #: Compacted before it is omitted because losing it entirely costs more than
     #: saying it briefly.
     IMPORTANT = "important"
-    #: Kept while there is room; dropped without ceremony when there is not.
+    #: Kept while there is room. Dropped without ceremony when there is not.
     USEFUL = "useful"
     #: The first thing to go.
     DISPENSABLE = "dispensable"
@@ -528,7 +520,7 @@ class Representation:
     """One way of saying an element, and what saying it costs.
 
     Produced by the adapter that knows what the element is. The reduction picks
-    between representations; it never writes one, because writing one requires
+    between representations. It never writes one, because writing one requires
     knowing what the thing is and that is exactly the knowledge the reduction
     must not have.
     """
@@ -551,12 +543,13 @@ class Representation:
 
 
 def estimate_tokens(text: str) -> int:
-    """What saying this is expected to cost.
+    """Estimate token cost of text for budgeting.
 
-    The prompt path has counted in this estimate for as long as it has had a
-    budget, and it lives here now because `Representation.cost` is the concept it
-    serves. One definition: a second answer to "how big is this" is two numbers
-    that drift, and the platform already carries one duplicate of this constant.
+    Args:
+        text (str): Text.
+
+    Returns:
+        int: Integer token estimate.
     """
     return max(1, int(len(text) / 3.5))
 
@@ -565,9 +558,10 @@ def estimate_tokens(text: str) -> int:
 class RelevanceInputs:
     """What relevance is computed from, in the one shape it is computed from.
 
-    Every sort of knowledge answers these four questions differently — an atom
+    Every sort of knowledge answers these four questions differently. An atom
     knows when it was last mutated, a session result never mutates at all, a
-    passage was ranked by a fusion — and that difference is real. What is *not*
+    passage was ranked by a fusion. The shared scoring function takes these
+    differences as inputs. What is *not*
     real is a scoring function per sort: "session results do not mutate" is the
     input `mutation_count=0`, not a second definition of relevance.
 
@@ -576,7 +570,7 @@ class RelevanceInputs:
     """
 
     #: When this last changed. `None` means "no age known", which scores as
-    #: freshly relevant rather than as infinitely stale — absence of a timestamp
+    #: freshly relevant rather than as infinitely stale. Absence of a timestamp
     #: is not evidence of age.
     updated_at: datetime | None = None
     #: What this is about, for closeness to the current question.
@@ -594,9 +588,9 @@ class Presentation:
 
     Produced by the adapter, because deciding that a user fact belongs under
     "Known facts about the user" is an interpretation of what a session result
-    *is* — and that interpretation is exactly what the renderer must not make.
+    *is*. The renderer must not make that interpretation.
 
-    Deliberately two fields. It is not an ontology of prompt structure; it is the
+    Deliberately two fields. It is not an ontology of prompt structure. It is the
     smallest thing that answers "which heading, in what order", which is all a
     generic renderer needs to reproduce the prompt the special cases used to
     produce.
@@ -605,7 +599,7 @@ class Presentation:
     #: The heading this element renders under, verbatim.
     section: str
     #: Position among sections. Two elements naming one section agree on it in
-    #: practice; where they disagree the lowest wins, so ordering never depends
+    #: practice. Where they disagree the lowest wins, so ordering never depends
     #: on which element happened to be seen first.
     order: int = 0
 
@@ -614,8 +608,8 @@ class Presentation:
 class MentalElement:
     """One thing the model might be told, in whichever form survives.
 
-    The payload stays whatever it was — a `SessionResult`, a `ContextPassage`,
-    a `WorkingAtom` — and is carried rather than converted. Everything the reduction
+    The payload stays a `SessionResult`, a `ContextPassage`, or a `WorkingAtom`.
+    It is carried rather than converted. Everything the reduction
     needs is on the wrapper, so a new sort of knowledge becomes reducible by
     being adapted, never by the reduction learning about it.
     """
@@ -625,7 +619,7 @@ class MentalElement:
     #: choosing an adapter. Neither the reduction nor the renderer reads it, and
     #: the moment something branches on it, storage types are deciding again.
     #: Where an element belongs in the prompt is `presentation`, which the
-    #: adapter decides — a session result tagged `user_fact` and one without it
+    #: adapter decides. A session result tagged `user_fact` and one without it
     #: are the same `kind` and render under different headings.
     kind: str
     representations: tuple[Representation, ...]
@@ -667,12 +661,23 @@ class MentalElement:
                 )
 
     def at(self, level: Level) -> Representation | None:
-        """This element said at that level, where it can be."""
+        """Read an element representation at one level.
+
+        Args:
+            level (Level): Requested representation level.
+
+        Returns:
+            Representation | None: Representation or None.
+        """
         return next((item for item in self.representations if item.level is level), None)
 
     @property
     def levels(self) -> tuple[Level, ...]:
-        """The levels this element can be said at, fullest first."""
+        """List offered representation levels from fullest first.
+
+        Returns:
+            tuple[Level, ...]: Ordered level tuple.
+        """
         offered = {item.level for item in self.representations}
         return tuple(level for level in LEVELS if level in offered)
 
@@ -680,7 +685,7 @@ class MentalElement:
 class MentalModelCache:
     """Turn-scoped cache for the assembled MentalModel.
 
-    Orient sets it; subsequent steps read it; cleared after each turn.
+    Orient sets it. Subsequent steps read it. Cleared after each turn.
     """
 
     def __init__(self) -> None:
@@ -713,10 +718,6 @@ class MentalModelCache:
             return "MentalModelCache(empty)"
         return f"MentalModelCache(valid=True model={self._model!r})"
 
-
-# ---------------------------------------------------------------------------
-# Orient: Control signal decision
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ControlSignalDecision:

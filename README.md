@@ -1,38 +1,28 @@
 # nlght-ai
-The layer between your app and your LLM — workflows, tools, memory, any provider.
+The runtime between your app and your LLM: workflows, tools, memory, and model providers.
 
 <!-- release-badges:start -->
-[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/tests.svg)
-[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/coverage.svg)
-[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.3/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.3/.github/badges/pypi.svg)
+[![Tests](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.4/.github/badges/tests.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.4/.github/badges/tests.svg)
+[![Coverage](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.4/.github/badges/coverage.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.4/.github/badges/coverage.svg)
+[![PyPI](https://raw.githubusercontent.com/Amphidrom/nlght-ai/v0.1.4/.github/badges/pypi.svg)](https://github.com/Amphidrom/nlght-ai/blob/v0.1.4/.github/badges/pypi.svg)
 <!-- release-badges:end -->
 
 > **E2E scope note.** The test badge covers the cloud model-client e2e suite
 > (`tests/e2e`); each provider skips itself when its API key is absent. The
-> **local Ollama** model-client suite (`tests/local_e2e`) is intentionally **not
-> run in CI** — no Ollama daemon is available there — so its absence/skip is
-> expected. It is verified locally against a running `ollama serve` with
-> `pytest tests/local_e2e -m local_e2e`.
+> **local Ollama** model-client suite (`tests/local_e2e`) runs separately against
+> a local Ollama daemon. Run it with `pytest tests/local_e2e -m local_e2e`.
 
 ---
 
 ## What it does
 
-```
-Client (OpenAI / Ollama API)
-        ↓
-  Protocol Detection
-        ↓
-  Trigger Resolution
-        ↓
-  Workflow Executor  ──→  Steps  ──→  Tools / Playbooks / LLM
-        ↓
-  Signal Emitter (streaming or batch)
-        ↓
-Client Response
-```
-
-A **workflow** is a sequence of **steps**. Each step receives a context with the current messages, an LLM client, a tool catalog, a playbook catalog, and optionally a session store (Hive Mind). Steps can call the LLM, use tools, read and write session memory, and emit results back to the caller — all without touching HTTP or protocol specifics.
+1. A protocol adapter accepts an OpenAI or Ollama API request and resolves its
+   workflow trigger.
+2. The workflow executor runs the configured steps. Steps receive request
+   messages and the configured model, tool, playbook, and session ports.
+3. Steps call models or tools, use session memory, and emit signals without
+   handling HTTP.
+4. The adapter returns the result as a batch response or stream.
 
 ---
 
@@ -40,22 +30,22 @@ A **workflow** is a sequence of **steps**. Each step receives a context with the
 
 | Feature | Description |
 |---|---|
-| **OpenAI-compatible API** | Drop-in replacement endpoint — works with any OpenAI client |
+| **OpenAI-compatible API** | Chat Completions endpoint for supported OpenAI clients |
 | **Ollama API** | Native Ollama protocol support |
 | **Multi-provider** | Ollama, Anthropic Claude, OpenAI, Google Gemini |
 | **Workflow engine** | Stateless step machine with configurable routing |
 | **Tool system** | Register custom tools, call them from steps |
 | **Playbook catalog** | YAML-defined agent capabilities, loaded from filesystem |
-| **Session memory** | Hive Mind: tiered stores for directives, conversation, facts, working memory |
+| **Session memory** | Hive Mind: conversation, session results, and working memory |
 | **Session routing** | Configurable `SessionKeyResolver` per protocol adapter |
 | **PostgreSQL persistence** | Workflow metadata and resource registry via SQLAlchemy |
-| **Ports & Adapters** | Clean hexagonal architecture — core has zero framework dependencies |
+| **Ports & Adapters** | Core contracts have no framework dependency |
 
 ---
 
 ## Install
 
-Install [uv](https://docs.astral.sh/uv/), then add nlght-ai to your project:
+Install [uv](https://docs.astral.sh/uv/), then add nlght-ai inside a Python project:
 
 ```bash
 uv add nlght-ai
@@ -80,7 +70,10 @@ project environment, use `uv tool install nlght-ai` instead.
 
 ## Quickstart
 
-**1. Configure** — create `.config/platform.yaml`:
+In the configuration examples, `YOUR-LICENSE-KEY` means the key from a
+[free developer license](docs/licenses/free.mdx). Replace it with your own key.
+
+**1. Configure:** Create `.config/platform.yaml`:
 
 ```yaml
 licensing:
@@ -118,7 +111,7 @@ integrations:
         default_model: llama3.2
 ```
 
-**2. Start PostgreSQL** (matches the `url` above — for local development):
+**2. Start PostgreSQL** with the local credentials above:
 
 ```bash
 docker run -d --name nlght-postgres \
@@ -132,11 +125,19 @@ docker run -d --name nlght-postgres \
 uv run nlght-ai migrate
 ```
 
-**4. Start**:
+**4. Start Ollama and the runtime** (use separate terminals):
+
+Terminal 1:
 
 ```bash
+ollama serve
+```
+
+Terminal 2:
+
+```bash
+ollama pull llama3.2
 uv run nlght-ai serve
-# NLGHT_CONFIG=./my-config.yaml uv run nlght-ai serve
 ```
 
 **5. Call**:
@@ -153,7 +154,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 ```python
 from typing import ClassVar
+
+from nlght.core.model.messages import TrustedInstructionMessage
 from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
+
 
 class SummarizeStep(StepBase):
     TYPE: ClassVar[str] = "summarize"
@@ -161,8 +165,10 @@ class SummarizeStep(StepBase):
     async def run(self, ctx: WorkflowStepContext) -> StepResult:
         if ctx.llm is None:
             return StepResult(ctx=ctx, verdict="failed")
-        system = "Summarize the conversation in three bullet points."
-        await ctx.llm.call(messages=[{"role": "system", "content": system}] + ctx.messages)
+        instructions = TrustedInstructionMessage(
+            "Summarize the conversation in three bullet points."
+        )
+        await ctx.llm.call(messages=[instructions, *ctx.messages])
         return StepResult(ctx=ctx, verdict="done")
 ```
 
@@ -172,43 +178,13 @@ Register and wire it up in your entrypoint, then reference it in a workflow defi
 
 ## Session Memory (Hive Mind)
 
-Hive Mind gives each session four persistent stores:
+Hive Mind persists conversation turns and session results. Working memory holds transient atoms
+for the active task. Applications can store JSON-compatible values in namespaced coordinator
+slots. The store has no directive API.
 
-- **DirectiveStore** — behavioral rules, set by tools or steps
-- **ConversationStore** — turn summaries across requests
-- **SessionResultStore** — promoted, validated session facts and evaluation outcomes; never raw LLM responses (survives restarts)
-- **WorkingMemory** — transient task-scoped atoms, cleared after each task
-
-Two coordinators — `simple` (in-memory) and `filesystem` (file-backed):
-
-```yaml
-integrations:
-  persistence:
-    hive_mind:
-      provider:
-        kind: filesystem
-        config:
-          base_dir: ./.sessions
-```
-
-Use `SystemPromptBuilder` with an explicit `PromptInputPolicy` to select the session context that
-enters the prompt:
-
-```python
-from nlght.core.hive_mind.system_prompt import PromptInputPolicy, SystemPromptBuilder
-
-builder = SystemPromptBuilder()
-system = builder.build(
-    mental_model=model,
-    ego="You are a helpful assistant.",
-    input_policy=PromptInputPolicy(
-        include_directive_store=True,
-        include_conversation_store=True,
-        include_working_memory=True,
-        include_session_result_store=True,
-    ),
-)
-```
+Configure a session backend and select model context with `PromptInputPolicy`. See
+[Session Memory](docs/documentation/configuration/session-memory.mdx) for the current configuration,
+store contracts, and copyable examples.
 
 ---
 
@@ -233,12 +209,12 @@ The [Demo Showcase](docs/documentation/getting-started/showcase.mdx) introduces 
 
 nlght-ai follows a strict hexagonal (ports & adapters) architecture:
 
-- **`core/`** — domain logic, zero framework dependencies, no I/O
-- **`ports/`** — Protocol interfaces for every external concern
-- **`adapters/inbound/`** — HTTP (FastAPI), protocol detectors
-- **`adapters/outbound/`** — Model clients, persistence, tools, Hive Mind, OS runtime
-- **`application/`** — Use-case services wiring ports together
-- **`bootstrap/`** — DI container, startup, config loading
+- **`core/`**: Domain logic and framework independent types
+- **`ports/`**: Interfaces for external concerns
+- **`adapters/inbound/`**: HTTP and protocol adapters
+- **`adapters/outbound/`**: Model clients, persistence, tools, Hive Mind, and OS runtime
+- **`application/`**: Services that coordinate ports
+- **`bootstrap/`**: Container, startup, and configuration loading
 
 See the [nlght-ai documentation](https://nlght.ai/documentation/) for the full user documentation.
 
@@ -253,7 +229,7 @@ See the [nlght-ai documentation](https://nlght.ai/documentation/) for the full u
 ## Development
 
 Dependencies are pinned in `uv.lock` for a reproducible environment. With
-[`mise`](https://mise.jdx.dev) (see `mise.toml` — pins Python 3.13 and `uv`):
+[`mise`](https://mise.jdx.dev) (see `mise.toml`, which pins Python 3.13 and `uv`):
 
 ```bash
 mise install
@@ -267,5 +243,5 @@ exercise every portable runtime capability. Accelerator-specific
 `embedding-cpu` and `embedding-cuda` remain explicit machine choices.
 
 `uv sync --locked` (used in CI) fails instead of silently re-resolving if
-`pyproject.toml` and `uv.lock` have drifted apart — run `uv lock` after
+`pyproject.toml` and `uv.lock` have drifted apart. Run `uv lock` after
 changing dependencies and commit the updated lockfile.

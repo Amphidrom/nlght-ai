@@ -21,7 +21,8 @@ from nlght.core.errors.errors import (
     WorkflowExecutionError,
 )
 from nlght.core.metering.context import MeteringContext
-from nlght.core.model.messages import normalize_workflow_messages
+from nlght.core.model.messages import normalize_workflow_messages, origin_of
+from nlght.core.model.trust import ContentLedger
 from nlght.core.session import SessionAccess
 from nlght.core.signals.signal import Signal
 from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext
@@ -54,11 +55,14 @@ _DEFAULT_MAX_HOPS = 20
 
 
 def _hop_budget(workflow: WorkflowDef) -> int | None:
-    """The workflow's hop budget: its own, ours, or none at all.
+    """Resolve the maximum number of steps allowed for a workflow run.
 
-    ``None`` means unbounded — a deliberate choice a workflow may make, at the
-    price that a step which never stops routing holds its worker for as long as
-    it takes somebody to notice.
+    Args:
+        workflow (WorkflowDef): Workflow whose configured limit is resolved.
+
+    Returns:
+        int | None: Configured limit, the default limit, or ``None`` when
+        ``max_hops`` is zero. An unbounded run can hold a worker indefinitely.
     """
     configured = workflow.max_hops
     if configured is None:
@@ -67,20 +71,28 @@ def _hop_budget(workflow: WorkflowDef) -> int | None:
 
 
 def _budget_message(workflow: str, step: WorkflowStepDef | None, budget: int) -> str:
-    """Say what ran out, where, and what to do about it."""
+    """Describe an exhausted workflow step budget and its remedies.
+
+    Args:
+        workflow (str): Name of the workflow that stopped.
+        step (WorkflowStepDef | None): Step reached when the limit was hit.
+        budget (int): Maximum number of steps allowed.
+
+    Returns:
+        str: Error message naming the limit, location, and configuration options.
+    """
     where = f"step '{step.name}'" if step is not None else "an unknown step"
     return (
         f"Workflow '{workflow}' stopped at {where} after {budget} steps. Either its verdicts "
-        f"route in a cycle, or it legitimately needs more than {budget} — a step that repeats "
+        f"route in a cycle, or it legitimately needs more than {budget}. A step that repeats "
         f"itself once per document spends one on each. Raise the workflow's max_hops if the work "
         f"is real; set it to 0 to remove the guard entirely."
     )
 
 
 class StepMachineWorkflowExecutor(WorkflowExecutor):
-    """Implements WorkflowExecutor — drives the step machine loop.
+    """Drive the workflow version's step machine loop.
 
-    Drives the step machine loop defined by the workflow version's steps.
     Step types are resolved via the injected StepLoader.
 
     For non-streaming requests the executor uses a BufferingSignalEmitter and
@@ -88,7 +100,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
 
     For streaming requests the executor uses a QueuedSignalEmitter and runs the
     step machine as a concurrent asyncio Task, yielding SSE-encoded signals as
-    they arrive — without waiting for the machine to finish first.
+    they arrive without waiting for the machine to finish first.
     """
 
     def __init__(
@@ -124,7 +136,17 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             return cid in self._active_runs
 
     def _try_register(self, cid: str) -> bool:
-        """Atomically mark cid as running. Returns False if already running."""
+        """Register a correlation ID unless its workflow is already running.
+
+        Args:
+            cid (str): Correlation ID for the workflow run.
+
+        Returns:
+            bool: ``True`` if registered, or ``False`` if already active.
+
+        Side Effects:
+            Adds a new ID to the active-run set under its lock.
+        """
         with self._active_runs_lock:
             if cid in self._active_runs:
                 return False
@@ -135,9 +157,6 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         with self._active_runs_lock:
             self._active_runs.discard(cid)
 
-    # ------------------------------------------------------------------
-    # WorkflowExecutor port
-    # ------------------------------------------------------------------
 
     async def execute(self, invocation: WorkflowInvocation) -> dict[str, Any]:
         cid = invocation.trigger.context.correlation_id
@@ -189,9 +208,6 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         finally:
             await task
 
-    # ------------------------------------------------------------------
-    # Step machine
-    # ------------------------------------------------------------------
     def _provision_os_runtime(self, cid: str) -> OsRuntime | None:
         if self._os_runtime_factory is None:
             return None
@@ -202,7 +218,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             return None, False
         session_key = trigger.session_key
         if session_key is None:
-            # No session key → ephemeral coordinator: runs in-memory, not persisted.
+            # Without a session key, keep coordinator state in memory for this run.
             return self._session_access.ephemeral(trigger.context.correlation_id), False
         principal = trigger.context.principal
         try:
@@ -214,17 +230,17 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             # store degrades into running without memory, which is a reasonable
             # answer to "the disk is full". It is not a reasonable answer to
             # "this session is not yours": continuing would serve the request
-            # anyway, just without the data — turning a refusal into a shrug.
+            # anyway without its data, silently weakening the refusal.
             raise
         except Exception as exc:
-            logger.warning("coordinator.provision_failed | error=%s — continuing without coordinator", exc)
+            logger.warning("coordinator.provision_failed | error=%s: continuing without coordinator", exc)
             return None, False
 
     def _release_coordinator(self, trigger: Trigger, coordinator: StoreCoordinator | None) -> None:
         if coordinator is None or self._session_access is None:
             return
         if trigger.session_key is None:
-            # Ephemeral — discard without saving.
+            # Discard ephemeral coordinator state after the run.
             logger.debug("coordinator.ephemeral.discard | cid=%s", trigger.context.correlation_id)
             return
         try:
@@ -271,7 +287,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         }
 
         # Stamp the resolved workflow onto the request context once, so every
-        # downstream consumer — tool catalog, model and playbook policies —
+        # downstream consumers, including tool, model, and playbook policies,
         # can restrict a subject to specific flows via a 'workflow' condition.
         trigger           = dataclasses.replace(
             invocation.trigger,
@@ -317,11 +333,26 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             if self._playbook_catalog_builder is not None
             else None
         )
+        # Raw request messages are the caller's untrusted content, attributed to
+        # the established principal. The run's ledger starts with them and is
+        # the catalog's own, so every tool decision of the run sees it (ADR-0074).
+        principal_id = caller.principal.id if caller.principal is not None else ""
+        messages = normalize_workflow_messages(payload.get("messages", []), caller=principal_id)
+        catalog_ledger = getattr(tool_catalog, "ledger", None)
+        ledger = catalog_ledger if isinstance(catalog_ledger, ContentLedger) else ContentLedger()
+        initial_origin = origin_of(messages)
+        if initial_origin.sources:
+            ledger.record(initial_origin)
+        # What session memory stores during this run is derived from what the
+        # run read, and is stamped with it.
+        bind_ledger = getattr(coordinator, "bind_ledger", None)
+        if callable(bind_ledger):
+            bind_ledger(ledger)
         ctx = WorkflowStepContext(
             correlation_id=trigger.context.correlation_id,
             trigger=trigger,
             model=str(payload.get("model", "")),
-            messages=normalize_workflow_messages(payload.get("messages", [])),
+            messages=messages,
             stream=trigger.stream,
             emitter=emitter,
             tools=tool_catalog,
@@ -332,6 +363,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             metering=self._metering_port,
             execution_id=invocation.execution_id,
             dispatcher=self._dispatcher,
+            ledger=ledger,
         )
 
         current_step_id = str(start_steps[0].step_id)
@@ -356,7 +388,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
                 if budget is not None and hops >= budget:
                     max_hops_id = type_index.get("max_hops")
                     if max_hops_id and not over_budget_once and current_step_id != max_hops_id:
-                        # Hand control to the workflow's own handler — and then
+                        # Hand control to the workflow's own handler, and then
                         # actually run it. Routing without executing is what the
                         # earlier `continue` did, which made a configured
                         # max_hops step dead weight.
@@ -488,7 +520,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
                 except Exception as exc:
                     logger.warning("workflow.runtime.release_failed | cid=%s error=%s", trigger.context.correlation_id, exc)
 
-            # Merge Turn-Branch: promoted atoms → SessionResultStore
+            # Persist promoted branch atoms in the session result store.
             if coordinator is not None:
                 try:
                     promoted = coordinator.close_branch(promote=True)
@@ -525,12 +557,26 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         workflow_name: str = "",
         step_name: str = "",
     ) -> WorkflowStepContext:
-        """Resolve and bind a ModelClient for this step into ctx.llm.
+        """Bind the selected model backend to a workflow step context.
 
-        Fetches the selected backend's TokenBudget and passes that exact object
-        to the BoundModelClient so context assembly and the hard-cap safety net
-        share one authority (ADR-0012, ADR-0055). Context-window resolution is
-        provider-specific; Ollama Local caches successful /api/show lookups.
+        Args:
+            ctx (WorkflowStepContext): Context receiving the bound client.
+            step_config (dict[str, Any]): Step-level provider and model settings.
+            workflow_name (str): Workflow name attached to metering records.
+            step_name (str): Step name attached to metering records.
+
+        Returns:
+            WorkflowStepContext: Context with its bound client, or the original
+            context when no configured provider is available.
+
+        Raises:
+            WorkflowConfigurationError: Model access is denied or its policy
+                check fails.
+
+        Notes:
+            The backend's token budget is shared with context assembly and the
+            bound client's hard cap (ADR-0012, ADR-0055). Backend budget lookup
+            failures are logged and binding continues without that budget.
         """
         payload_provider = ctx.trigger.payload.get("model_provider") if ctx.trigger.payload else None
         provider_name = step_config.get("model_provider") or payload_provider
@@ -550,7 +596,7 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
             except WorkflowConfigurationError:
                 raise
             except Exception as exc:
-                logger.warning("llm.model_policy_error | model=%s error=%s — denying", model, exc)
+                logger.warning("llm.model_policy_error | model=%s error=%s: denying", model, exc)
                 raise WorkflowConfigurationError(
                     f"Model '{model}' access policy check failed: {exc}"
                 ) from exc
@@ -585,16 +631,15 @@ class StepMachineWorkflowExecutor(WorkflowExecutor):
         return dataclasses.replace(ctx, llm=bound)
 
 
-# ------------------------------------------------------------------
-# Signal serialisation helpers
-# ------------------------------------------------------------------
-
 def _signals_to_response(signals: list[Signal]) -> dict[str, Any]:
-    """Assemble buffered signals into a response dict.
+    """Combine buffered assistant output into one response message.
 
-    Concatenates all token/result content from assistant signals into a
-    single message.  This is intentionally minimal — proper response
-    assembly will evolve with the step implementations.
+    Args:
+        signals (list[Signal]): Signals collected during the workflow run.
+
+    Returns:
+        dict[str, Any]: One assistant choice containing concatenated token and
+        result content, with a ``stop`` finish reason.
     """
     content = "".join(
         s.content for s in signals
@@ -611,7 +656,14 @@ def _signals_to_response(signals: list[Signal]) -> dict[str, Any]:
 
 
 def _signal_to_sse(signal: Signal) -> bytes:
-    """Serialise a single signal to an OpenAI-compatible SSE frame."""
+    """Encode a signal as an OpenAI-compatible SSE frame.
+
+    Args:
+        signal (Signal): Signal to send to the streaming client.
+
+    Returns:
+        bytes: A JSON delta frame, or the ``[DONE]`` terminal frame.
+    """
     if signal.kind == "done":
         return b"data: [DONE]\n\n"
     payload = {

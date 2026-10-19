@@ -16,6 +16,7 @@ from nlght.adapters.outbound.tools.builtin.action_semantics import (
     WRITE_RUNTIME,
 )
 from nlght.core.errors.errors import ToolExecutionError
+from nlght.core.model.trust import SOURCE_RUNTIME
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 if TYPE_CHECKING:
@@ -26,10 +27,15 @@ _STDERR_MAX = 4096
 
 
 def _is_binary_stdout(text: str, sample_size: int = 1024) -> bool:
-    """Return True when stdout appears to be binary data decoded with errors='replace'.
+    """Detect binary-like stdout decoded with replacement characters.
 
-    The Docker runtime decodes bytes with errors='replace', so binary data shows
-    up as a high density of U+FFFD replacement characters and control characters.
+    Args:
+        text (str): Decoded stdout to inspect.
+        sample_size (int): Maximum number of leading characters to inspect.
+
+    Returns:
+        bool: Whether replacement and control characters exceed ten percent
+        of the inspected sample.
     """
     if not text:
         return False
@@ -48,10 +54,11 @@ class ShellTool(ToolBase):
     forwarded to an LLM as a tool-call response without further processing.
 
     Configuration (optional):
-      ``default_cwd`` — working directory used when the caller omits ``cwd``.
+      ``default_cwd``: working directory used when the caller omits ``cwd``.
     """
 
     KIND: ClassVar[str]     = "shell"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_RUNTIME
     PROVIDER: ClassVar[str] = "local"
 
     @classmethod
@@ -63,7 +70,7 @@ class ShellTool(ToolBase):
                     "Execute a shell command and return exit_code, stdout, and stderr. "
                     "Large text outputs (>max_stdout_bytes) are saved to a file inside the "
                     "container and returned as stdout_saved_to + stdout_preview. "
-                    "Binary stdout (images, archives, …) is summarised as stdout_binary=true. "
+                    "Binary stdout (such as images or archives) is summarised as stdout_binary=true. "
                     "Use shell_read_chunk to read large saved outputs in parts."
                 ),
                 method_name="exec",
@@ -77,7 +84,7 @@ class ShellTool(ToolBase):
                 name="run_script",
                 description=(
                     "Write a script to a scratch file inside the container, execute it, "
-                    "and return exit_code, stdout, and stderr in one call — then the file "
+                    "and return exit_code, stdout, and stderr in one call. Then the file "
                     "is deleted. Replaces the shell_write_text + shell_exec two-step for "
                     "PoC scripts. The script inherits the container environment (including "
                     "the injected NLGHT_AUTH_* session variables), so it runs authenticated. "
@@ -167,9 +174,6 @@ class ShellTool(ToolBase):
             ),
         ]
 
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
 
     def _runtime(self) -> OsRuntime:
         if self.os_runtime is None:
@@ -184,9 +188,6 @@ class ShellTool(ToolBase):
         default = self.config.get("default_cwd")
         return str(default) if default is not None else None
 
-    # ------------------------------------------------------------------
-    # operations
-    # ------------------------------------------------------------------
 
     async def exec(self, *, command: str, cwd: str | None = None) -> str:
         runtime      = self._runtime()
@@ -194,7 +195,7 @@ class ShellTool(ToolBase):
 
         try:
             # Run through bash (not sh/dash) so the container's BASH_ENV command
-            # logger (DEBUG trap) fires — this is the "captured shell" that makes
+            # logger (DEBUG trap) fires. This captured shell makes
             # every executed command show up in the container log.
             exit_code, stdout, stderr = await runtime.exec(
                 ["bash", "-c", command], cwd=resolved_cwd,
@@ -207,11 +208,21 @@ class ShellTool(ToolBase):
     async def _format_exec_result(
         self, runtime: OsRuntime, exit_code: int, stdout: str, stderr: str,
     ) -> str:
-        """Shape an (exit_code, stdout, stderr) tuple into the JSON tool result.
+        """Serialize an execution result for shell tools.
 
-        Shared by shell_exec and run_script: binary stdout is summarised, oversized
-        text stdout is saved to a scratch file for shell_read_chunk, and stderr is
-        capped. Keeps both tools' output contract identical.
+        Args:
+            runtime (OsRuntime): Runtime used to save oversized stdout.
+            exit_code (int): Process exit status.
+            stdout (str): Decoded standard output.
+            stderr (str): Decoded standard error.
+
+        Returns:
+            str: JSON result with capped stderr, a binary summary, or a saved
+            stdout path when text exceeds the configured limit. If saving fails,
+            returns truncated stdout instead.
+
+        Side Effects:
+            Writes oversized text stdout to a scratch file for ``shell_read_chunk``.
         """
         max_bytes  = int(self.config.get("max_stdout_bytes", _DEFAULT_MAX_STDOUT_BYTES))
         stderr_out = stderr[:_STDERR_MAX] if len(stderr) > _STDERR_MAX else stderr
@@ -227,8 +238,8 @@ class ShellTool(ToolBase):
         if len(stdout) <= max_bytes:
             return json.dumps({"exit_code": exit_code, "stdout": stdout, "stderr": stderr_out})
 
-        # stdout exceeds limit — save to file inside container for chunk reading.
-        # Unique name under the shared workspace scratch dir → never collides.
+        # Save oversized stdout inside the container for chunked reads.
+        # Use a unique scratch filename to avoid collisions.
         save_path = f"/workspace/tmp/nlght/stdout_{uuid.uuid4().hex}.txt"
         try:
             await runtime.write_text(save_path, stdout)
@@ -258,7 +269,7 @@ class ShellTool(ToolBase):
 
         ext = (ext or "py").lstrip(".").lower()
         interpreter = "bash" if ext in ("sh", "bash") else "python3"
-        # Scratch lives under /workspace/tmp/nlght — same convention as http_probe.
+        # Share the /workspace/tmp/nlght scratch location with http_probe.
         script_path = f"/workspace/tmp/nlght/script_{uuid.uuid4().hex}.{ext}"
 
         try:
@@ -276,7 +287,7 @@ class ShellTool(ToolBase):
         except Exception as exc:
             raise ToolExecutionError(f"run_script exec failed: {exc}") from exc
         finally:
-            # Best-effort cleanup — scratch scripts would otherwise pile up.
+            # Remove scratch scripts when possible to prevent accumulation.
             try:
                 await runtime.delete(script_path)
             except Exception:
@@ -316,7 +327,7 @@ class ShellTool(ToolBase):
     async def write_text(self, *, content: str, path: str | None = None) -> str:
         runtime = self._runtime()
         if not path:
-            # No path given → generate a scratch path under the shared workspace dir
+            # Generate a scratch path under the shared workspace directory
             # and return it so the caller can run/read it afterwards.
             path = f"/workspace/tmp/nlght/script_{uuid.uuid4().hex}.txt"
         try:

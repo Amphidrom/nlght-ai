@@ -6,8 +6,8 @@
 `knowledge_slots.content_fingerprint` is a current state: the resolver
 overwrites it every run so its recovery rung can match a renamed heading against
 what the section says *now*. That makes it unable to answer the question a report
-has to ask — whether the section a claim stood in was actually edited between two
-pictures — because after a run the value is already that run's and the previous
+has to ask: whether the section a claim stood in was edited between two
+pictures. After a run the value is already that run's and the previous
 one is gone.
 
 So a reading is recorded per run and per slot. The two are not redundant: one is
@@ -22,7 +22,7 @@ through a claim that moved in a section nobody touched.
 
 A log of readings and not of changes. A run that found a slot unchanged still
 records that it looked, which is what distinguishes "unchanged" from "never
-observed" — and the second must not be reported as drift.
+observed". The second must not be reported as drift.
 
 Nothing is backfilled. Slots observed before this migration have no readings, and
 a comparison across that boundary falls back to the document gate rather than

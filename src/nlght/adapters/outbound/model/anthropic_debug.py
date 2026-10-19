@@ -8,7 +8,9 @@ from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nlght.adapters.outbound.model._tool_helpers import (
+    context_origin_of,
     contract_to_openai_tool,
+    execute_tool_call,
     terminal_tool_names,
 )
 from nlght.adapters.outbound.model.anthropic import _to_anthropic_wire_messages
@@ -22,13 +24,14 @@ from nlght.ports.outbound.signal_emitter import SignalEmitter
 if TYPE_CHECKING:
     from nlght.core.metering.context import MeteringContext
     from nlght.core.model.budget import TokenBudget
+    from nlght.core.tools.tool import ToolOutput
     from nlght.ports.outbound.tool_catalog import ToolCatalog
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 4096
 
-# Hardcoded context windows — Anthropic does not expose a /api/show equivalent.
+# Use fallback context windows because Anthropic exposes no /api/show equivalent.
 _CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-6": 200_000,
     "claude-sonnet-4-6": 200_000,
@@ -45,18 +48,28 @@ _DEFAULT_CONTEXT_WINDOW = 200_000
 def _split_messages(
     messages: list[dict[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
-    """Extract system messages into a single string; return remaining messages.
+    """Extract system messages into a single string, return remaining messages.
 
-    Anthropic requires ``system`` as a top-level string, not inside ``messages``.
+    Args:
+        messages (list[dict[str, Any]]): Provider-ready messages to split by role.
+
+    Returns:
+        tuple[str, list[dict[str, Any]]]: Combined system text and remaining conversation messages.
     """
     system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
     others = [m for m in messages if m.get("role") != "system"]
     return "\n\n".join(filter(None, system_parts)), others
 
 
-
 def _to_anthropic_tool(t: dict[str, Any]) -> dict[str, Any]:
-    """Convert canonical OpenAI-format tool definition to Anthropic format."""
+    """Convert canonical OpenAI-format tool definition to Anthropic format.
+
+    Args:
+        t (dict[str, Any]): Canonical OpenAI-format tool definition.
+
+    Returns:
+        dict[str, Any]: Anthropic tool definition.
+    """
     fn = t.get("function", {})
     return {
         "name": fn["name"],
@@ -66,7 +79,14 @@ def _to_anthropic_tool(t: dict[str, Any]) -> dict[str, Any]:
 
 
 def _to_anthropic_tool_choice(tool_choice: dict[str, Any] | str) -> dict[str, Any]:
-    """Convert canonical tool_choice to Anthropic format."""
+    """Convert canonical tool_choice to Anthropic format.
+
+    Args:
+        tool_choice (dict[str, Any] | str): Canonical tool-choice setting.
+
+    Returns:
+        dict[str, Any]: Anthropic tool-choice definition.
+    """
     if isinstance(tool_choice, str):
         mapping = {"auto": "auto", "none": "none", "required": "any"}
         return {"type": mapping.get(tool_choice, "auto")}
@@ -79,8 +99,11 @@ def _to_anthropic_tool_choice(tool_choice: dict[str, Any] | str) -> dict[str, An
 def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert canonical (Ollama-style) tool messages to Anthropic block format.
 
-    Pairs assistant tool_calls with the following tool result messages,
-    generating tool_use IDs positionally since Ollama /api/chat returns no IDs.
+    Args:
+        messages (list[dict[str, Any]]): Canonical tool-call and tool-result messages.
+
+    Returns:
+        list[dict[str, Any]]: Messages with Anthropic tool-use and tool-result blocks.
     """
     result: list[dict[str, Any]] = []
     _id_counter = 0
@@ -140,7 +163,7 @@ def _convert_messages_for_anthropic(messages: list[dict[str, Any]]) -> list[dict
 
 
 class AnthropicModelClient(ModelProviderBackend):
-    """Anthropic cloud model provider — one instance per configured provider.
+    """Anthropic cloud model provider with one instance per configuration.
 
     Requires ``pip install 'nlght-ai[anthropic]'``.
 
@@ -161,7 +184,11 @@ class AnthropicModelClient(ModelProviderBackend):
         self._default_model = default_model
 
     async def list_models(self) -> list[ModelInfo]:
-        """Return the statically known Anthropic Claude models."""
+        """Return the statically known Anthropic Claude models.
+
+        Returns:
+            list[ModelInfo]: Models available from this provider.
+        """
         return [ModelInfo(name=name) for name in _CONTEXT_WINDOWS]
 
     def bind(
@@ -202,9 +229,6 @@ class AnthropicModelClient(ModelProviderBackend):
         logger.info("token_budget.window | model=%s window=%d source=static", resolved, window)
         return _Budget(window, client_max_tokens=client_max_tokens)
 
-    # ------------------------------------------------------------------
-    # Internal transport
-    # ------------------------------------------------------------------
 
     async def _call(
         self,
@@ -213,8 +237,6 @@ class AnthropicModelClient(ModelProviderBackend):
         emitter: SignalEmitter,
         stream: bool,
         metering: MeteringContext | None = None,
-        *,
-        temperature: float | None = None,
     ) -> None:
         system, chat_messages = _split_messages(messages)
         logger.debug(
@@ -222,9 +244,9 @@ class AnthropicModelClient(ModelProviderBackend):
             model, stream, len(chat_messages),
         )
         if stream:
-            await self._stream(chat_messages, model, system, emitter, metering=metering, temperature=temperature)
+            await self._stream(chat_messages, model, system, emitter, metering=metering)
         else:
-            await self._complete(chat_messages, model, system, emitter, metering=metering, temperature=temperature)
+            await self._complete(chat_messages, model, system, emitter, metering=metering)
 
     async def _complete(
         self,
@@ -233,8 +255,6 @@ class AnthropicModelClient(ModelProviderBackend):
         system: str,
         emitter: SignalEmitter,
         metering: MeteringContext | None = None,
-        *,
-        temperature: float | None = None,
     ) -> None:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -243,8 +263,6 @@ class AnthropicModelClient(ModelProviderBackend):
         }
         if system:
             kwargs["system"] = system
-        if temperature is not None:
-            kwargs["temperature"] = temperature
         response = await self._client.messages.create(**kwargs)
         try:
             content = response.content[0].text or ""
@@ -275,11 +293,9 @@ class AnthropicModelClient(ModelProviderBackend):
         system: str,
         emitter: SignalEmitter,
         metering: MeteringContext | None = None,
-        *,
-        temperature: float | None = None,
     ) -> None:
         input_t = output_t = 0
-        async for event in self._stream_events(messages, model, system, temperature=temperature):
+        async for event in self._stream_events(messages, model, system):
             if event.kind == "usage":
                 if event.raw:
                     input_t = event.raw.get("input_tokens", 0) or 0
@@ -308,8 +324,6 @@ class AnthropicModelClient(ModelProviderBackend):
         system: str,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | None = None,
-        *,
-        temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -322,9 +336,6 @@ class AnthropicModelClient(ModelProviderBackend):
             kwargs["tools"] = tools
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        # ── Log input ─────────────────────────────────────────────────────────
         _last_msg = messages[-1] if messages else {}
         logger.info(
             "anthropic.stream_input | model=%s messages=%d last_role=%s last_len=%d",
@@ -358,8 +369,8 @@ class AnthropicModelClient(ModelProviderBackend):
                     _content_parts.append(text)
                     yield ModelStreamEvent(kind="token", content=text)
             try:
-                # get_final_message() is async on AsyncMessageStream — it MUST be
-                # awaited. Without the await, `final` is a coroutine, `final.usage`
+                # Await get_final_message() because AsyncMessageStream returns a coroutine.
+                # Without the await, `final` is a coroutine, `final.usage`
                 # raises AttributeError, the except swallows it, and tool_use blocks
                 # are never surfaced as tool_call events (streaming tool loop breaks).
                 final = await stream.get_final_message()
@@ -389,13 +400,9 @@ class AnthropicModelClient(ModelProviderBackend):
         yield ModelStreamEvent(kind="done")
 
 
-# ---------------------------------------------------------------------------
-# BoundAnthropicModelClient
-# ---------------------------------------------------------------------------
-
-
 class BoundAnthropicModelClient(ModelClient):
-    """Request-scoped ModelClient for Anthropic — implements the ModelClient port."""
+    """Request-scoped Anthropic client implementing the ModelClient port."""
+
 
     def __init__(
         self,
@@ -418,10 +425,15 @@ class BoundAnthropicModelClient(ModelClient):
 
     @property
     def token_budget(self) -> TokenBudget | None:
-        """The budget this client will enforce, so a prompt is built to it."""
+        """Expose the budget enforced by this model client.
+
+        Returns:
+            TokenBudget | None: A TokenBudget or None when no budget is configured.
+        """
         return self._token_budget
 
-    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+    async def call(self, messages: Sequence[MessageLike]) -> None:
+        context_origin = context_origin_of(messages)
         messages = _to_anthropic_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
@@ -430,7 +442,6 @@ class BoundAnthropicModelClient(ModelClient):
                 emitter=self._emitter,
                 stream=self._stream,
                 metering=self._metering,
-                temperature=temperature,
             )
             return
 
@@ -456,8 +467,6 @@ class BoundAnthropicModelClient(ModelClient):
                 kwargs["system"] = system
             if anthropic_tools:
                 kwargs["tools"] = anthropic_tools
-            if temperature is not None:
-                kwargs["temperature"] = temperature
 
             logger.info(
                 "anthropic.call.request | round=%d model=%s tools=%s",
@@ -495,7 +504,7 @@ class BoundAnthropicModelClient(ModelClient):
             result_blocks: list[dict[str, Any]] = []
             for b in tool_blocks:
                 tc = {"name": b.name, "input": b.input if isinstance(b.input, dict) else {}}
-                result_text = await self._tool_catalog.execute(tc)
+                result_text = await execute_tool_call(self._tool_catalog, tc, context_origin)
                 logger.info("anthropic.call.tool_call | name=%s chars=%d", b.name, len(result_text))
                 result_blocks.append({"type": "tool_result", "tool_use_id": b.id, "content": result_text})
             current_messages = current_messages + [{"role": "user", "content": result_blocks}]
@@ -523,9 +532,8 @@ class BoundAnthropicModelClient(ModelClient):
         messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
-        *,
-        temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        context_origin = context_origin_of(messages)
         messages = _to_anthropic_wire_messages(messages)
         # Derive tool definitions: explicit > catalog > none
         effective_tools = tools
@@ -545,12 +553,12 @@ class BoundAnthropicModelClient(ModelClient):
 
         input_t = output_t = 0
 
-        # Without a catalog the caller (e.g. act.py) handles tool calls itself —
+        # Without a catalog, the caller handles tool calls itself:
         # pass all events through unchanged.
         if self._tool_catalog is None:
             async for event in self._backend._stream_events(
                 current_messages, self._model, system,
-                tools=anthropic_tools, tool_choice=anthropic_tool_choice, temperature=temperature,
+                tools=anthropic_tools, tool_choice=anthropic_tool_choice,
             ):
                 if event.kind == "usage":
                     if event.raw:
@@ -574,7 +582,7 @@ class BoundAnthropicModelClient(ModelClient):
                     logger.warning("metering.record_tokens.failed | %s", exc)
             return
 
-        # With catalog: run the tool loop internally — only token/done reach the caller.
+        # With catalog: run the tool loop internally, only token/done reach the caller.
         terminal_names = terminal_tool_names(self._tool_catalog)
         for _round in range(10):
             text_parts: list[str] = []
@@ -582,7 +590,7 @@ class BoundAnthropicModelClient(ModelClient):
 
             async for event in self._backend._stream_events(
                 current_messages, self._model, system,
-                tools=anthropic_tools, tool_choice=anthropic_tool_choice, temperature=temperature,
+                tools=anthropic_tools, tool_choice=anthropic_tool_choice,
             ):
                 if event.kind == "token" and event.content:
                     text_parts.append(event.content)
@@ -599,7 +607,7 @@ class BoundAnthropicModelClient(ModelClient):
             if not tool_calls_raw:
                 break
 
-            # Append assistant turn (Anthropic format — content blocks)
+            # Keep Anthropic content blocks in the assistant turn for tool history.
             assistant_text = "".join(text_parts).strip()
             assistant_content: list[dict[str, Any]] = []
             if assistant_text:
@@ -616,7 +624,7 @@ class BoundAnthropicModelClient(ModelClient):
             # Execute tools and append results turn (Anthropic tool_result blocks)
             result_blocks: list[dict[str, Any]] = []
             for tc in tool_calls_raw:
-                result_text = await self._tool_catalog.execute(tc)
+                result_text = await execute_tool_call(self._tool_catalog, tc, context_origin)
                 logger.info("anthropic.tool_call | name=%s chars=%d", tc["name"], len(result_text))
                 result_blocks.append({
                     "type":        "tool_result",
@@ -649,7 +657,7 @@ class BoundAnthropicModelClient(ModelClient):
         self,
         messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
-        results: list[str],
+        results: Sequence[str | ToolOutput],
         assistant_text: str = "",
     ) -> list[CanonicalMessage]:
         return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

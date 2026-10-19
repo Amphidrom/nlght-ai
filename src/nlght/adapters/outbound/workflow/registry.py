@@ -10,14 +10,14 @@ from nlght.adapters.outbound.workflow.steps.passthrough import PassthroughStep
 
 step_registry: StepLoader = StepLoader()
 
-# Built-in terminal steps — always available, DB entries optional.
+# Register terminal steps even without database entries.
 # The step machine also handles "done"/"failed" as reserved verdicts directly,
 # so workflows do not need explicit done/failed nodes unless desired for clarity.
 step_registry.register(DoneStep)
 step_registry.register(FailedStep)
 step_registry.register(PassthroughStep)
 
-# Ingestion steps — a pipeline is a workflow version composed of these blocks.
+# Compose ingestion pipelines from these workflow steps.
 from nlght.adapters.outbound.workflow.steps.ingestion import (  # noqa: E402 (registration order)
     IngestionEmbedStep,
     IngestionFanOutStep,
@@ -59,7 +59,7 @@ from nlght.adapters.outbound.workflow.steps.knowledge import (  # noqa: E402 (re
     PdfParseStep,
 )
 
-# Retrieval steps — the read side of what the ingestion pipeline writes.
+# Register retrieval steps for data written by ingestion workflows.
 from nlght.adapters.outbound.workflow.steps.prompt import (  # noqa: E402 (registration order)
     PromptComposeStep,
 )
@@ -78,7 +78,7 @@ step_registry.register(KnowledgeReviewFlagStep)
 step_registry.register(KnowledgePersistStep)
 step_registry.register(KnowledgePublishStep)
 
-# Refinement chain — each is independent, so a workflow composes what it needs.
+# Keep refinement steps independent so workflows can select the needed stages.
 for _refinement in (
     KnowledgeCanonicalizeStep,
     KnowledgeValidateStep,
@@ -95,7 +95,7 @@ for _refinement in (
 ):
     step_registry.register(_refinement)
 
-# Format-aware parsers — alternatives to knowledge.parse for structured markup.
+# Select these parsers instead of knowledge.parse for structured markup.
 # knowledge.parse_auto dispatches across them by file extension.
 for _parser in (
     MarkdownParseStep,

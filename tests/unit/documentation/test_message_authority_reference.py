@@ -1,12 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The documented authority table is the security contract users read.
+"""Keep the documented message authority table aligned with canonical types.
 
-A canonical message type added without a row here would be a type whose
-provider representation nobody ever decided in public — which is the same
-failure the adapters guard against, one layer up.
-"""
+The reference must cover each type and its public composition helpers."""
 
 from __future__ import annotations
 
@@ -37,7 +34,7 @@ def test_the_reference_documents_every_canonical_message_type() -> None:
 
 
 def test_the_documented_composition_helpers_take_the_documented_arguments() -> None:
-    # The page tells a step author to call these two by name; a rename that
+    # The page tells a step author to call these two by name. A rename that
     # left the prose behind would be found by a reader, not by a test.
     assert list(inspect.signature(compose_prompt).parameters) == [
         "trusted_instructions", "context",

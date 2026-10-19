@@ -1,26 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""One thing a store returned, with its native shape intact.
-
-A retrieval hit is deliberately *not* a normalised passage. The three stores
-answer at three different sizes and they are kept that way:
-
-    lexical    a document    the whole indexed file
-    vector     a chunk       the part of a file that matched
-    knowledge  an assertion  a reviewed claim
-
-Turning those into one shape here would be answering a question that belongs to
-context building — *which text do I actually give the model* — several steps too
-early, and it would do it with no view of a token budget or of what else was
-retrieved. So search says "these three systems found these things", and nothing
-more.
-
-`raw_score` is carried and never compared across stores. BM25 lands near 7,
-cosine below 1, and a confidence is a probability; the numbers are not on one
-scale and no amount of normalisation makes them one. What *is* comparable is
-`source_rank`: this store put this hit above that one. Fusion works on that.
-"""
+"""Represent store-native retrieval hits and their provenance."""
 
 from __future__ import annotations
 
@@ -28,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from nlght.core.knowledge.knowledge import SupportingEvidence
+from nlght.core.model.trust import UNANNOTATED, ContentOrigin
 
 #: Which system answered.
 LEXICAL = "lexical"
@@ -52,7 +34,7 @@ class Provenance:
     """Where a hit came from, completely enough to cite it and to relate it.
 
     `document_id` is present on a chunk as well as on a document, which is what
-    later lets context building see that they belong together — *see*, not
+    later lets context building see that they belong together. It does not
     merge. Two hits sharing a document are related, and relatedness is not
     identity: a document, a chunk of it and an assertion read out of it are
     three findings about one file, and collapsing them here would throw away the
@@ -62,19 +44,18 @@ class Provenance:
     document_id: str = ""
     chunk_id: str = ""
     assertion_id: str = ""
-    #: The source's own fassung of the document — what the source called this
-    #: version of it. Provenance for a citation, and the thing that does *not*
+    #: Keep the source's revision ID for citation. It does *not*
     #: change when only the pipeline changes.
     source_revision_id: str = ""
-    #: The processed fassung: source content plus the classifier, enricher and
-    #: chunking that produced this text. Chunk offsets index it, and it is what
-    #: the currency check compares against the published revision.
+    #: Keep the processed revision separate from the source revision because
+    #: enrichment and chunking can change without source edits. Chunk offsets
+    #: and the currency check use this processed revision.
     processing_revision_id: str = ""
     #: The state of a claim, which is not a document revision at all (ADR-0051).
     #: Only an assertion has one.
     knowledge_revision_id: str = ""
     #: Where a chunk sits in its document's processed text. `end_offset` is
-    #: exclusive, so `content[start_offset:end_offset]` is the span — and that
+    #: exclusive, so `content[start_offset:end_offset]` is the span. That
     #: is how a chunk is answered: cut from the stored revision, never taken
     #: from the payload's copy of it (ADR-0062).
     #:
@@ -86,32 +67,20 @@ class Provenance:
     path: str = ""
     source_name: str = ""
     external_id: str = ""
-    #: Where a claim was observed — and only a claim has this.
-    #:
-    #: A document and a chunk *are* their document, so the fields above say
-    #: everything there is to say about where they came from. An assertion is
-    #: not in a document: it is supported by however many sightings the corpus
-    #: holds, and a second document asserting it is what keeps it alive when the
-    #: first stops (ADR-0044). Writing one of them into `document_id` would make
-    #: whichever source was read first look like the claim's home, which is the
-    #: one thing this must not do — so it is a list, and `document_id` stays
-    #: empty for an assertion.
+    #: Keep all current claim supports rather than assigning one document as a
+    #: claim's home. A second document can keep the claim alive when the first
+    #: retracts it. Assertion `document_id` therefore stays empty (ADR-0044).
     support: tuple[SupportingEvidence, ...] = ()
+    #: The source this finding came from and whether the store's operator
+    #: trusts it (ADR-0074). Unset is unannotated, and unannotated is untrusted.
+    origin: ContentOrigin = UNANNOTATED
 
     @property
     def state_revision(self) -> str:
-        """Which state this finding is on, whatever kind of thing it is.
+        """Resolve the revision that identifies this finding's state.
 
-        A derivation, not a fourth field, and it exists for exactly one question:
-        two findings are the same finding only if they are on the same state. A
-        document and a chunk are on a processing revision; a claim is on a
-        knowledge revision; the two are not comparable and never share a value.
-
-        The stored fields keep one meaning each — that is the whole point of
-        splitting them — and this reads whichever of them the carrier actually
-        has. Answering by carrier at each call site instead would put carrier
-        knowledge in every consumer and give the same answer until one of them
-        drifted.
+        Returns:
+            str: Processing revision when present, otherwise knowledge revision.
         """
         return self.processing_revision_id or self.knowledge_revision_id
 
@@ -124,7 +93,7 @@ class RetrievalHit:
     carrier: str
     #: Identity *within its carrier space*. A chunk id and a document id may
     #: coincide as strings and still be different things, so nothing keys on
-    #: this alone — `key` is what identifies a hit.
+    #: this alone. Use `key` to identify a hit.
     carrier_id: str
     content: str
     provenance: Provenance = field(default_factory=Provenance)
@@ -144,12 +113,10 @@ class RetrievalHit:
 
     @property
     def key(self) -> tuple[str, str]:
-        """What makes this hit *this* hit, across every store.
+        """Identify a hit across stores without collapsing carriers.
 
-        The carrier and its id together. Two stores returning the same chunk are
-        one finding seen twice — that is evidence, and fusion counts it. A
-        document and a chunk of it are two findings, and no shared
-        `document_id` makes them one.
+        Returns:
+            tuple[str, str]: Carrier-and-ID identity pair.
         """
         return (self.carrier, self.carrier_id)
 
@@ -158,18 +125,21 @@ class RetrievalHit:
 
 
 def as_fields(metadata: Mapping[str, object]) -> dict[str, tuple[str, ...]]:
-    """A store's metadata as terms, dropping what has none.
+    """Extract textual search terms from store metadata.
 
-    Numbers, timestamps and nested objects are not terms, and stringifying them
-    would put a revision id into the same space as a symbol name.
+    Args:
+        metadata (Mapping[str, object]): Mapping of arbitrary metadata values.
+
+    Returns:
+        dict[str, tuple[str, ...]]: Nonempty strings and textual sequence members keyed by field.
     """
     fields: dict[str, tuple[str, ...]] = {}
     for name, value in metadata.items():
         if isinstance(value, str):
             if value.strip():
                 fields[name] = (value,)
-        elif isinstance(value, Sequence):
-            terms = tuple(str(item) for item in value if str(item).strip())
+        elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            terms = tuple(item for item in value if isinstance(item, str) and item.strip())
             if terms:
                 fields[name] = terms
     return fields

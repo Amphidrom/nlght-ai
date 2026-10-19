@@ -1,29 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""A Confluence page, from acquisition to knowledge units.
+"""Keep Confluence source markup available to knowledge parsers.
 
-It produced none. The source stripped the markup at acquisition and stored the
-result under a path still ending `.html`, so `knowledge.parse_auto` handed
-tagless text to `parse_html`, which looks for `h1`, `p` and `li` elements in a
-string that no longer has any. Silent: no error, no warning, an empty funnel that
-reads like a page with nothing to say.
-
-Three representations of one document, and conflating any two of them is what
-caused it:
-
-    source form     the markup as the source holds it — what a parser needs
-    search text     markup removed — what the index holds
-    model input     derived from the source form
-
-The search text is deliberately **not** changed here. A filesystem `.html` file
-is indexed with its tags today, and making both strip is a second, independent
-decision about what an index contains — one that requires a reindex. This slice
-only stops throwing the source form away.
-
-The second assertion below matters as much as the first. A heading's `id` is a
-stable anchor, and it is what slot identity will resolve against; a fix that
-recovered the units and dropped the ids would have to be done again.
+Acquisition retains the source form while search text remains a separate
+representation. Parsing uses the source form to preserve document structure.
 """
 
 from __future__ import annotations
@@ -55,7 +36,7 @@ class _Transport:
     def __init__(self, responses: list[ConfluenceResponse]) -> None:
         self._responses = list(responses)
 
-    async def search(self, *, base_url, params, authorization, timeout_seconds):  # noqa: ANN001, ANN003, ANN201
+    async def search(self, *, base_url, params, authorization, timeout_seconds):
         return self._responses.pop(0)
 
 
@@ -132,12 +113,7 @@ async def test_a_heading_id_reaches_the_unit_that_needs_it() -> None:
 
 
 async def test_the_search_text_is_left_exactly_as_it_was() -> None:
-    """Untouched on purpose, and the reason this slice stays small.
-
-    What an index contains is a separate decision — a filesystem `.html` file is
-    indexed with its tags today, and changing both would need a reindex. Here the
-    source form is kept *beside* the search text, not instead of it.
-    """
+    """Keep search text unchanged while retaining the source form separately."""
     snapshot = await _source().acquire()
     document = snapshot.documents[0]
 

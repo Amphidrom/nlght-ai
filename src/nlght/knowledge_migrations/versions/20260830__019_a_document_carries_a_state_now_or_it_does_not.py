@@ -5,32 +5,33 @@
 
 `knowledge_evidence` is append-only and answers "was observed here". That is the
 right shape for an audit and the wrong one for a citation. A document that has
-since removed a sentence stays in the evidence forever — correctly, it really did
-assert it once — so an answer built from evidence sends a reader to a file that no
+since removed a sentence stays in the evidence forever because it did assert it
+once. An answer built from evidence sends a reader to a file that no
 longer says it, while the claim is perfectly alive because a second document
 still carries it.
 
 The alternatives were both worse. Deleting evidence destroys the record the whole
-diff is built on. Inferring currency from absence — "this document was read again
-later and produced nothing" — is a derivation across two tables with an edge for
+diff is built on. Inferring currency from absence ("this document was read again
+later and produced nothing") is a derivation across two tables with an edge for
 every unslotted section, and a citation resting on it would be a guess presented
 as a source.
 
-So currency gets its own small relation, replaced from what a run saw:
+Currency has a relation updated from complete observations:
 
-    complete observation of D produces revision R   → D supports R
-    complete observation of D no longer produces R  → the row goes
-                                                      the evidence stays
+- When document D produces revision R, D supports R.
+- When D no longer produces R, remove the support row.
+
+Evidence remains in both cases.
 
 **The document decides, never the slot.** A section may be renamed, split, or
 lose its heading without the document ceasing to assert anything (ADR-0044), so
 `slot_id` here is provenance and takes part in no removal. Only a complete
-observation of the document maintains this at all — a partial run cannot say what
+observation of the document maintains this at all. A partial run cannot say what
 a document currently carries, because it did not see all of it.
 
 **The revision on a row is where the state was last extracted**, not where the
 document stands now. A section the stable-slot guard protected is not re-read, so
-its row keeps the older number — the truthful answer to "where was this last seen
+its row keeps the older number, answering "where was this last seen
 to be said". The column is named `observed_document_revision` so that a citation
 cannot quietly read it as "the revision that currently carries this".
 
@@ -38,7 +39,7 @@ cannot quietly read it as "the revision that currently carries this".
 known: that is precisely the fact this table exists to record and the corpus never
 recorded it. Backfilling from evidence would assert a currency nothing proves,
 which is the error this migration is here to end. Until a document is observed in
-full again, its claims resolve with no current support — visible, and counted in
+full again, its claims resolve with no current support, visible and counted in
 `knowledge-report` as `claims_without_current_support`.
 
 `ON DELETE CASCADE` because this is a projection of a state, not a record of one:
@@ -107,7 +108,7 @@ def upgrade() -> None:
     ).scalar_one()
     if waiting:
         logger.warning(
-            "knowledge.migration.0019 | claims with no current support=%s — they "
+            "knowledge.migration.0019 | claims with no current support=%s: they "
             "resolve without a citable source until each document is observed in "
             "full again; not backfilled, because which sightings are current was "
             "never recorded",

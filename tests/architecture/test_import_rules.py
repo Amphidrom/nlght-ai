@@ -22,8 +22,8 @@ EXTENSIONS = f"{ROOT}.extensions"
 @pytest.fixture(scope="session")
 def evaluable():
     src_root = Path(__file__).resolve().parents[2] / "src"
-    # module_path must be a submodule of root_path (pytestarch contract) —
-    # passing src_root for both silently breaks absolute-import resolution
+    # pytestarch requires module_path to be a submodule of root_path.
+    # Passing src_root for both silently breaks absolute-import resolution
     # for every `from nlght.X import Y` statement, making every rule below
     # a no-op regardless of the actual code.
     return get_evaluable_architecture(str(src_root), str(src_root / "nlght"))
@@ -214,3 +214,29 @@ def test_extensions_must_not_import_application(evaluable):
         .are_sub_modules_of(EXTENSIONS)
         .assert_applies(evaluable)
     )
+
+@pytest.mark.architecture
+def test_no_tool_implementation_reaches_the_resource_table(evaluable):
+    """A store's `trusted_sources` is operator configuration (ADR-0074).
+
+    It lives on the resource row, so nothing a model can call may be able to
+    write that row: no built-in tool and no store imports the persistence layer
+    that holds it. The resource port itself is read-only.
+    """
+    for package in (f"{ADAPTERS}.outbound.tools.builtin", f"{ADAPTERS}.outbound.stores"):
+        (
+            Rule()
+            .modules_that()
+            .are_named(f"{ADAPTERS}.outbound.persistence.models")
+            .should_not()
+            .be_imported_by_modules_that()
+            .are_sub_modules_of(package)
+            .assert_applies(evaluable)
+        )
+
+
+def test_the_resource_port_cannot_write():
+    from nlght.ports.outbound.resource_repository import ResourceRepository
+
+    methods = {name for name in vars(ResourceRepository) if not name.startswith("_")}
+    assert methods <= {"find_by_id", "find_by_kind", "list_enabled"}

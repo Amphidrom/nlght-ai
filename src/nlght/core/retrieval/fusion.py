@@ -1,40 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Combining rankings from systems whose scores mean different things.
-
-The contract, and everything here follows from it:
-
-    a store decides local relevance
-    retrieval fuses rankings
-    retrieval never reads store scores as a shared unit
-
-BM25 lands near 7, cosine below 1, a confidence is a probability. Weighting
-those raw numbers lets one store shout over another for no reason but its scale
-— which a first attempt here did, and a document carrying none of the question
-outranked an assertion that carried it, purely on BM25 magnitude.
-
-Normalising per store does not fix it either, and that is the subtler trap. Over
-
-    store A   7.1, 7.0, 6.9      three near-identical results
-    store B   0.81, 0.42, 0.10   one good result and two poor ones
-
-min-max gives both a 1.0 at the top and a 0.0 at the bottom, inventing a spread
-where there was none and flattening one where there was. The shape of a store's
-score distribution is not information about the question.
-
-So only **position** is fused, by reciprocal rank:
-
-    fused(hit) = Σ  weight(source) / (k + rank_in_that_source)
-
-`k` damps the top: without it the first place is worth twice the second and
-nothing below fourth matters. It is the one tuning knob, and it is configuration.
-
-What this buys is stated as invariants and tested as such: scaling or shifting a
-store's scores changes nothing; a store returning a long tail of poor results
-cannot outvote a store returning three good ones; a hit found by two systems is
-strengthened by the second; and the order is deterministic.
-"""
+"""Fuse store rankings without comparing incompatible score scales."""
 
 from __future__ import annotations
 
@@ -75,13 +42,16 @@ class FusionWeights:
 
     @classmethod
     def from_config(cls, config: Mapping[str, object] | None) -> FusionWeights:
-        """Read weights from step configuration, per store and falling back.
+        """Resolve per-store weights and rank damping from configuration.
 
-        Naming one store replaces that store's weight and leaves the others, so
-        raising `knowledge` does not silently mute `lexical`. A weight of zero
-        means the store contributes nothing to the ranking, which is a thing an
-        operator may legitimately want and is not the same as not searching it —
-        its hits still arrive, with their provenance, and can still be shown.
+        Args:
+            config (Mapping[str, object] | None): Optional configuration mapping.
+
+        Returns:
+            FusionWeights: Fusion weights with defaults for unspecified stores.
+
+        Side Effects:
+            None. Invalid stores or damping raise ValueError.
         """
         if not config:
             return cls()
@@ -115,7 +85,7 @@ class FusedHit:
 
     The hits are kept whole rather than summarised. A finding that two systems
     made is two hits with two provenances, and context building later needs both
-    — the chunk's text and the document's fields are not interchangeable.
+    because the chunk's text and the document's fields are not interchangeable.
     """
 
     key: tuple[str, str]
@@ -124,7 +94,11 @@ class FusedHit:
 
     @property
     def best(self) -> RetrievalHit:
-        """The hit its own store ranked highest, which is the one to show."""
+        """Select the highest-ranked source hit for display.
+
+        Returns:
+            RetrievalHit: Hit with the lowest source rank and source-name tie-breaker.
+        """
         return min(self.hits, key=lambda hit: (hit.source_rank, hit.source))
 
     @property
@@ -136,19 +110,23 @@ class FusedHit:
         return self.key[0]
 
     @property
-    def contributions(self) -> Mapping[str, float]:
-        """What each store contributed, so a ranking can be read rather than trusted."""
+    def contributions(self) -> Mapping[str, int]:
+        """Expose source ranks behind a fused finding.
+
+        Returns:
+            Mapping[str, int]: Source names mapped to their source ranks.
+        """
         return {hit.source: hit.source_rank for hit in self.hits}
 
 
 def rank_within_sources(hits: Sequence[RetrievalHit]) -> list[RetrievalHit]:
-    """Fill in `source_rank` from the order each store answered in.
+    """Assign ranks within each source and discard duplicate carriers.
 
-    A store's own ordering *is* its ranking, so a caller that preserved the
-    order does not have to count. Where a store returned one carrier twice, the
-    better-ranked appearance is the one kept: counting it twice would let a
-    store vote for the same thing repeatedly, which is the one way a single
-    store could outweigh the others without saying anything more.
+    Args:
+        hits (Sequence[RetrievalHit]): Source hits in each store's returned order.
+
+    Returns:
+        list[RetrievalHit]: Hits with one-based source ranks and first duplicate retained.
     """
     ranked: list[RetrievalHit] = []
     positions: dict[str, int] = {}
@@ -168,12 +146,17 @@ def fuse(
     *,
     weights: FusionWeights | None = None,
 ) -> list[FusedHit]:
-    """Rank findings across stores by position, never by score.
+    """Combine ranked findings through reciprocal rank fusion.
 
-    Ordering is total and deterministic: the fused score, then the best rank any
-    store gave it, then the carrier and its id. Two runs over the same input
-    produce the same list, which is what makes a golden ranking test meaningful
-    at all.
+    Args:
+        hits (Sequence[RetrievalHit]): Ranked findings from the retrieval sources.
+        weights (FusionWeights | None): Optional source weights and damping settings.
+
+    Returns:
+        list[FusedHit]: Deterministically ordered fused hits with one vote per source.
+
+    Raises:
+        ValueError: A finding has no source rank.
     """
     scale = weights or FusionWeights()
     grouped: dict[tuple[str, str], list[RetrievalHit]] = {}
@@ -189,7 +172,7 @@ def fuse(
     fused: list[FusedHit] = []
     for key, found in grouped.items():
         # One store contributing the same carrier twice would be one store
-        # voting twice. `rank_within_sources` drops the duplicate; this keeps
+        # voting twice. `rank_within_sources` drops the duplicate. This keeps
         # the guarantee even for a caller that ranked its hits itself.
         by_source: dict[str, RetrievalHit] = {}
         for hit in found:

@@ -18,7 +18,7 @@ class _BoundClient:
         self._emitter = emitter
         self._outputs = outputs
 
-    async def call(self, messages, *, temperature: float | None = None):
+    async def call(self, messages):
         for output in self._outputs:
             await self._emitter.emit(Signal(role="assistant", content=output, kind="result"))
 

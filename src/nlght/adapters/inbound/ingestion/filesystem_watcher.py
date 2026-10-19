@@ -4,8 +4,8 @@
 """A source that runs a workflow when its documents change.
 
 An ``InboundAdapter``, which is the port that already exists for exactly this:
-"non-HTTP trigger sources — polling loops, message queues, cron schedulers". It
-receives the executor and the workflow repository on ``start()`` and drives an
+"non-HTTP trigger sources such as polling loops, message queues, and cron schedulers".
+It receives the executor and workflow repository on ``start()`` and drives an
 ordinary workflow with them.
 
 What it drives is an ordinary *execution*: given a dispatcher it submits to the
@@ -45,7 +45,7 @@ class FilesystemWatcherSettings:
     """What to run, and how long to wait before running it.
 
     ``workflow`` is a workflow name like any other. The watcher decides *when*,
-    never *what happens next* — that is the workflow's business.
+    never *what happens next*. The workflow determines that.
     """
 
     workflow: str
@@ -73,7 +73,7 @@ class DebouncedFilesystemWatcher:
         # Given one, a fired watch becomes an ordinary durable execution:
         # claimable, retried, visible in the executions view, and able to fan a
         # corpus out across workers. Without one there is no queue to submit to
-        # and the run happens here — the same fallback `generic_json` makes, so
+        # and the run happens here. The `generic_json` adapter uses the same fallback, so
         # a single process with no persistence behaves as it always did.
         self._dispatcher = dispatcher
         self._event_id_factory = event_id_factory
@@ -94,7 +94,7 @@ class DebouncedFilesystemWatcher:
             return
         self._executor = executor
         self._repository = repository
-        # A first pass establishes the baseline; starting up is not a change.
+        # A first pass establishes the baseline. Starting up is not a change.
         await self.poll_once(now=time.monotonic())
         self._task = asyncio.create_task(
             self._run(), name=f"watch-{self._source.source_id}"
@@ -214,7 +214,7 @@ class DebouncedFilesystemWatcher:
             try:
                 await self.poll_once(now=time.monotonic())
             except Exception as exc:
-                # A failing poll or run must not kill the watcher; the next
+                # A failing poll or run must not kill the watcher. The next
                 # tick tries again.
                 logger.warning(
                     "watch.poll_failed | source=%s error=%s",

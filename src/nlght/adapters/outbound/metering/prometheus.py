@@ -84,7 +84,11 @@ class PrometheusMeteringAdapter(MeteringPort):
         self._registry = reg
 
     def make_asgi_app(self) -> object:
-        """Return an ASGI app that serves the /metrics scrape endpoint."""
+        """Create an ASGI application for the metrics scrape endpoint.
+
+        Returns:
+            object: ASGI application serving ``/metrics``.
+        """
         return self._prom.make_asgi_app(registry=self._registry)
 
     async def record_tokens(

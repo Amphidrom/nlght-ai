@@ -11,13 +11,13 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class MeteringPort(Protocol):
-    """Outbound port for usage metering — Prometheus-compatible metrics.
+    """Outbound port for usage metering with Prometheus-compatible metrics.
 
     All four methods are always called (even when tokens=0) so counters increment
-    on every request/step.  Implementations must be non-blocking; failures must
+    on every request/step.  Implementations must be non-blocking. Failures must
     not propagate to callers.
 
-    Absence (None) is valid — no metering is performed.
+    A missing port disables metering.
     """
 
     async def record_tokens(

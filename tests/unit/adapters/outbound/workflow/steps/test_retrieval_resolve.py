@@ -118,7 +118,7 @@ def _step(corpus: _Corpus, **config: object) -> RetrievalResolveStep:
     async def _store(caller=None) -> object:
         return corpus
 
-    step._store = _store  # type: ignore[method-assign]  # noqa: SLF001
+    step._store = _store  # type: ignore[method-assign]
     return step
 
 
@@ -209,8 +209,7 @@ async def test_the_passage_a_model_sees_is_the_corpus_text() -> None:
 
 
 async def test_nothing_resolvable_is_its_own_verdict() -> None:
-    """Found something, and the corpus cannot say what it says — not the same as
-    having found nothing, so a pipeline can notice it."""
+    """Distinguish unresolvable findings from no findings."""
     ctx = _ctx()
     ctx.metadata["retrieval.hits"] = _ranked(_chunk("c7"))
 

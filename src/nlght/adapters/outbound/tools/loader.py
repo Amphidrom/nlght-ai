@@ -16,7 +16,7 @@ class ToolLoader:
     """Registry that maps tool types onto ToolBase classes.
 
     The lookup key is ``(kind, provider)``. If no exact match is found,
-    ``(kind, "")`` is tried as a fallback — this allows backward-compatible
+    ``(kind, "")`` is tried as a fallback. This allows backward-compatible
     deployments when the DB provider value doesn't yet match the class
     PROVIDER.
 
@@ -72,13 +72,18 @@ class ToolLoader:
         return cls(name=name, config=config, **runtime_deps)
 
     def implementation_for(self, *, kind: str, provider: str = "") -> type[ToolBase] | None:
-        """The registered class a resource of this kind and provider would build.
+        """Resolve a registered tool class without instantiating it.
 
-        Read-only, and the reason it exists: a caller that wants to know what a
-        resource *offers* — its signatures are a classmethod — should not have
-        to construct one to find out, and should not have to rebuild the
-        provider fallback below to look the class up either. One place decides
-        which implementation an address resolves to.
+        Args:
+            kind (str): Registered tool kind.
+            provider (str): Provider label, with the default provider as fallback.
+
+        Returns:
+            type[ToolBase] | None: Matching class, or ``None`` if unregistered.
+
+        Notes:
+            Callers can inspect class-level signatures before opening tool
+            resources.
         """
         return self._registry.get((kind, provider)) or self._registry.get((kind, ""))
 

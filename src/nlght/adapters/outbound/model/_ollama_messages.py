@@ -24,7 +24,18 @@ from nlght.core.model.messages import (
 
 
 def to_ollama_messages(messages: Sequence[MessageLike]) -> list[dict[str, Any]]:
-    """Map every authority type to Ollama's supported chat roles."""
+    """Lower canonical messages to Ollama chat messages.
+
+    Args:
+        messages (Sequence[MessageLike]): Canonical messages in request order.
+
+    Returns:
+        list[dict[str, Any]]: Ollama wire messages with caller instructions
+        and external context represented as user data.
+
+    Raises:
+        TypeError: A canonical message type is unsupported.
+    """
 
     lowered: list[dict[str, Any]] = []
     for message in messages:

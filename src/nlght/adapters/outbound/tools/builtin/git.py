@@ -21,6 +21,7 @@ from nlght.adapters.outbound.tools.builtin.action_semantics import (
     RelativePathBinder,
 )
 from nlght.core.errors.errors import ToolExecutionError
+from nlght.core.model.trust import SOURCE_GIT
 from nlght.core.tools.tool import ToolBase, ToolParameter, ToolSignature
 
 if TYPE_CHECKING:
@@ -78,11 +79,6 @@ def _unified_diff_for_content(
     ))
 
 
-# ---------------------------------------------------------------------------
-# Parse helpers
-# ---------------------------------------------------------------------------
-
-
 def _parse_status_porcelain(raw: str) -> list[dict[str, str]]:
     entries = []
     for line in raw.splitlines():
@@ -132,24 +128,20 @@ def _parse_branches(raw: str) -> list[dict[str, Any]]:
     return branches
 
 
-# ---------------------------------------------------------------------------
-# GitTool
-# ---------------------------------------------------------------------------
-
-
 class GitTool(ToolBase):
     """Built-in tool for Git VCS operations inside an OsRuntime.
 
     Requires an OsRuntime with ``git`` available in the runtime environment.
 
     Configuration (optional):
-      ``workdir``              — default working directory for git commands (default ``/workspace``)
-      ``default_remote``       — remote name used when none is specified (default ``origin``)
-      ``default_clone_depth``  — shallow clone depth; ``None`` = full clone
-      ``commit_author``        — author override for commits (``Name <email>`` format)
+      ``workdir``: default working directory for git commands (default ``/workspace``)
+      ``default_remote``: remote name used when none is specified (default ``origin``)
+      ``default_clone_depth``: shallow clone depth (``None`` means full clone)
+      ``commit_author``: author override for commits (``Name <email>`` format)
     """
 
     KIND: ClassVar[str]     = "git"
+    UNTRUSTED_CONTENT_SOURCE: ClassVar[str] = SOURCE_GIT
     PROVIDER: ClassVar[str] = "local"
 
     def __init__(
@@ -348,9 +340,6 @@ class GitTool(ToolBase):
             ),
         ]
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _runtime(self) -> OsRuntime:
         if self.os_runtime is None:
@@ -377,9 +366,6 @@ class GitTool(ToolBase):
             raise ToolExecutionError(f"{error_msg} (exit {exit_code}): {stderr.strip()}")
         return stdout
 
-    # ------------------------------------------------------------------
-    # Operations
-    # ------------------------------------------------------------------
 
     async def clone(
         self,
@@ -664,7 +650,7 @@ class GitTool(ToolBase):
                 "changed": False,
                 "path": rel_path,
                 "patch": patch_content,
-                "output": "check_only — no subprocess",
+                "output": "check_only: no subprocess",
             })
 
         await runtime.write_text(file_path, content)

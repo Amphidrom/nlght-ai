@@ -1,12 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Internal LLM call utility for workflow steps.
-
-call_llm() captures the model response as a string without emitting to the
-user-facing SignalEmitter.  Use it for classification, reasoning, and JSON
-extraction where you need the text back rather than streamed output.
-"""
+"""Capture workflow model output without emitting it to the caller."""
 
 from __future__ import annotations
 
@@ -47,15 +42,21 @@ async def call_llm(
     ctx:         WorkflowStepContext | None = None,
     backend:     ModelProviderBackend | None = None,
     model:       str | None = None,
-    temperature: float | None = None,
 ) -> str:
-    """Return the LLM response text without emitting to the user.
+    """Capture a model response without user-facing signal emission.
 
-    Bypasses ``ctx.emitter`` by capturing output into a temporary
-    ``BufferingSignalEmitter``.
+    Args:
+        messages (list[dict[str, Any]]): Messages sent to the model.
+        ctx (WorkflowStepContext | None): Optional workflow context with a bound model client.
+        backend (ModelProviderBackend | None): Optional explicit provider backend.
+        model (str | None): Optional model name for binding.
 
-    Supply either ``ctx`` (workflow step context) or ``backend`` directly.
-    When both are supplied, ``backend`` takes precedence.
+    Returns:
+        str: Concatenated nonempty signal content.
+
+    Side Effects:
+        Binds and calls a provider backend. An explicit backend takes precedence over
+            the context binding.
     """
     if backend is None and ctx is not None:
         if ctx.llm is None:
@@ -66,12 +67,12 @@ async def call_llm(
 
     if backend is None:
         raise RuntimeError(
-            "call_llm: no LLM backend available — supply ctx= or backend="
+            "call_llm: no LLM backend available. Supply ctx= or backend="
         )
 
     capture = _BufferingCapture()
     bound = backend.bind(model=model, emitter=capture, stream=False)
-    await bound.call(messages, temperature=temperature)
+    await bound.call(messages)
 
     parts = [sig.content for sig in capture.collected() if sig.content]
     return "".join(parts)

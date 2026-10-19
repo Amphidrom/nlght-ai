@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Core workflow abstractions — step base, context, result, and workflow definition."""
+"""Workflow step and definition abstractions."""
 
 from nlght.core.workflow.llm import call_llm
 from nlght.core.workflow.step import StepBase, StepResult, WorkflowStepContext

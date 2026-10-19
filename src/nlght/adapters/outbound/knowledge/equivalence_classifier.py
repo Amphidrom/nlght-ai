@@ -9,11 +9,10 @@ One question, three answers, and a fourth state the model never gives.
     unjudged                 what happens when no answer was reached
 
 The distinction is the reason this adapter is careful rather than convenient.
-`ambiguous` means a judge looked and could not tell; `unjudged` means no judgement
-happened at all. A backend that timed out did not weigh the claims and find them
-hard — it did not weigh them. Recording that as `ambiguous` would put a
-deliberation in the trail that never took place, and the trail's whole value is
-that it reports what actually happened.
+`ambiguous` means a judge looked and could not tell. `unjudged` means no judgement
+happened at all. A backend that timed out never weighed the claims. Recording
+that as `ambiguous` would record a deliberation that never took place. The trail
+must report what actually happened.
 
 So every technical non-answer lands on `unjudged`: an unreachable backend, a
 timeout, a reply that is not one of the three words. Only a model that answered
@@ -24,8 +23,9 @@ are always asked in the same way. Otherwise one pair could get two answers
 depending on which side the caller happened to hold first, and the record would
 have no way to show it.
 
-Pinned at `temperature=0` for the reason extraction is: an answer that varied
-between runs would merge and unmerge claims nobody edited.
+Run it on a model provider configured with `temperature: 0`, for the reason
+extraction is: an answer that varied between runs would merge and unmerge claims
+nobody edited. Sampling is the provider's configuration, not this call's.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ B: {right}
 Do A and B assert the same thing about the world?
 
 "read from" is what the source actually says, word for word. The claim beside it
-says which assertion inside that sentence is being asked about — one sentence
+says which assertion inside that sentence is being asked about. One sentence
 often carries several. So A and B may quote the same sentence and still assert
 different things, and quoting the same sentence is no evidence at all that they
 are the same claim.
@@ -77,7 +77,7 @@ Answer with exactly one word:
 Answer:"""
 
 #: What the model may say, and what each means to us. `uncertain` is the only
-#: doubt a model is allowed to express; everything unrecognised is a
+#: doubt a model is allowed to express. Everything unrecognised is a
 #: non-decision rather than a doubt.
 _ANSWERS = {"yes": SAME, "no": DIFFERENT, "uncertain": AMBIGUOUS}
 
@@ -94,21 +94,22 @@ class ModelPropositionEquivalence:
         return Judge(classifier=CLASSIFIER, model=self._model, version=PROMPT_VERSION)
 
     async def classify(self, a: AssertionObservation, b: AssertionObservation) -> str:
-        """Whether these two observations are one assertion.
+        """Classify whether two observations express the same assertion.
 
-        One question and one prompt, for every kind. Four prompts would grow
-        four slightly different notions of truth, and "is this the same
-        assertion" has to mean one thing.
+        Args:
+            a (AssertionObservation): First observation to compare.
+            b (AssertionObservation): Second observation to compare.
 
-        A pair of different kinds never arrives here: `settled` answers it `no`
-        without a model, because `kind` is part of the identity namespace and the
-        answer is already known. The guard below is a programming check, not a
-        classification.
+        Returns:
+            str: The last recognized model verdict, or ``UNJUDGED`` when the
+            model fails or produces no recognized verdict.
 
-        The pair is put in a canonical order so one pair is one question however
-        the caller held it. Both sides carry their `observed_text` — what the
-        source actually says — and their representation, which says *which*
-        assertion inside that sentence is being judged.
+        Raises:
+            ValueError: The observations have different assertion kinds.
+
+        Side Effects:
+            Streams one canonical comparison prompt through the model and logs
+            model failures. Canonical ordering makes both input orders equivalent.
         """
         if a.kind != b.kind:
             raise ValueError(
@@ -130,21 +131,17 @@ class ModelPropositionEquivalence:
 
         collected: list[str] = []
         try:
-            async for event in self._llm.stream(
-                [{"role": "user", "content": prompt}], temperature=0.0
-            ):
+            async for event in self._llm.stream([{"role": "user", "content": prompt}]):
                 if event.kind == "token" and event.content:
                     collected.append(event.content)
                 elif event.kind == "done":
                     break
-        except Exception:  # noqa: BLE001 (any backend failure is a non-decision)
-            # Not doubt. Nothing weighed these claims, so nothing may be recorded
-            # as having weighed them.
+        except Exception:
+            # A model failure cannot establish an equivalence judgement.
             logger.warning("knowledge.equivalence.unavailable", exc_info=True)
             return UNJUDGED
 
-        # The last recognised word, so a model that thinks aloud before answering
-        # is read by its answer rather than by its reasoning.
+        # The last recognized verdict takes precedence over earlier reasoning.
         answer = UNJUDGED
         for word in "".join(collected).lower().replace("*", " ").split():
             candidate = word.strip(".,:;`'\"()[]")

@@ -1,11 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""A run is held to what the corpus said it should do — by value, not by count.
+"""Verify corpus expectations by claim wording and identity.
 
-The gap this closes: two snapshots say what moved, and "one revision added" is
-equally true of a threshold moving from 30 seconds to 60 and of it moving to
-6000. Only the wording separates them, so the wording is what a case asserts.
+Counts alone cannot distinguish a small threshold change from a material one.
+These tests compare the expected claim state with lineage snapshots.
 """
 
 from __future__ import annotations
@@ -46,17 +45,21 @@ def _report(*states: AssertionState, revision: str = "rev-1", **extra: object) -
     return LineageReport.from_dict(values)
 
 
-def _run(before: LineageReport, after: LineageReport, case: CaseExpectation):  # noqa: ANN201
+def _run(before: LineageReport, after: LineageReport, case: CaseExpectation):
     return check_expectations(before, after, compare(before, after), [case])
 
 
 def _raised(**overrides: object) -> tuple[AssertionState, ...]:
-    """The snapshot after the grace period was raised — one row per revision.
+    """Build a snapshot with both revisions of the raised threshold.
 
-    Both rows, because that is what `lineage_report` emits: a variant with two
-    states has two of them, and the comparison takes the deepest. A fixture with
-    only the latest would make `revisions_added` unmeasurable and quietly weaken
-    every case built on it.
+    The report emits one row per revision. Keeping both rows makes the added
+    revision observable to the comparison.
+
+    Args:
+        **overrides (object): Fields overriding the raised-threshold revision.
+
+    Returns:
+        tuple[AssertionState, ...]: Assertion states before and after the threshold change.
     """
     values: dict[str, object] = {
         "revision": 2, "review_state": "needs_review",
@@ -67,7 +70,11 @@ def _raised(**overrides: object) -> tuple[AssertionState, ...]:
 
 
 def _moved() -> tuple[LineageReport, LineageReport]:
-    """The corpus before and after the grace period was raised to 60 seconds."""
+    """The corpus before and after the grace period was raised to 60 seconds.
+
+    Returns:
+        tuple[LineageReport, LineageReport]: Lineage reports before and after the grace period change.
+    """
     return _report(_state()), _report(*_raised(), revision="rev-2")
 
 
@@ -92,10 +99,10 @@ def test_the_value_change_that_was_wanted_is_met() -> None:
 
 
 def test_a_different_value_is_caught_though_every_count_agrees() -> None:
-    """The whole point.
+    """Detect a material threshold change even when all counts match.
 
-    One revision, same assertion, approval spent — every number is what the case
-    asked for. The threshold went to 6000, and only the wording says so.
+    Only the claim wording distinguishes the unexpected value from an accepted
+    revision.
     """
     before = _report(_state())
     after = _report(
@@ -214,10 +221,6 @@ def test_the_untouched_control_is_checked_for_stillness() -> None:
     assert outcome.met, str(outcome)
 
 
-# ---------------------------------------------------------------------------
-# The file the corpus is actually held to
-# ---------------------------------------------------------------------------
-
 def test_a_misspelled_expectation_is_refused_rather_than_ignored() -> None:
     """A silently dropped key is a case that passes without checking anything."""
     with pytest.raises(ValueError, match="unknown expectation key"):
@@ -230,10 +233,13 @@ def _corpus_cases() -> tuple[CaseExpectation, ...]:
     Skipped rather than failed where the corpus is not checked out: it is test
     data and may live elsewhere, and a missing fixture is not a defect in the
     checker.
-    """
-    import pathlib  # noqa: PLC0415
 
-    import yaml  # noqa: PLC0415
+    Returns:
+        tuple[CaseExpectation, ...]: Parsed expectations from the checked-in corpus.
+    """
+    import pathlib
+
+    import yaml
 
     path = (
         pathlib.Path(__file__).resolve().parents[3]
@@ -261,12 +267,10 @@ def test_the_corpus_expectations_parse_and_say_something() -> None:
 
 @pytest.mark.external_corpus
 def test_every_claim_the_corpus_names_pins_its_kind() -> None:
-    """`kind` is part of the identity namespace, so an unpinned case is blind.
+    """Require expectations to pin each claim's kind.
 
-    A sentence classified `rule` on one pass and `decision` on the next retires
-    and recreates the claim whether or not anything about it moved, and the slot
-    gate cannot catch it — the section may genuinely have been edited at the same
-    time. Only the expectation can say which kind was meant.
+    Kind changes can retire and recreate a claim even when the wording appears
+    stable.
     """
     cases = _corpus_cases()
 
@@ -305,8 +309,8 @@ def test_a_slot_that_stopped_carrying_a_claim_is_counted() -> None:
     before = _report(_state(slot_id="s1"), _state(variant_id="v2", slot_id="s2"))
     after = _report(
         _state(slot_id="s1"),
-        # The removed section's claim: retired, and its evidence — and therefore
-        # its slot — still in the picture.
+        # The removed section's claim: retired, and its evidence, and therefore
+        # its slot and remains in the comparison.
         _state(variant_id="v2", slot_id="s2", retired=True),
         revision="rev-2",
     )
@@ -335,13 +339,12 @@ def test_a_slot_that_still_holds_something_is_not_counted_as_gone() -> None:
     assert outcome.met, str(outcome)
 
 
-# ---------------------------------------------------------------------------
 # A claim that arrives or leaves is checked against the side it has
 #
 # `new` and `gone` used to return before the value checks ran, so every
 # expectation hung on one of them was dropped without a word: a `new` claim could
-# assert `review_state: [approved, needs_review]` — a statement about a state
-# that does not exist — and the run went green. That is the failure this whole
+# assert `review_state: [approved, needs_review]`, a statement about a state
+# that does not exist, and the run went green. That is the failure this whole
 # module was written to remove, sitting inside the module itself.
 #
 # Which side each key needs follows from what it says, and nothing is paired up
@@ -349,13 +352,14 @@ def test_a_slot_that_still_holds_something_is_not_counted_as_gone() -> None:
 # claim and a new one are two halves of one change. That question is about
 # identity, and answering it here by comparing text would put a second, private
 # notion of equivalence in the test checker.
-# ---------------------------------------------------------------------------
 
 def _replaced() -> tuple[LineageReport, LineageReport]:
-    """A structural change: the old claim retires and a different one arrives.
+    """Build a snapshot where one claim retires and another appears.
 
-    What a fact's change looks like whenever the moved field takes part in the
-    entity key — and what a kind change looks like for any kind at all.
+    A changed entity key or claim kind produces this structural transition.
+
+    Returns:
+        tuple[LineageReport, LineageReport]: Lineage reports before and after claim replacement.
     """
     before = _report(_state(text="Spring Boot requires Java 17."))
     after = _report(
@@ -368,10 +372,9 @@ def _replaced() -> tuple[LineageReport, LineageReport]:
 
 
 def test_a_new_claim_cannot_assert_a_state_it_never_had() -> None:
-    """The case the user named: `new` + `review_state` must be red.
+    """Reject a review-state expectation for a newly created claim.
 
-    There is no earlier state to compare against, so the expectation asserts
-    nothing — and an expectation that cannot be evaluated is a failure.
+    A new claim has no prior state against which that expectation can be checked.
     """
     before, after = _replaced()
 
@@ -473,11 +476,9 @@ def test_a_retired_claim_cannot_assert_a_revision_pair() -> None:
 
 
 def test_the_kind_of_a_claim_that_left_is_still_checkable() -> None:
-    """A property of one state, not a comparison — so `gone` can pin it too.
+    """Check a retired claim's kind against its former state.
 
-    Reading `kind` off the current state would make it unpinnable on exactly the
-    movements where kinds drift, since a kind change retires the claim and
-    creates another.
+    Reading only the current state would hide the kind on a removed claim.
     """
     before = _report(_state(kind="rule", text="Applications must shut down gracefully."))
     after = _report(
@@ -500,10 +501,9 @@ def test_the_kind_of_a_claim_that_left_is_still_checkable() -> None:
 
 
 def test_a_loss_is_two_statements_and_both_are_checked() -> None:
-    """It was there, and it is not any more.
+    """Require both prior presence and current absence for a loss.
 
-    Absence alone let a phrase that had never been in the wording pass as
-    successfully removed — a vacuous expectation reading as a met one.
+    Absence alone must not pass for a phrase that never appeared.
     """
     before, after = _moved()
 
@@ -522,7 +522,7 @@ def test_both_halves_of_a_structural_change_are_asserted_independently() -> None
 
     outcome = _run(before, after, CaseExpectation(
         document="timeouts.adoc",
-        case="a structural change — the claim that left, and the one that came",
+        case="a structural change: the claim that left, and the one that came",
         assertions_added=1,
         assertions_retired=1,
         claims=(
@@ -536,15 +536,13 @@ def test_both_halves_of_a_structural_change_are_asserted_independently() -> None
     assert outcome.met, str(outcome)
 
 
-# ---------------------------------------------------------------------------
 # A phrase is not a claim identity
 #
 # One sentence may state several assertions, and they share their `observed_text`
 # by design (ADR-0049). A live run proved it: `Access tokens must not be logged
 # and sessions expire after one hour.` produced a `rule` and a `fact`, both with
-# that wording, and the checker reported the case as ambiguous — correctly, and
+# that wording. The checker reported the case as ambiguous, correctly but
 # uselessly, since the corpus had said which of the two each expectation meant.
-# ---------------------------------------------------------------------------
 
 def _one_sentence_two_claims() -> tuple[LineageReport, LineageReport]:
     sentence = "Access tokens must not be logged and sessions expire after one hour."
@@ -609,13 +607,10 @@ def test_a_claim_of_the_wrong_kind_says_so_rather_than_going_missing() -> None:
 
 
 def test_a_claim_named_by_wording_that_moved_is_the_checkers_problem_to_avoid() -> None:
-    """The aot case, in miniature.
+    """Require a stable phrase when naming a reworded claim.
 
-    The claim continued — one assertion, revision 1 to 2, approval carried — and
-    the checker reported it as disappeared, because the phrase naming it was in
-    the old wording and not in the new one. Nothing is inferred about which
-    claim replaced which; the expectation simply has to name the claim by
-    something that survives the edit.
+    A phrase present only in the old wording cannot identify the continued claim
+    in the new snapshot.
     """
     before = _report(_state(kind="rule", text="You have to set up the environment when building."))
     after = _report(
@@ -641,26 +636,28 @@ def test_a_claim_named_by_wording_that_moved_is_the_checkers_problem_to_avoid() 
     assert stable.met, str(stable)
 
 
-# ---------------------------------------------------------------------------
 # Reinforcement is one claim seen twice
 #
 # Two documents each holding a claim that matches a phrase is equally true of
 # duplication. A live run passed a reinforcement case that way, while the two
 # documents held two separate assertions of one sentence, because nothing asked
 # whether they were the same assertion.
-# ---------------------------------------------------------------------------
 
 DOC_B = "doc-2"
 PATH_B = "corpus/management-b.adoc"
 
 
 def _two_documents(*, shared: bool) -> LineageReport:
-    """One claim in two files — as one assertion, or as two.
+    """Build one claim observed in two documents or two separate claims.
 
-    Shared means **one row**, carried by both documents. That is what the report
-    emits: a state is one per revision, and the documents that sighted it travel
-    with it. A fixture with two rows would describe duplication whatever the ids
-    said.
+    A shared claim has one revision row with two document sightings. Two rows
+    represent duplicate assertions.
+
+    Args:
+        shared (bool): Whether both documents carry the same claim.
+
+    Returns:
+        LineageReport: Lineage report for a shared or separate claim.
     """
     sentence = "The management server uses the application's port."
     if shared:
@@ -694,11 +691,9 @@ def _support_case() -> CaseExpectation:
 
 
 def test_a_claim_two_documents_carry_is_visible_from_both() -> None:
-    """The report keeps the latest sighting, and that is not the whole truth.
+    """Expose a shared claim from each supporting document.
 
-    A claim asserted by two documents appeared under one of them, so an
-    expectation on the other reported "in no baseline claim" — which reads as the
-    model having failed to extract it, and is the opposite of what happened.
+    The latest sighting alone does not describe every current source.
     """
     report = _two_documents(shared=True)
 
@@ -727,10 +722,10 @@ def test_two_documents_carrying_one_assertion_is_reinforcement() -> None:
 
 
 def test_two_documents_carrying_their_own_assertions_is_duplication_and_says_so() -> None:
-    """The case that used to pass while not holding.
+    """Report duplicate assertions even when each document expectation passes.
 
-    Each document has a claim matching the phrase and each continued, so every
-    per-document expectation was satisfied — and there were two assertions.
+    Both documents may satisfy their local checks while the corpus still holds
+    two identities for one claim.
     """
     report = _two_documents(shared=False)
 

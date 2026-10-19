@@ -31,16 +31,16 @@ class StoreCoordinator(Protocol):
     Steps interact with session memory exclusively through this port.
     Two implementations exist:
 
-    * ``SimpleStoreCoordinator`` — in-memory, no indexing, free tier.
-    * ``HiveMindStoreCoordinator`` — full entity-indexed, scored,
-      persistent memory; requires ``[hive-mind]`` extra.
+    * ``SimpleStoreCoordinator``: in-memory with no entity indexing.
+    * ``HiveMindStoreCoordinator``: entity-indexed persistent memory.
+      Install the ``[hive-mind]`` extra for this implementation.
 
-    Absence (``None`` on ``WorkflowStepContext``) is valid — the step
+    Absence (``None`` on ``WorkflowStepContext``) is valid. The step
     machine runs without session memory.
 
     Coordinator-scoped extension state uses the generic ``get_slot`` and
-    ``set_slot`` methods. Consumers own their namespaced keys and value types;
-    persistence depends on the selected coordinator implementation.
+    ``set_slot`` methods. Consumers own their namespaced keys and value types.
+    The selected coordinator implementation controls persistence.
 
     See: ADR-0017
     """
@@ -88,15 +88,13 @@ class StoreCoordinator(Protocol):
 
     def load_artifact(self, artifact_id: str) -> ArtifactContent | None: ...
 
-    # ------------------------------------------------------------------
-    # Generic slot API — extension point for coordinator-scoped state.
+    # Consumers own namespaced slot keys and types for coordinator-scoped state.
     #
     # ``get_slot`` lazily initialises the slot via ``default_factory``
     # the first time a key is accessed. Consumers own their namespaced
     # keys and value types. Persistence is implementation-dependent:
     # the simple coordinator is process-local, while Hive Mind includes
     # JSON-serialisable values in its session snapshot.
-    # ------------------------------------------------------------------
 
     def get_slot(self, key: str, default_factory: Callable[[], T]) -> T: ...
 
@@ -119,7 +117,7 @@ class StoreCoordinator(Protocol):
 class StoreCoordinatorFactory(Protocol):
     """Factory that creates or restores a StoreCoordinator per session.
 
-    ``get_or_create`` is called before the step machine starts;
+    ``get_or_create`` is called before the step machine starts.
     ``save`` is called after the terminal step completes.
     """
 
@@ -128,25 +126,28 @@ class StoreCoordinatorFactory(Protocol):
     def get_or_create(self, session_id: str) -> StoreCoordinator: ...
 
     def owner_of(self, session_id: str) -> str | None:
-        """Which principal owns this session, if it exists and has an owner.
+        """Read ownership at the factory boundary for a session.
 
-        `None` for a session that does not exist **and** for one written before
-        ownership was recorded. The two are told apart with `exists`, because
-        they mean opposite things: the first may be created, the second may not
-        be adopted (ADR-0061).
+        Args:
+            session_id (str): Session ID.
 
-        On the factory rather than on `SessionBackend` deliberately. One factory
-        keeps its sessions in memory and never reaches a backend at all, so a
-        check placed underneath would be bypassed entirely by a cache hit —
-        which is the exact path an attacker with a session id would take.
+        Returns:
+            str | None: Owner principal ID, or None for absent or unowned sessions.
+
+        Side Effects:
+            Reads session metadata and may evict expired in-memory state.
         """
         ...
 
     def claim_ownership(self, session_id: str, owner_principal_id: str) -> None:
-        """Record who a newly created session belongs to.
+        """Assign an owner when creating a session.
 
-        Only ever called for a session being created. An existing owner is never
-        overwritten: a session changing hands is not something a request may do.
+        Args:
+            session_id (str): Session being created.
+            owner_principal_id (str): Established principal that owns the session.
+
+        Side Effects:
+            Records ownership without replacing an existing owner.
         """
         ...
 

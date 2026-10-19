@@ -1,21 +1,9 @@
 #!/usr/bin/env python
-"""Seed runnable example ingestion pipelines. Development helper, not application code.
+"""Seed example ingestion pipelines in configured development databases.
 
-Creates the resource activations and two active workflow versions needed to run
-ingestion end to end, so a pipeline can be triggered without clicking eight
-steps together in the admin UI.
-
-    uv run python seed_test_pipelines.py --docs-root /path/to/docs
-
-Idempotent: re-running replaces the seeded workflows and resources by name and
-leaves everything else in the database alone. Run the migrations first, since
-this only inserts rows:
-
-    uv run nlght-ai migrate                # platform database
-    uv run nlght-ai migrate-knowledge -x url=...   # knowledge database (separate)
-
-Backend URLs default to localhost and can be overridden by environment
-variables (QDRANT_URL, OPENSEARCH_URL, POSTGRES_URL) or the flags below.
+Replace the named workflow and resource rows after both database migrations
+have run. Leave all unrelated rows unchanged. Read backend URLs from the
+command-line flags or the documented environment variables.
 """
 
 from __future__ import annotations
@@ -43,7 +31,7 @@ from nlght.adapters.outbound.persistence.models import (
 DATA_WORKFLOW = "ingest-data"
 # Only seeded when the deployment distributes: the work flow one child runs over
 # the share of documents its trigger names. Its steps are the serial pipeline's,
-# built by the same function — a distributed deployment adds a flow in front of
+# built by the same function. A distributed deployment adds a flow in front of
 # the work, it does not duplicate the work.
 DATA_WORK_WORKFLOW = "ingest-data-document"
 KNOWLEDGE_WORKFLOW = "ingest-knowledge"
@@ -63,11 +51,13 @@ _DEFAULT_CONFIG_PATHS = (Path(".config/platform.yaml"), Path(".config/platform.y
 
 
 def _config() -> dict[str, Any]:
-    """Load platform.yaml the way the runtime does.
+    """Load the platform configuration using runtime path precedence.
 
-    NLGHT_CONFIG wins; otherwise .config/platform.yaml, then .yml — the same
-    resolution nlght-ai itself uses, so the seed cannot read a different file
-    than the runtime it is seeding for.
+    ``NLGHT_CONFIG`` wins, followed by ``.config/platform.yaml`` and
+    ``.config/platform.yml``. This keeps the seed aligned with the runtime.
+
+    Returns:
+        dict[str, Any]: Parsed platform configuration.
     """
     override = os.environ.get("NLGHT_CONFIG")
     candidates = (Path(override),) if override else _DEFAULT_CONFIG_PATHS
@@ -84,7 +74,17 @@ def _configured_url(section: str) -> str | None:
 
 
 def _database_url(explicit: str | None) -> str:
-    """Resolve PostgreSQL from the flag, the environment, or platform.yaml."""
+    """Resolve the platform PostgreSQL URL from the flag, environment, or config.
+
+    Args:
+        explicit (str | None): URL supplied with ``--database-url``.
+
+    Returns:
+        str: Platform PostgreSQL URL.
+
+    Raises:
+        SystemExit: No platform database URL is configured.
+    """
     if explicit:
         return explicit
     if os.environ.get("POSTGRES_URL"):
@@ -99,11 +99,20 @@ def _database_url(explicit: str | None) -> str:
 
 
 def _knowledge_url(args: argparse.Namespace) -> str:
-    """The knowledge database, which is separate from the platform's.
+    """Resolve the separate knowledge database URL.
 
     Not resolvable from platform.yaml: it has no entry there. Every resource
     that uses the knowledge database carries its own connection, so the seed
     must be told which one to write into these activations (ADR-0033).
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+
+    Returns:
+        str: Knowledge PostgreSQL URL.
+
+    Raises:
+        SystemExit: No knowledge database URL is configured.
     """
     if args.knowledge_url:
         return str(args.knowledge_url)
@@ -145,8 +154,14 @@ def _chain(steps: list[WorkflowStep]) -> None:
     """Wire each step to the next on DEFAULT, and route the common side verdicts.
 
     Ingestion steps report 'empty', 'skipped', 'unchanged', and 'incomplete' as
-    ordinary outcomes rather than failures, so each is routed forward too — an
+    ordinary outcomes rather than failures, so each is routed forward too. An
     unchanged source must reach the terminal step, not stall the run.
+
+    Args:
+        steps (list[WorkflowStep]): Steps to connect in order.
+
+    Side Effects:
+        Updates each step's transition map.
     """
     side_verdicts = ("empty", "skipped", "unchanged", "incomplete")
     for current, following in zip(steps, steps[1:], strict=False):
@@ -162,11 +177,19 @@ KNOWLEDGE_INCLUDE = ["**/*.md", "**/*.adoc", "**/*.txt"]
 
 
 def _source_config(docs_root: str, source_id: str, include: list[str]) -> dict[str, Any]:
-    """One source definition, shared by the acquiring run and by every child.
+    """Build the source definition shared by the parent and its children.
 
     A child acquires its own share from the same source, so both must be
-    configured to look at the same place — the trigger, not the config, is what
+    configured to look at the same place. The trigger, not the config, is what
     narrows a child to its documents.
+
+    Args:
+        docs_root (str): Root directory containing source documents.
+        source_id (str): Stable source identity.
+        include (list[str]): File patterns to include.
+
+    Returns:
+        dict[str, Any]: Filesystem source configuration.
     """
     return {
         "type": "filesystem",
@@ -177,10 +200,16 @@ def _source_config(docs_root: str, source_id: str, include: list[str]) -> dict[s
 
 
 def _document_steps(version_id: uuid.UUID) -> list[WorkflowStep]:
-    """Process, embed, and write the documents this run was given.
+    """Build the processing tail for a data ingestion workflow.
 
     The serial tail of the data pipeline, and also the whole of the child
-    workflow — the difference is only how many documents arrive.
+    workflow. The difference is only how many documents arrive.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+
+    Returns:
+        list[WorkflowStep]: Processing, embedding, and writing steps.
     """
     return [
         _step(version_id, 2, "process", "ingestion.process", {
@@ -192,11 +221,19 @@ def _document_steps(version_id: uuid.UUID) -> list[WorkflowStep]:
 
 
 def _data_steps(version_id: uuid.UUID, docs_root: str, source_id: str) -> list[WorkflowStep]:
-    """Acquire the source and index it.
+    """Build the data ingestion workflow for a source.
 
     The whole data pipeline when a deployment does not distribute, and the work
-    flow one child runs when it does — the same steps either way. A child differs
+    flow one child runs when it does. The steps are the same either way. A child differs
     only in what its trigger hands it: a share instead of the whole source.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+        docs_root (str): Root directory containing source documents.
+        source_id (str): Stable source identity.
+
+    Returns:
+        list[WorkflowStep]: Connected data ingestion steps.
     """
     acquire = _step(version_id, 1, "acquire", "ingestion.source",
                     _source_config(docs_root, source_id, DATA_INCLUDE), is_start=True)
@@ -211,11 +248,20 @@ def _data_steps(version_id: uuid.UUID, docs_root: str, source_id: str) -> list[W
 def _data_distribution_steps(
     version_id: uuid.UUID, docs_root: str, source_id: str, documents_per_child: int
 ) -> list[WorkflowStep]:
-    """Acquire the source and hand it out. Three steps, and no work of its own.
+    """Build the data distribution workflow without processing documents.
 
     This flow exists only where the deployment is distributed. It never processes
     a document: it observes the source once and submits one child execution per
     share, which is why it has no processing steps to leave unused.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+        docs_root (str): Root directory containing source documents.
+        source_id (str): Stable source identity.
+        documents_per_child (int): Document count assigned to each child.
+
+    Returns:
+        list[WorkflowStep]: Connected acquisition and fan-out steps.
     """
     acquire = _step(version_id, 1, "acquire", "ingestion.source",
                     _source_config(docs_root, source_id, DATA_INCLUDE), is_start=True)
@@ -232,10 +278,19 @@ def _data_distribution_steps(
 def _knowledge_tail(
     version_id: uuid.UUID, source_id: str, provider: str, model: str
 ) -> list[WorkflowStep]:
-    """Everything after acquisition: process, parse, extract, refine, persist.
+    """Build the knowledge processing tail after source acquisition.
 
     The serial tail of the knowledge pipeline, and also the whole of the child
-    workflow — the difference is only how many documents arrive.
+    workflow. The difference is only how many documents arrive.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+        source_id (str): Stable source identity used for tags.
+        provider (str): Model provider used for extraction.
+        model (str): Model name used for extraction.
+
+    Returns:
+        list[WorkflowStep]: Processing, extraction, review, and persistence steps.
     """
     return [
         _step(version_id, 0, "process", "ingestion.process", {"chunk_size": 4000}),
@@ -270,7 +325,7 @@ def _knowledge_tail(
         # Thresholds rather than `all`: with everything quarantined a seeded
         # corpus is invisible to retrieval until somebody reviews it by hand,
         # which makes the pipeline impossible to try out. Above 0.6 goes
-        # straight in; below it waits for a person, which is the interesting
+        # straight in. Below it waits for a person, which is the interesting
         # half to look at anyway.
         _step(version_id, 0, "review-flag", "knowledge.review_flag", {
             "policy": "thresholds", "min_confidence": 0.6,
@@ -280,7 +335,18 @@ def _knowledge_tail(
 
 
 def _positioned(steps: list[WorkflowStep], start: int) -> list[WorkflowStep]:
-    """Number a list of steps consecutively from ``start``."""
+    """Assign consecutive positions to workflow steps.
+
+    Args:
+        steps (list[WorkflowStep]): Steps whose positions are updated.
+        start (int): Position assigned to the first step.
+
+    Returns:
+        list[WorkflowStep]: The same steps with updated positions.
+
+    Side Effects:
+        Mutates each step's ``position`` field.
+    """
     for offset, step in enumerate(steps):
         step.position = start + offset
     return steps
@@ -289,10 +355,20 @@ def _positioned(steps: list[WorkflowStep], start: int) -> list[WorkflowStep]:
 def _knowledge_steps(
     version_id: uuid.UUID, docs_root: str, source_id: str, provider: str, model: str
 ) -> list[WorkflowStep]:
-    """Acquire the source and refine it into reviewed claims.
+    """Build the knowledge ingestion workflow for a source.
 
     As with data: the whole pipeline when nothing is distributed, and the work
     flow one child runs when it is.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+        docs_root (str): Root directory containing source documents.
+        source_id (str): Stable source identity.
+        provider (str): Model provider used for extraction.
+        model (str): Model name used for extraction.
+
+    Returns:
+        list[WorkflowStep]: Connected knowledge ingestion steps.
     """
     acquire = _step(version_id, 1, "acquire", "ingestion.source",
                     _source_config(docs_root, source_id, KNOWLEDGE_INCLUDE), is_start=True)
@@ -307,7 +383,17 @@ def _knowledge_steps(
 def _knowledge_distribution_steps(
     version_id: uuid.UUID, docs_root: str, source_id: str, documents_per_child: int
 ) -> list[WorkflowStep]:
-    """Acquire the source and hand it out; the knowledge work happens in children."""
+    """Build the knowledge distribution workflow that submits child work.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+        docs_root (str): Root directory containing source documents.
+        source_id (str): Stable source identity.
+        documents_per_child (int): Document count assigned to each child.
+
+    Returns:
+        list[WorkflowStep]: Connected acquisition and fan-out steps.
+    """
     acquire = _step(version_id, 1, "acquire", "ingestion.source",
                     _source_config(docs_root, source_id, KNOWLEDGE_INCLUDE), is_start=True)
     distribute = _step(version_id, 2, "distribute", "ingestion.fan_out", {
@@ -323,8 +409,15 @@ def _knowledge_distribution_steps(
 def _loop_on_more(steps: list[WorkflowStep], names: tuple[str, ...]) -> None:
     """Route each named step's ``more`` back to itself.
 
-    A batching step reports ``more`` while its documents or units remain; routing
-    it back is what finishes the set through ordinary workflow hops.
+    A batching step reports ``more`` while documents or units remain. Routing
+    it back finishes the set through ordinary workflow hops.
+
+    Args:
+        steps (list[WorkflowStep]): Steps whose transitions may be updated.
+        names (tuple[str, ...]): Names of steps that can report ``more``.
+
+    Side Effects:
+        Updates the named steps' transition maps.
     """
     for step in steps:
         if step.name in names:
@@ -332,18 +425,26 @@ def _loop_on_more(steps: list[WorkflowStep], names: tuple[str, ...]) -> None:
 
 
 def _resources(qdrant_url: str, opensearch_url: str, knowledge_url: str) -> list[Resource]:
-    """Activations for both pipelines.
+    """Build data and knowledge resource activations.
 
     The knowledge store and writer carry their own ``pg_url``: the knowledge
     graph is a separate database, and the connection belongs to the activation
     rather than to platform configuration.
+
+    Args:
+        qdrant_url (str): Qdrant endpoint for data indexing.
+        opensearch_url (str): OpenSearch endpoint for data and knowledge indexing.
+        knowledge_url (str): PostgreSQL URL for the knowledge graph.
+
+    Returns:
+        list[Resource]: Store and writer activations for both pipelines.
     """
     return [
         Resource(
             resource_id=uuid.uuid4(), name=DATA_STORE, kind="data_store",
             provider="qdrant+opensearch", enabled=True,
             config={
-                # The two indexes are discovery; the corpus says which revision
+                # The two indexes are discovery. The corpus says which revision
                 # is published and what it says, so the store reads it directly
                 # (ADR-0062).
                 "pg_url": knowledge_url,
@@ -383,7 +484,19 @@ async def _replace_workflow(
     concurrency: str = "non-blocking",
     max_hops: int | None = None,
 ) -> None:
-    """Delete a previously seeded workflow of this name, then recreate it."""
+    """Replace the named seeded workflow with an active version.
+
+    Args:
+        session (AsyncSession): Database session used for the replacement.
+        name (str): Stable workflow name.
+        steps_for (Callable[[uuid.UUID], list[WorkflowStep]]): Step builder for the new version.
+        capabilities (list[str]): Capabilities assigned to the workflow.
+        concurrency (str): Workflow concurrency policy.
+        max_hops (int | None): Maximum workflow hops, or ``None`` for the default.
+
+    Side Effects:
+        Deletes the old workflow and adds the replacement to the session.
+    """
     existing = (
         await session.execute(select(Workflow).where(Workflow.name == name))
     ).scalar_one_or_none()
@@ -417,7 +530,15 @@ async def _replace_workflow(
 
 
 async def _delete_workflows(session: AsyncSession, *names: str) -> None:
-    """Remove seeded workflows that this configuration does not use."""
+    """Remove seeded workflows unused by the selected deployment mode.
+
+    Args:
+        session (AsyncSession): Database session used for deletion.
+        *names (str): Workflow names to remove when present.
+
+    Side Effects:
+        Deletes matching workflows from the session and flushes it.
+    """
     for name in names:
         existing = (
             await session.execute(select(Workflow).where(Workflow.name == name))
@@ -428,10 +549,16 @@ async def _delete_workflows(session: AsyncSession, *names: str) -> None:
 
 
 def _knowledge_publish_steps(version_id: uuid.UUID) -> list[WorkflowStep]:
-    """Make approved knowledge findable and take back what was refused.
+    """Build the publication workflow for reviewed knowledge.
 
     One step and a terminal one. `more` routes back to itself, because a sweep
     works through the graph in bounded batches like every other batching step.
+
+    Args:
+        version_id (uuid.UUID): Workflow version that owns the steps.
+
+    Returns:
+        list[WorkflowStep]: Connected publication and terminal steps.
     """
     publish = _step(version_id, 1, "publish", "knowledge.publish",
                     {"writer": KNOWLEDGE_WRITER, "batch_size": 200}, is_start=True)
@@ -439,7 +566,7 @@ def _knowledge_publish_steps(version_id: uuid.UUID) -> list[WorkflowStep]:
     steps = [publish, done]
     _chain(steps)
     _loop_on_more(steps, ("publish",))
-    # An empty graph is not a failure; it reaches the terminal step like a sweep
+    # An empty graph is not a failure. It reaches the terminal step like a sweep
     # that published something.
     publish.transitions = {**publish.transitions, "empty": str(done.workflow_step_id)}
     return steps
@@ -460,7 +587,7 @@ async def seed(args: argparse.Namespace) -> None:
 
             # Both ingestion pipelines are blocking: a reindex must not run
             # concurrently with itself over the same corpus. In a distributed
-            # deployment that still holds — the children are siblings of the work
+            # deployment that still holds. The children are siblings of the work
             # flow, so a second corpus run waits for them.
             if args.distributed:
                 await _replace_workflow(
@@ -526,7 +653,7 @@ async def seed(args: argparse.Namespace) -> None:
 
             # Publication is orthogonal to how ingestion is spread: it reads
             # PostgreSQL and writes the index, whichever shape produced the
-            # assertions. Non-blocking, because it never conflicts with itself —
+            # assertions. Non-blocking, because it never conflicts with itself.
             # every write it makes is an upsert or a delete by identity.
             await _replace_workflow(
                 session,
@@ -543,12 +670,12 @@ async def seed(args: argparse.Namespace) -> None:
     if args.distributed:
         print(f"seeded workflows: {DATA_WORKFLOW} + {DATA_WORK_WORKFLOW}, "
               f"{KNOWLEDGE_WORKFLOW} + {KNOWLEDGE_WORK_WORKFLOW}")
-        print(f"architecture:     distributed — {DATA_WORKFLOW} and {KNOWLEDGE_WORKFLOW} acquire "
-              f"and hand out {args.documents_per_child} document(s) per child execution; "
+        print(f"architecture:     distributed: {DATA_WORKFLOW} and {KNOWLEDGE_WORKFLOW} acquire "
+              f"and hand out {args.documents_per_child} document(s) per child execution. "
               f"the work flows do the work")
     else:
         print(f"seeded workflows: {DATA_WORKFLOW}, {KNOWLEDGE_WORKFLOW}")
-        print("architecture:     single flow — each pipeline acquires and works on one worker")
+        print("architecture:     single flow: each pipeline acquires and works on one worker")
     print(f"max hops:         {'unlimited' if args.max_hops == 0 else args.max_hops} per run")
     print(f"source root:      {docs_root}")
     print(f"knowledge db:     {_knowledge_url(args)}")
@@ -566,7 +693,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--knowledge-url", default=None,
-        help="knowledge PostgreSQL URL — a separate database from the platform's",
+        help="knowledge PostgreSQL URL for a database separate from the platform's",
     )
     parser.add_argument(
         "--qdrant-url", default=os.environ.get("QDRANT_URL", "http://localhost:6333")
@@ -596,7 +723,7 @@ def main() -> int:
         help=(
             "steps one run of a seeded pipeline may take (0 = unlimited). A batching step "
             "spends one on each document or unit, so even a five-document child needs more "
-            "than the runtime default of 20 — and a whole corpus needs thousands"
+            "than the runtime default of 20. A whole corpus needs thousands"
         ),
     )
     parser.add_argument("--model-provider", default="ollama", help="provider for knowledge.extract")

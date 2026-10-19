@@ -4,14 +4,14 @@
 """The corpus stores the text it is a corpus of.
 
 `ingestion_document_revisions` recorded everything about a revision except the
-revision. Identity, path, provenance, processing verdict — and then a pointer,
+revision. It held identity, path, provenance, processing verdict, and a pointer,
 `artifact_ref`, in place of the text. The full processed text existed in exactly
 one place: the OpenSearch payload. So the search projection was the content
 store, and every read of a document's wording was a read of an index.
 
 That is the wrong way round in three ways at once. A projection is rebuilt,
 re-mapped and dropped as an operational act, and nothing about doing so is
-supposed to destroy a corpus. A projection is not addressable — a chunk's
+supposed to destroy a corpus. A projection is not addressable by a chunk's
 offsets index the processed text, and the only way to honour them was to hope
 the payload still held the same string. And a projection is not one text: a
 document lives in OpenSearch as one field while its chunks live in Qdrant as
@@ -33,7 +33,7 @@ So the text moves in beside its identity:
             = the string chunk offsets index into
 
 Nullable, with one meaning. A document that was observed and has no usable text
-— binary, or undecodable — still belongs in the snapshot, because the tombstone
+because it is binary or undecodable still belongs in the snapshot. The tombstone
 rule is "absent from a complete snapshot" and omitting it would declare it
 deleted. It has nothing to store. `NULL` says that and nothing else, which is
 why nothing is backfilled: a backfilled `NULL` would also mean "written before
@@ -44,7 +44,7 @@ no production corpus, and inventing content for a revision is the one thing a
 content authority must never do. Reindexing rebuilds them from their sources.
 
 `TEXT`, not an object store and not a large-object handle. The corpus is source
-documents; PostgreSQL holds those comfortably, and a second storage system is a
+documents. PostgreSQL holds those comfortably, and a second storage system is a
 decision to take against measured sizes rather than in advance.
 
 Revision ID: 0020
@@ -77,7 +77,7 @@ def upgrade() -> None:
     ).scalar_one()
     if waiting:
         logger.warning(
-            "ingestion.migration.0020 | revisions without stored content=%s — they "
+            "ingestion.migration.0020 | revisions without stored content=%s: they "
             "carry no authoritative text until their sources are ingested again; "
             "not backfilled, because neither the index payload nor a refetch is "
             "the text the offsets were computed on",

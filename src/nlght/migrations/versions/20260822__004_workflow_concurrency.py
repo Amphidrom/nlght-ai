@@ -46,7 +46,7 @@ def upgrade() -> None:
         ),
     )
     # The claim's concurrency check looks for a sibling of the same workflow in a
-    # LEASED/RUNNING state; index that lookup.
+    # LEASED/RUNNING state. Index that lookup.
     op.create_index(
         "workflow_executions_by_workflow_status",
         "workflow_executions",

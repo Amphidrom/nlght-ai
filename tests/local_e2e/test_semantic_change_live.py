@@ -1,11 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The seven cases, put to a real model.
+"""Check semantic-change decisions against a live local model.
 
 The unit suite proves the decision is asked for, honoured, and conservative when
 the answer is doubt. It cannot prove that a model gets `must` becoming `must not`
-right, because that is a property of the model — and the whole reason this one
+right, because that is a property of the model. This one
 judgement is delegated is that nothing in this codebase can settle it.
 
 So the same seven cases are asked here of a live one. Needs a local Ollama and is
@@ -16,7 +16,7 @@ deselected by default:
 Read a failure as a statement about the model, not about the pipeline. A model
 that cannot separate `must not` from `shall` is not usable for this, and finding
 that out costs a minute here rather than an audit later. `ambiguous` is not a
-failure — it sends the revision to review, which is the safe direction — but a
+failure because it sends the revision to review. However, a
 model that answers it to everything is doing no work.
 """
 
@@ -43,11 +43,11 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 PREFER_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2")
 
 #: The specification, verbatim, with the answer the *model* must give where the
-#: model is the one deciding. `None` marks a case settled before any call — those
+#: model is the one deciding. `None` marks a case settled before any call. Those
 #: exercise the deterministic half and say nothing about the model.
 #:
 #: Asserting the verdict rather than only the outcome is not pedantry. A dead
-#: backend answers `ambiguous`, which resolves to `normative` — so a test checking
+#: backend answers `ambiguous`, which resolves to `normative`, so a test checking
 #: only the outcome would report every `normative` case as passing while nothing
 #: was asked at all.
 #:
@@ -76,7 +76,11 @@ class _Emitter:
 
 
 def _local_model() -> str:
-    """`OLLAMA_MODEL` if it is pulled, else whatever is — as the provider suite does."""
+    """Select the preferred model or the first model pulled in Ollama.
+
+    Returns:
+        str: Name of a locally available model.
+    """
     try:
         response = httpx2.get(f"{OLLAMA_HOST}/api/tags", timeout=5.0)
         if response.status_code != 200:
@@ -86,18 +90,18 @@ def _local_model() -> str:
             for model in response.json().get("models", [])
             if not model.get("remote_model")
         ]
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         pytest.skip(f"Ollama not reachable at {OLLAMA_HOST}: {exc}")
     for name in names:
         if name == PREFER_MODEL or name.startswith(f"{PREFER_MODEL}:"):
             return name
     if not names:
-        pytest.skip(f"No model pulled in Ollama at {OLLAMA_HOST} — try `ollama pull qwen3:8b`.")
+        pytest.skip(f"No model pulled in Ollama at {OLLAMA_HOST}. Try `ollama pull qwen3:8b`.")
     return names[0]
 
 
 @pytest.fixture
-def classifier():  # noqa: ANN201
+def classifier():
     from nlght.adapters.outbound.model import OllamaClient
 
     backend = OllamaClient(
@@ -129,11 +133,9 @@ async def test_the_specification_holds_against_a_real_model(
 
 
 async def test_the_answer_does_not_move_between_two_asks(classifier) -> None:
-    """Pinned, or the corpus drifts on its own.
+    """Check that repeated classification keeps the same verdict.
 
-    An answer that varies run to run would retire and re-review claims nobody
-    edited — the same drift the extraction skip and the resolver exist to remove,
-    arriving through the mechanism added to close the last gap in them.
+    An unstable verdict would retire or reopen unchanged claims for review.
     """
     old, new = "Requests must be signed.", "Requests shall be signed."
 

@@ -3,7 +3,7 @@
 
 """A resource is at one address, and only one resource is.
 
-Every consumer resolves a resource the same way — ask for a kind, filter by
+Every consumer resolves a resource the same way: ask for a kind, filter by
 name, take the first row:
 
     found = [r for r in await repo.find_by_kind(kind) if r.name == name]
@@ -25,19 +25,19 @@ first.
 So the address becomes unique before anything is authorized by it.
 
 `provider` stays out of the constraint. It selects which registered
-implementation instantiates a resource — `(kind, provider)` is the *registry*
-key — and that is a different question from which resource this is. Including it
+implementation instantiates a resource. `(kind, provider)` is the *registry*
+key, a different question from which resource this is. Including it
 would permit two rows at one address that differ only in how they are built,
 which is exactly the ambiguity being removed.
 
 `resource_id` remains the primary key and the persistent identity. A resource
-that is renamed is the same resource; a resource at a given address may over
+that is renamed is the same resource. A resource at a given address may over
 time be a different one.
 
 No data is migrated. A deployment holding a duplicate address has a
-configuration question only its operator can answer — which of the two did you
-mean — and this migration will refuse to apply until they have answered it. That
-is the right failure: the alternative is choosing one on their behalf, silently,
+configuration question only its operator can answer: which of the two is intended?
+This migration refuses to apply until the operator resolves it. That is the
+right failure: the alternative is choosing one on their behalf, silently,
 which is the behaviour being ended.
 
 Revision ID: 0007
@@ -58,7 +58,7 @@ depends_on: str | None = None
 def upgrade() -> None:
     # `--sql` renders this migration without a database, so there is nothing to
     # ask about existing rows: offline, `execute()` returns None. Skipping the
-    # pre-flight check costs the friendly message, not the guarantee — the
+    # pre-flight check loses the friendly message but retains the guarantee. The
     # constraint below is what actually enforces uniqueness, and PostgreSQL
     # refuses to create it while duplicates exist. An operator running the
     # generated script still cannot end up with an ambiguous address.
@@ -80,7 +80,7 @@ def _refuse_duplicate_addresses() -> None:
         raise RuntimeError(
             "resources hold duplicate addresses and cannot be made unique "
             f"automatically: {listed}. Each address must identify one resource "
-            "before it can carry an access decision — rename or remove the "
+            "before it can carry an access decision. Rename or remove the "
             "extras, then run this migration again."
         )
 

@@ -22,13 +22,7 @@ from nlght.core.ingestion import (
 
 @pytest.fixture
 async def sqlite_engine():
-    """A throwaway knowledge database — ingestion state lives there, not in the
-    platform schema (ADR-0033). Overrides the shared platform fixture.
-
-    Foreign keys are switched on per connection: SQLite ignores them by default,
-    which would let a wrong cross-table insert order pass here while failing on
-    PostgreSQL, the store the code actually runs against.
-    """
+    """Create an isolated ingestion database with foreign keys enforced."""
     from sqlalchemy import event
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -141,11 +135,6 @@ async def test_snapshot_key_and_immutable_revision_reject_conflicting_reuse(sqli
         await repository.commit_snapshot(_snapshot("snapshot-2", conflicting))
 
 
-# ---------------------------------------------------------------------------
-# per-document index state (replaces copy-on-write generations)
-# ---------------------------------------------------------------------------
-
-
 def _index_write(
     name: str,
     *,
@@ -186,7 +175,7 @@ async def test_changed_content_or_enricher_is_visible_as_a_reindex_reason(sqlite
     await repository.commit_snapshot(_snapshot("snapshot-1", _revision("a")))
     await repository.record_indexed(_index_write("a"))
 
-    # Same content, newer enricher version — the stored state must move on.
+    # A newer enricher version must advance stored state even when content is unchanged.
     await repository.record_indexed(_index_write("a", enricher="enricher-2"))
     state = await repository.get_index_state(document_id="document-a", target="data:main")
     assert state is not None
@@ -227,11 +216,6 @@ async def test_index_state_identity_fields_must_not_be_empty() -> None:
             processing_revision_id="revision-a-1",
             index_generation="generation-1",
         )
-
-
-# ---------------------------------------------------------------------------
-# index generation — which incarnation of a target the state describes
-# ---------------------------------------------------------------------------
 
 
 async def test_a_target_gets_a_generation_on_first_ask(sqlite_engine) -> None:
@@ -298,16 +282,7 @@ async def test_stale_documents_are_reported_by_name(sqlite_engine) -> None:
 
 
 async def test_a_rename_tombstones_the_old_path_and_creates_the_new_one(sqlite_engine) -> None:
-    """A rename is a deletion and an addition, because identity is the path.
-
-    Nothing tells the repository that a rename happened — it sees a complete
-    snapshot in which one external id is gone and another has appeared, which is
-    indistinguishable from deleting one file and adding another. That is the
-    whole behaviour, and it is worth stating because the alternative is
-    tempting: matching on content would carry a moved file's review history and
-    its vectors across, at the price of merging two identical files into one
-    document.
-    """
+    """Treat a renamed path as one deleted and one added document."""
     repository = SqlAlchemyIngestionRepository(sqlite_engine)
     await repository.commit_snapshot(_snapshot("before-rename", _revision("readme")))
 
@@ -375,11 +350,7 @@ async def test_differing_content_under_one_revision_id_is_refused(sqlite_engine)
 
 
 async def test_a_row_written_before_the_column_existed_is_filled_in(sqlite_engine) -> None:
-    """Migration 0020 leaves old rows without content; the next run completes them.
-
-    Without this, the first re-ingest after upgrading would fail as "different
-    immutable content" — a migration turning itself into a landmine.
-    """
+    """Fill missing content on the first reingestion of a legacy row."""
     repository = SqlAlchemyIngestionRepository(sqlite_engine)
     written = _revision("a")
     await repository.commit_snapshot(_snapshot("snapshot-1", written))

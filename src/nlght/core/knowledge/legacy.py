@@ -1,35 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The kind-specific payloads, derived from the proposition.
-
-`Proposition` is the single business truth for every claim. `FactPayload`,
-`RulePayload`, `PatternPayload` and `DecisionPayload` — the rows four tables were
-built around — are produced *from* it, and only while that can be done without
-losing anything.
-
-    Proposition  --derive-->  the kind's payload
-
-Never:
-
-    Proposition  --write-->  A
-    the payload  --write-->  B
-
-Two writes can disagree, and nothing afterwards says which is right. One
-derivation cannot: if the payload exists it is what the proposition says, and if
-the proposition says more than a payload can hold there is no payload rather
-than a shortened one.
-
-That held for facts across several slices while the other three kinds built
-their payload directly — which made the payload the truth for those kinds and
-the proposition an extra. All four are projections of one thing now, and the
-tables are what they had been becoming anyway: consumer shapes, not knowledge.
-
-This module names fields on purpose, and it is the only place in core that may.
-They are the legacy payloads' shapes, named where those payloads are built — not
-privileged forms of a proposition, which is why `projection.py` still knows no
-shapes at all.
-"""
+"""Project complete claims into built-in legacy payload shapes."""
 
 from __future__ import annotations
 
@@ -52,7 +24,7 @@ from nlght.core.knowledge.projection import NotRepresentable, Represented
 LEGACY_FACT = "legacy fact payload"
 
 #: What each kind's row can hold: the fields it requires, then the ones it may
-#: also carry. A proposition with anything beyond these has no row — and not a
+#: also carry. A proposition with anything beyond these has no row, and not a
 #: shortened one, because a row that drops a field reads as a claim and is not
 #: the one that was made.
 _SHAPES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
@@ -71,12 +43,13 @@ _TYPES: dict[str, type[Any]] = {
 
 
 def required_fields(kind: str) -> tuple[str, ...]:
-    """What a kind must carry to say anything at all.
+    """List fields required by a built-in legacy payload.
 
-    Read from the same table the projection uses, so "what a rule needs" is
-    stated once. A fact is absent on purpose: what it needs is an entity key —
-    a predicate and something standing in it — which `entity_key` already
-    decides and this must not restate.
+    Args:
+        kind (str): Knowledge kind.
+
+    Returns:
+        tuple[str, ...]: Required field names.
     """
     required, _ = _SHAPES.get(kind, ((), ()))
     return required
@@ -85,7 +58,16 @@ def required_fields(kind: str) -> tuple[str, ...]:
 def project(
     kind: str, proposition: Proposition
 ) -> Represented[KnowledgePayload] | NotRepresentable:
-    """The legacy row this proposition makes, or a refusal saying why it makes none."""
+    """Project a claim without silently discarding extra fields.
+
+    Args:
+        kind (str): Knowledge kind whose legacy shape is requested.
+        proposition (Proposition): Complete structured claim to project.
+
+    Returns:
+        Represented[KnowledgePayload] | NotRepresentable: Represented payload or a
+            reason the projection would lose information.
+    """
     shape = _SHAPES.get(kind)
     if shape is None:
         return NotRepresentable(
@@ -123,7 +105,7 @@ def project(
     try:
         return Represented(_TYPES[kind](**values))
     except ValueError as exc:
-        # The payload's own validation — a rule carrying half its canonical pair,
+        # Preserve the payload's validation failure, such as a rule carrying half its canonical pair,
         # for instance. Its refusal is the answer to "is a row possible", not an
         # error to raise past a caller that asked exactly that.
         return NotRepresentable(
@@ -134,7 +116,15 @@ def project(
 
 
 def legacy_payload(kind: str, proposition: Proposition) -> KnowledgePayload | None:
-    """The row, or nothing where the projection would lose something."""
+    """Return a lossless legacy payload when one fits.
+
+    Args:
+        kind (str): Knowledge kind whose legacy shape is requested.
+        proposition (Proposition): Complete structured claim to project.
+
+    Returns:
+        KnowledgePayload | None: Lossless legacy payload, or None when no such projection exists.
+    """
     derived = project(kind, proposition)
     return derived.value if isinstance(derived, Represented) else None
 
@@ -142,7 +132,14 @@ def legacy_payload(kind: str, proposition: Proposition) -> KnowledgePayload | No
 def legacy_fact_payload(
     proposition: Proposition,
 ) -> Represented[FactPayload] | NotRepresentable:
-    """The fact row. Kept as a name because the fact case is the documented one."""
+    """Project a fact into its documented legacy row.
+
+    Args:
+        proposition (Proposition): Fact proposition.
+
+    Returns:
+        Represented[FactPayload] | NotRepresentable: Represented fact payload or refusal.
+    """
     derived = project(FACT, proposition)
     if isinstance(derived, NotRepresentable):
         return derived

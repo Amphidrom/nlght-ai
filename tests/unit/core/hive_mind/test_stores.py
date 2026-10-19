@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Tests for nlght.core.hive_mind.stores — the four store classes."""
+"""Check hive mind store contracts."""
 from __future__ import annotations
 
 import pytest
@@ -19,9 +19,6 @@ from nlght.core.hive_mind.stores import (
     WorkingMemory,
 )
 
-# ---------------------------------------------------------------------------
-# ConversationStore
-# ---------------------------------------------------------------------------
 
 def _turn(nr: int, entities: list[str] | None = None) -> TurnSummary:
     return TurnSummary(
@@ -75,10 +72,6 @@ def test_conversation_store_current_turn_nr() -> None:
     store.append(_turn(1))
     assert store.current_turn_nr == 1
 
-
-# ---------------------------------------------------------------------------
-# SessionResultStore
-# ---------------------------------------------------------------------------
 
 def _result(content: str, entities: list[str] | None = None, tags: list[str] | None = None) -> SessionResult:
     return SessionResult(content=content, entities=entities or [], tags=tags or [])
@@ -149,10 +142,6 @@ def test_session_result_store_all_final() -> None:
     assert r1 in finals
     assert r2 not in finals
 
-
-# ---------------------------------------------------------------------------
-# WorkingMemory
-# ---------------------------------------------------------------------------
 
 def _atom(task_id: str, atom_type: AtomType = AtomType.RESULT, promoted: bool = False) -> WorkingAtom:
     return WorkingAtom(atom_type=atom_type, content="data", task_id=task_id, promote_to_parent=promoted)
@@ -235,7 +224,7 @@ def test_working_memory_read_active_vs_read_all_across_nested_stack() -> None:
     assert mem.read_all(AtomType.EVAL) == [phase_atom]
 
 
-# merge — promote / discard
+# Merge promotes completed work and discards abandoned work.
 
 def test_working_memory_merge_promotes_marked_atoms() -> None:
     mem = WorkingMemory()
@@ -322,9 +311,10 @@ def test_working_memory_nested_promotion_cascade() -> None:
     mem.branch("inner")
     payload = _atom("inner", AtomType.PAYLOAD, promoted=True)
     mem.write(payload)
-    mem.merge()                # inner → observe
+    # Promotion must survive both inner boundaries before the turn closes.
+    mem.merge()
     assert payload in mem.read_active()
-    mem.merge()                # observe → turn (not promoted further — atom.promote_to_parent stays True)
+    mem.merge()
     assert payload in mem.read_active()
 
 def test_working_memory_full_turn_branch_returns_only_cascaded_promoted_atoms() -> None:

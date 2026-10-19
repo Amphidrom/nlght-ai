@@ -41,7 +41,7 @@ def upgrade() -> None:
     op.create_index("knowledge_merged_into", "knowledge", ["merged_into"])
 
     # SQLite cannot ALTER a CHECK constraint, and the knowledge database is
-    # PostgreSQL; the batch path would rebuild the table for no gain.
+    # PostgreSQL. The batch path would rebuild the table for no gain.
     if op.get_bind().dialect.name == "postgresql":
         op.drop_constraint("ck_knowledge_reviews_decision", "knowledge_reviews", type_="check")
         op.create_check_constraint(

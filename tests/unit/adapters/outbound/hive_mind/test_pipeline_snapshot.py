@@ -129,15 +129,7 @@ def test_slot_state_defaults_and_missing_optional_fields() -> None:
 
 
 def test_a_snapshot_written_before_depth_was_removed_still_reads() -> None:
-    """`depth` is ignored rather than rejected.
-
-    It was a second, score-derived idea of how fully to render something, read
-    only by this dump, and it was removed because keeping it beside an element's
-    representations invited somebody to use it as a shortcut past retention and
-    the budget (ADR-0058). The key was optional on the way in before it was
-    removed, so a snapshot from any version deserialises either way — which is
-    the whole of the compatibility story and is worth one test.
-    """
+    """Read legacy snapshots that still contain the removed depth field."""
     from nlght.adapters.outbound.hive_mind.pipeline_snapshot import _de_scored_atom
 
     older = {

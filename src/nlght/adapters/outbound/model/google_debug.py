@@ -9,7 +9,14 @@ from collections.abc import AsyncIterator, Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, cast
 
+from nlght.adapters.outbound.model._tool_helpers import (
+    context_origin_of,
+    contract_to_openai_tool,
+    execute_tool_call,
+    terminal_tool_names,
+)
 from nlght.adapters.outbound.model.google import _to_google_wire_messages
+from nlght.core.model.budget import TokenBudget
 from nlght.core.model.messages import CanonicalMessage, MessageLike, append_canonical_tool_turn
 from nlght.core.model.model_info import ModelInfo
 from nlght.core.signals.signal import Signal
@@ -19,16 +26,15 @@ from nlght.ports.outbound.signal_emitter import SignalEmitter
 
 if TYPE_CHECKING:
     from nlght.core.metering.context import MeteringContext
-    from nlght.core.model.budget import TokenBudget
+    from nlght.core.tools.tool import ToolOutput
     from nlght.ports.outbound.tool_catalog import ToolCatalog
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded context windows for common Google Gemini models — used only as a
-# token-budget fallback (list_models() itself queries the live API; see
-# below). Newest first.
+# Use fallback windows only for token budgeting. list_models() queries the
+# live API. Newest models appear first.
 _CONTEXT_WINDOWS: dict[str, int] = {
-    "gemini-3.5-flash": 1_048_576,
+    "gemini-3.6-flash": 1_048_576,
     "gemini-2.5-pro": 1_048_576,
     "gemini-2.5-flash": 1_048_576,
     "gemini-2.0-flash": 1_048_576,
@@ -45,18 +51,11 @@ def _to_google_contents(
 ) -> tuple[str, list[dict[str, Any]]]:
     """Convert OpenAI-format messages to Google Generative AI format.
 
-    Returns ``(system_instruction, contents)`` where:
-    - ``system_instruction`` is a concatenation of all system messages (empty string if none).
-    - ``contents`` uses ``role: "user" | "model"`` with ``parts`` lists.
+    Args:
+        messages (list[dict[str, Any]]): OpenAI-format messages to translate.
 
-    Consecutive same-role messages are merged to satisfy the Gemini API's
-    requirement that turns must alternate between user and model.
-
-    Also handles canonical (Ollama-style) tool-call turns — an ``assistant``
-    message with ``tool_calls`` followed by ``role: "tool"`` result messages
-    — lowering them to Gemini's ``function_call``/``function_response`` parts.
-    This is what a step gets back from ``ModelClient.append_tool_turn()`` and
-    feeds into the next ``call()``/``stream()``.
+    Returns:
+        tuple[str, list[dict[str, Any]]]: System text and Google conversation content.
     """
     system_parts = [m.get("content", "") for m in messages if m.get("role") == "system"]
     system_text = "\n\n".join(filter(None, system_parts))
@@ -85,7 +84,7 @@ def _to_google_contents(
                     },
                 }
                 # Gemini 3.x requires the model's thought_signature to be echoed
-                # back on the function_call part; it rides through the canonical
+                # back on the function_call part. It rides through the canonical
                 # tool-turn as base64 (see append_ollama_native_tool_turn) and is
                 # decoded back to the bytes the SDK originally handed us.
                 ts_b64 = tc.get("thought_signature")
@@ -132,9 +131,12 @@ def _to_google_contents(
 def _json_schema_to_google(schema: dict[str, Any], _types: ModuleType) -> object:
     """Recursively convert a JSON-Schema object to a google.genai ``Schema``.
 
-    Carries ``enum``, ``items`` (array element schema) and nested ``properties``
-    through, so a tool's full JSON Schema survives the trip to Gemini instead of
-    being flattened to type+description.
+    Args:
+        schema (dict[str, Any]): JSON Schema definition to lower.
+        _types (ModuleType): Google SDK types module.
+
+    Returns:
+        object: Google SDK schema representation.
     """
     kwargs: dict[str, Any] = {"type": str(schema.get("type") or "string").upper()}
     if schema.get("description"):
@@ -155,7 +157,14 @@ def _json_schema_to_google(schema: dict[str, Any], _types: ModuleType) -> object
 
 
 def _to_google_tools(openai_tools: list[dict[str, Any]]) -> object | None:
-    """Convert OpenAI-format tool definitions to a Google ``Tool`` object."""
+    """Convert OpenAI-format tool definitions to a Google ``Tool`` object.
+
+    Args:
+        openai_tools (list[dict[str, Any]]): Canonical OpenAI-format tool definitions.
+
+    Returns:
+        object | None: Google tool declaration, or None when there are no tools.
+    """
     try:
         from google.genai import types as _types  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
     except ImportError:
@@ -174,7 +183,7 @@ def _to_google_tools(openai_tools: list[dict[str, Any]]) -> object | None:
 
 
 class GoogleModelClient(ModelProviderBackend):
-    """Google Gemini cloud model provider — one instance per configured provider.
+    """Google Gemini cloud model provider with one instance per configuration.
 
     Requires ``pip install 'nlght-ai[google]'``.
 
@@ -182,7 +191,7 @@ class GoogleModelClient(ModelProviderBackend):
     ``GEMINI_API_KEY`` from the environment automatically.
     """
 
-    def __init__(self, *, api_key: str, default_model: str) -> None:
+    def __init__(self, *, api_key: str, default_model: str, temperature: float | None = None) -> None:
         try:
             from google import genai as _genai  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
@@ -194,13 +203,16 @@ class GoogleModelClient(ModelProviderBackend):
                 "Install with: pip install 'nlght-ai[google]'"
             ) from exc
         self._default_model = default_model
+        self._temperature = temperature
 
     async def list_models(self) -> list[ModelInfo]:
         """Fetch available models from the Google Generative AI API.
 
-        Falls back to the static table on any error (network, auth, an SDK
-        surface change) so a live-API hiccup doesn't take down model
-        discovery — mirrors the OpenAI cloud client's list_models().
+        Returns:
+            list[ModelInfo]: Models available from this provider.
+
+        Side Effects:
+            Queries the Google model API.
         """
         try:
             pager = await self._client.aio.models.list()
@@ -237,8 +249,6 @@ class GoogleModelClient(ModelProviderBackend):
         *,
         client_max_tokens: int | None = None,
     ) -> TokenBudget:
-        from nlght.core.model.budget import TokenBudget as _Budget  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-
         resolved = model or self._default_model
         window = _DEFAULT_CONTEXT_WINDOW
         for key, w in _CONTEXT_WINDOWS.items():
@@ -246,11 +256,8 @@ class GoogleModelClient(ModelProviderBackend):
                 window = w
                 break
         logger.info("token_budget.window | model=%s window=%d source=static", resolved, window)
-        return _Budget(window, client_max_tokens=client_max_tokens)
+        return TokenBudget(window, client_max_tokens=client_max_tokens)
 
-    # ------------------------------------------------------------------
-    # Internal transport
-    # ------------------------------------------------------------------
 
     async def _call(
         self,
@@ -385,13 +392,9 @@ class GoogleModelClient(ModelProviderBackend):
         yield ModelStreamEvent(kind="done")
 
 
-# ---------------------------------------------------------------------------
-# BoundGoogleModelClient
-# ---------------------------------------------------------------------------
-
-
 class BoundGoogleModelClient(ModelClient):
-    """Request-scoped ModelClient for Google Gemini — implements the ModelClient port."""
+    """Request-scoped Google Gemini client implementing the ModelClient port."""
+
 
     def __init__(
         self,
@@ -414,10 +417,16 @@ class BoundGoogleModelClient(ModelClient):
 
     @property
     def token_budget(self) -> TokenBudget | None:
-        """The budget this client will enforce, so a prompt is built to it."""
+        """Expose the budget enforced by this model client.
+
+        Returns:
+            TokenBudget | None: A TokenBudget or None when no budget is configured.
+        """
         return self._token_budget
 
-    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+    async def call(self, messages: Sequence[MessageLike]) -> None:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_google_wire_messages(messages)
         if self._stream or self._tool_catalog is None:
             await self._backend._call(
@@ -432,12 +441,6 @@ class BoundGoogleModelClient(ModelClient):
 
         # Non-streaming tool loop (Google Gemini)
         from google.genai import types as _types  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-
-        from nlght.adapters.outbound.model._tool_helpers import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            contract_to_openai_tool,
-            terminal_tool_names,
-        )
-        from nlght.core.signals.signal import Signal  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
         contracts = self._tool_catalog.all()
         effective_openai_tools = [contract_to_openai_tool(c) for c in contracts] or None
@@ -492,10 +495,8 @@ class BoundGoogleModelClient(ModelClient):
                 await self._emitter.emit(Signal(role="assistant", content=content, kind="result"))
                 break
 
-            # Re-append the model's own turn verbatim rather than rebuilding the
-            # Part — a rebuilt function_call drops its thought_signature, and
-            # Gemini 3.x then rejects the continuation (400 INVALID_ARGUMENT,
-            # "Function call is missing a thought_signature").
+            # Preserve the provider's Part so thought_signature survives the next
+            # turn. Gemini 3.x rejects a rebuilt function_call without it.
             current_contents = list(current_contents) + [response.candidates[0].content]
 
             logger.info(
@@ -505,7 +506,7 @@ class BoundGoogleModelClient(ModelClient):
             response_parts: list[Any] = []
             for fc in function_calls:
                 tc = {"name": fc.name, "input": dict(fc.args or {})}
-                result_text = await self._tool_catalog.execute(tc)
+                result_text = await execute_tool_call(self._tool_catalog, tc, context_origin)
                 logger.info("google.call.tool_call | name=%s chars=%d", fc.name, len(result_text))
                 response_parts.append(
                     _types.Part.from_function_response(name=fc.name, response={"output": result_text})
@@ -535,9 +536,9 @@ class BoundGoogleModelClient(ModelClient):
         messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
-        *,
-        temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_google_wire_messages(messages)
         from google.genai import types as _types  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
@@ -546,16 +547,13 @@ class BoundGoogleModelClient(ModelClient):
         # Build Google tool object from explicit tools or catalog
         effective_openai_tools: list[dict[str, Any]] | None = tools
         if effective_openai_tools is None and self._tool_catalog is not None:
-            from nlght.adapters.outbound.model._tool_helpers import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-                contract_to_openai_tool,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            )
             contracts = self._tool_catalog.all()
             effective_openai_tools = [contract_to_openai_tool(c) for c in contracts] or None
         google_tool = _to_google_tools(effective_openai_tools) if effective_openai_tools else None
 
         input_t = output_t = 0
 
-        # Without a catalog the caller handles tool calls — pass all events through.
+        # Pass tool-call events through when no catalog owns the tool loop.
         if self._tool_catalog is None:
             config = _types.GenerateContentConfig(
                 system_instruction=system_text or None,
@@ -612,10 +610,7 @@ class BoundGoogleModelClient(ModelClient):
                     logger.warning("metering.record_tokens.failed | %s", exc)
             return
 
-        # With catalog: internal tool loop — only token/done reach the caller.
-        from nlght.adapters.outbound.model._tool_helpers import (  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-            terminal_tool_names,  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
-        )
+        # With catalog: internal tool loop, only token/done reach the caller.
         terminal_names = terminal_tool_names(self._tool_catalog)
         current_contents = initial_contents
         for _round in range(10):
@@ -671,10 +666,8 @@ class BoundGoogleModelClient(ModelClient):
             if not function_calls or self._tool_catalog is None:
                 break
 
-            # Append the model turn so Gemini keeps context. Re-use the original
-            # function_call Parts rather than rebuilding them — a rebuilt Part
-            # drops its thought_signature, which Gemini 3.x then rejects on the
-            # continuation (400 "Function call is missing a thought_signature").
+            # Reuse the provider's function_call Parts to keep their
+            # thought_signature. Gemini 3.x rejects rebuilt Parts without it.
             model_parts: list[Any] = []
             if text_parts:
                 model_parts.append(_types.Part.from_text("".join(text_parts)))
@@ -691,7 +684,7 @@ class BoundGoogleModelClient(ModelClient):
             response_parts: list[Any] = []
             for fc in function_calls:
                 tc = {"name": fc.name, "input": dict(fc.args or {})}
-                result_text = await self._tool_catalog.execute(tc)
+                result_text = await execute_tool_call(self._tool_catalog, tc, context_origin)
                 logger.info("google.tool_call | name=%s chars=%d", fc.name, len(result_text))
                 response_parts.append(
                     _types.Part.from_function_response(name=fc.name, response={"output": result_text})
@@ -724,7 +717,7 @@ class BoundGoogleModelClient(ModelClient):
         self,
         messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
-        results: list[str],
+        results: Sequence[str | ToolOutput],
         assistant_text: str = "",
     ) -> list[CanonicalMessage]:
         return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

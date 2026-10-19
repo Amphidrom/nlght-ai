@@ -15,6 +15,8 @@ from nlght.core.tools.action import (
 
 if TYPE_CHECKING:
     from nlght.core.entry.context import RequestContext
+    from nlght.core.model.trust import ContentLedger, ContentOrigin
+    from nlght.core.tools.tool import ToolOutput
     from nlght.core.workspace.workspace import WorkspaceContext
     from nlght.ports.outbound.store_coordinator import StoreCoordinator
 
@@ -39,7 +41,11 @@ class ToolContract(Protocol):
 
     @property
     def terminal(self) -> bool:
-        """True if a call to this tool ends the model turn."""
+        """Indicate whether this tool ends the current model turn.
+
+        Returns:
+            bool: Terminal-call flag.
+        """
         ...
 
     @property
@@ -62,14 +68,10 @@ class ToolContract(Protocol):
 
 @runtime_checkable
 class ToolCatalog(Protocol):
-    """Request-scoped lookup for active tool contracts.
+    """Request-scoped lookup and authorization for active tool contracts.
 
-    Built by the executor (from DB resources + ToolLoader) and injected
-    into ``WorkflowStepContext.tools`` once the catalog wiring is
-    implemented.
-
-    Steps access tools exclusively through this port —
-    never directly on ToolBase instances.
+    The executor builds the catalog from resources and injects it into
+    `WorkflowStepContext.tools`. Steps access tools through this port.
     """
 
     def get(self, name: str) -> ToolContract: ...
@@ -80,17 +82,52 @@ class ToolCatalog(Protocol):
 
     def names(self) -> list[str]: ...
 
+    @property
+    def ledger(self) -> ContentLedger:
+        """Expose content origins read during the workflow run.
+
+        Returns:
+            ContentLedger: Monotonic content ledger.
+        """
+        ...
+
+    async def execute_with_origin(
+        self,
+        tc: dict[str, Any],
+        *,
+        context_origin: ContentOrigin | None = None,
+    ) -> ToolOutput:
+        """Authorize and execute a tool call with provenance.
+
+        Args:
+            tc (dict[str, Any]): Tool call to authorize and execute.
+            context_origin (ContentOrigin | None): Optional origin of model-read context.
+
+        Returns:
+            ToolOutput: Tool result with recorded origin, including error output.
+
+        Side Effects:
+            Updates the ledger and may perform the authorized action.
+        """
+        ...
+
     async def execute(
         self,
         tc: dict[str, Any],
         *,
-        has_external_untrusted_input: bool = True,
+        context_origin: ContentOrigin | None = None,
     ) -> str:
-        """Executes a tool call and returns the result as a string.
+        """Execute a tool call and return its text without provenance.
 
-        ``tc`` has the canonical form ``{"name": str, "input": dict}``.
-        Returns an error string instead of raising an exception —
-        timeouts must be handled by the caller via ``asyncio.wait_for``.
+        Args:
+            tc (dict[str, Any]): Tool call to authorize and execute.
+            context_origin (ContentOrigin | None): Optional origin of model-read context.
+
+        Returns:
+            str: Result text, treated as unannotated if reused as context.
+
+        Side Effects:
+            Updates the ledger and may perform the authorized action.
         """
         ...
 

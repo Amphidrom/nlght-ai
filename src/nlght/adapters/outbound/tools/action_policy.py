@@ -8,7 +8,7 @@ parses command text, prompt text, tool descriptions, or claimed provenance.
 
 Every risk dimension is evaluated independently and the authorization is the
 strictest of the four results. That is deliberate: an ordered `if` chain gives
-the same answers today, but it makes the order itself load-bearing — the first
+    the same answers today, but it makes the order itself load-bearing. The first
 branch that returns hides every later one, so a new side effect could be
 silently covered by an earlier `ALLOW` after an innocent-looking reorder. With a
 maximum there is no order to get wrong (ADR-0069).
@@ -20,7 +20,7 @@ from nlght.core.tools.action import (
     ActionDecision,
     ActionDecisionReason,
     ActionDecisionResult,
-    ActionExecutionContext,
+    ActionReview,
     ConcreteAction,
     DataEgressClass,
     ExecutionClass,
@@ -50,11 +50,16 @@ _SEVERITY: dict[ActionDecision, int] = {
 
 
 def strictest(*results: ActionDecisionResult) -> ActionDecisionResult:
-    """The most restrictive of several independent judgements.
+    """Select the most restrictive independent action decision.
 
-    Ties keep the first argument, so the dimensions are passed in the order that
-    explains a refusal best: what would run, then what it changes, then where the
-    data goes, then where it happens.
+    Args:
+        *results (ActionDecisionResult): Decisions in explanatory priority order.
+
+    Returns:
+        ActionDecisionResult: Strictest decision, keeping the first on ties.
+
+    Raises:
+        ValueError: No decisions are supplied.
     """
 
     return max(results, key=lambda result: _SEVERITY[result.decision])
@@ -119,13 +124,11 @@ def _evaluate_scope(action: ConcreteAction) -> ActionDecisionResult:
 class DefaultActionPolicy:
     """Conservative platform policy for the action classes shipped in PI-3."""
 
-    async def evaluate(
-        self,
-        action: ConcreteAction,
-        context: ActionExecutionContext,
-    ) -> ActionDecisionResult:
-        del context  # Exposure is audit/escalation context, not argument provenance.
-
+    async def evaluate(self, review: ActionReview) -> ActionDecisionResult:
+        # Only the typed action. Context, arguments and the destination's raw
+        # target are there for policies that want them. This one rules on
+        # classes alone and never on argument provenance.
+        action = review.action
         return strictest(
             _evaluate_execution(action),
             _evaluate_side_effect(action),

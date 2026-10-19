@@ -1,26 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""A proposition is a property of every knowledge assertion, or of none.
+"""Apply the proposition contract to every knowledge kind.
 
-It was a property of facts, and the asymmetry produced a special path everywhere
-it touched: equivalence could not judge a `rule` because it took a
-`FactProposition`; a revision could name a fact's structure and nothing else's;
-every new surface had to ask which kind it was holding, and a fourth kind would
-have needed a fifth answer.
-
-Generalising it invents nothing, which is the reason it is safe. `fields` never
-had privileged roles — no `subject`, no `predicate`, no ontology — so a rule's
-fields are a rule's and the platform reads none of them as meaning anything. What
-changed is that all four kinds now have the same three levels:
-
-    Proposition           the structured interpretation
-    observed_text         the wording, exactly as the source has it
-    legacy payload        one consumer's shape, derived, lossless or absent
-
-The last two must never be confused with the first. A proposition may not replace
-the wording, and the wording may not be rebuilt from a proposition.
-"""
+Each kind preserves full structured fields, observed wording, and any lossless
+legacy projection as distinct representations."""
 
 from __future__ import annotations
 
@@ -82,12 +66,7 @@ def test_the_proposition_keeps_everything_the_extraction_produced(kind: str) -> 
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_a_fingerprint_addresses_the_structure_for_every_kind(kind: str) -> None:
-    """Content address, and never an identity — the same rule for all four.
-
-    Two claims with one fingerprint are byte-identical after normalisation. Two
-    with different ones may still be the same claim, which is the question
-    equivalence exists to ask.
-    """
+    """Fingerprint complete structure for each knowledge kind."""
     wording, content = _CASES[kind]
     same = Proposition(dict(content))
     reordered = Proposition(dict(reversed(list(content.items()))))
@@ -99,7 +78,7 @@ def test_a_fingerprint_addresses_the_structure_for_every_kind(kind: str) -> None
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_the_legacy_payload_is_derived_and_lossless(kind: str) -> None:
-    # A projection of the proposition, for every kind — not a second thing
+    # A projection of the proposition, for every kind, not a second thing
     # written beside it that could disagree.
     item = _item(kind)
     derived = project(kind, item.proposition)
@@ -127,22 +106,14 @@ def test_a_claim_the_legacy_row_cannot_hold_gets_none_rather_than_a_shortened_on
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_the_wording_and_the_proposition_move_independently(kind: str) -> None:
-    """Both matter, for different reasons, and neither substitutes for the other.
-
-        observed_text   what the source says, quotable
-        proposition     the structured interpretation of it
-
-    They may coincide — a rule's `rule_text` often *is* the sentence — and
-    coinciding is not being one thing. What matters is that neither is derived
-    from the other, so moving one leaves the other exactly where it was.
-    """
+    """Keep observed wording and structured proposition independent."""
     wording, content = _CASES[kind]
     item = _item(kind)
 
     assert item.observed_text
     assert item.verified_against(f"Intro.\n\n{item.observed_text}\n\nMore.")
 
-    # The sentence moves; the structured claim does not.
+    # The sentence moves. The structured claim does not.
     reworded = ExtractedItem(
         kind=kind, type="t", content=dict(content), confidence=0.9,
         observed_text=f"Put another way: {wording}",
@@ -150,7 +121,7 @@ def test_the_wording_and_the_proposition_move_independently(kind: str) -> None:
     assert reworded.proposition == item.proposition
     assert reworded.observed_text != item.observed_text
 
-    # The structured claim moves; the sentence does not.
+    # The structured claim moves. The sentence does not.
     reinterpreted = ExtractedItem(
         kind=kind, type="t", content={**content, "qualifier": "in production"},
         confidence=0.9, observed_text=wording,
@@ -165,7 +136,7 @@ def test_no_production_code_still_speaks_of_a_fact_proposition() -> None:
     A name left behind is a special path waiting to be reintroduced by somebody
     who reads it as a hint that facts are different.
     """
-    import pathlib  # noqa: PLC0415
+    import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[3] / "src"
     offenders = [
@@ -177,19 +148,9 @@ def test_no_production_code_still_speaks_of_a_fact_proposition() -> None:
     assert offenders == []
 
 
-# ---------------------------------------------------------------------------
-# The consequences, stated where they would be undone
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("kind", KINDS)
 def test_no_kind_gets_a_shortened_row(kind: str) -> None:
-    """`NotRepresentable` is not a fact's privilege.
-
-    A rule whose proposition carries something `knowledge_rules` has no column
-    for must produce **no** row, exactly as a four-role fact does. Inventing a
-    shortened one there would be the same defect the fact path was fixed for,
-    and quieter — a rule row reads plausibly whatever is missing from it.
-    """
+    """Reject a legacy row that would omit proposition fields, for every kind."""
     _, content = _CASES[kind]
     richer = Proposition({**content, "qualifier": "in production only"})
 
@@ -205,16 +166,7 @@ def test_no_kind_gets_a_shortened_row(kind: str) -> None:
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_the_wording_stays_out_of_the_content_address(kind: str) -> None:
-    """`observed_text` belongs to the sighting, never to the proposition.
-
-    Folding it into the fingerprint would make one claim into two whenever a
-    source was reworded, which is the distinction the whole model rests on:
-
-        same proposition + different wording
-            → one claim, two observed forms, two revisions
-
-    A content address that moved with the wording could not express that.
-    """
+    """Exclude observed wording from the proposition fingerprint."""
     wording, content = _CASES[kind]
     proposition = Proposition(dict(content))
 
@@ -232,7 +184,7 @@ def test_the_proposition_type_names_no_kind() -> None:
     # The guard against the asymmetry returning as a field. A `Proposition` that
     # knew its kind would invite kind-specific branches inside it, and the kind
     # is already reachable through the revision and the assertion.
-    import dataclasses  # noqa: PLC0415
+    import dataclasses
 
     names = {f.name for f in dataclasses.fields(Proposition)}
 

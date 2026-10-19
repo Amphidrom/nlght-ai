@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Recording an assertion's lineage: assertion, variant, revision, evidence.
+"""Verify assertion, variant, revision, and evidence lineage.
 
-The tables the incremental diff will later read. They are filled from now on and
-nothing is migrated into them: deriving them from the assertions already stored
-would mean guessing which business question each stored sentence was about,
-which is the guessing this design removes.
-
-What is asserted here is the behaviour the diff depends on — that a second run
-over an unchanged claim does not create a second revision, that a reworded one
-continues rather than duplicates, and that evidence records which document
-revision a claim came from so "what did document D at revision R assert" is a
-question the database can answer.
+The tests use persisted rows to check continuity, approval, provenance, and
+graph reachability across complete observations.
 """
 
 from __future__ import annotations
@@ -91,10 +83,6 @@ async def _rows(engine, model):
         return list((await session.execute(select(model))).scalars().all())
 
 
-# ---------------------------------------------------------------------------
-# The first sighting
-# ---------------------------------------------------------------------------
-
 async def test_a_new_claim_creates_the_whole_chain(sqlite_engine) -> None:
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
 
@@ -119,10 +107,6 @@ async def test_the_assertion_id_is_a_surrogate_not_the_entity_key(sqlite_engine)
     assert recorded.assertion_id != write.entity.key
     assert recorded.assertion_id.startswith("a_")
 
-
-# ---------------------------------------------------------------------------
-# A second run
-# ---------------------------------------------------------------------------
 
 async def test_an_unchanged_claim_does_not_grow_a_second_revision(sqlite_engine) -> None:
     """The acceptance metric, at the table that would show a violation.
@@ -164,20 +148,11 @@ async def test_a_retried_run_does_not_record_the_same_sighting_twice(sqlite_engi
     assert len(await _rows(sqlite_engine, KnowledgeEvidence)) == 1
 
 
-# ---------------------------------------------------------------------------
-# A change
-# ---------------------------------------------------------------------------
-
 async def test_a_reworded_rule_continues_the_same_assertion(sqlite_engine) -> None:
-    """The reason the surrogate exists — and it is a *rule*, not a fact.
+    """Continue a rule assertion when its wording changes.
 
-    A rule is identified by its subject and property; its wording is the body.
-    So the same rule said differently is one assertion at two states, and the
-    approval given against the first carries.
-
-    A fact cannot do this: its identity *is* its proposition, so a fact whose
-    words changed while its proposition did not has the same fingerprint and
-    writes no revision at all — see the section on a changed source below.
+    A rule's subject and property identify it. A wording revision preserves the
+    assertion and its approval when the normative value is unchanged.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.record_lineage(_write())
@@ -206,11 +181,9 @@ async def test_a_rewording_keeps_the_approval(sqlite_engine) -> None:
 async def test_a_normative_change_keeps_the_assertion_and_drops_the_approval(
     sqlite_engine,
 ) -> None:
-    """The two questions, answered separately.
+    """Keep rule identity but clear approval after a normative value change.
 
-    CHF 500 becomes CHF 550. It is the same rule — the approval threshold for
-    expenses — so the assertion continues. But a person approved five hundred,
-    not five fifty.
+    Changing CHF 500 to CHF 550 alters the approved threshold.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.record_lineage(_write())
@@ -226,10 +199,6 @@ async def test_a_normative_change_keeps_the_assertion_and_drops_the_approval(
     assert second.assertion_id == first.assertion_id
     assert second.review_state == "needs_review"
 
-
-# ---------------------------------------------------------------------------
-# Variants
-# ---------------------------------------------------------------------------
 
 async def test_two_scopes_holding_at_once_are_two_variants_of_one_assertion(
     sqlite_engine,
@@ -282,16 +251,13 @@ async def test_an_ambiguous_scope_opens_a_variant_and_says_so(sqlite_engine) -> 
     assert variants[both.variant_id].resolution == "ambiguous"
 
 
-# ---------------------------------------------------------------------------
-# Atomicity: four steps, or none of them
-# ---------------------------------------------------------------------------
 #
-#     entity → variant → revision → evidence
+#     entity, variant, revision, and evidence are committed together
 #
 # A crash between any two of them must leave nothing behind. Half a lineage is
 # worse than none: an assertion with no revision claims a business question
 # nothing says anything about, and a revision with no evidence claims a state
-# nothing was ever seen to assert — and the diff would then read that absence as
+# nothing was ever seen to assert, and the diff would then read that absence as
 # "the document stopped saying this" and retract it.
 
 
@@ -300,14 +266,19 @@ class _Crash(RuntimeError):
 
 
 def _crash_on_insert(engine, table: str):
-    """Fail the first INSERT into one table, as a crash at that step would."""
+    """Fail the first INSERT into one table, as a crash at that step would.
+
+    Args:
+        engine (Any): Database engine used by the test.
+        table (str): Table whose insert is intercepted.
+    """
     from contextlib import contextmanager
 
     from sqlalchemy import event
 
     @contextmanager
     def _installed():
-        def _listener(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001, ANN202
+        def _listener(conn, cursor, statement, parameters, context, executemany):
             if statement.lstrip().upper().startswith("INSERT INTO") and table in statement:
                 raise _Crash(f"crashed before writing {table}")
 
@@ -385,21 +356,11 @@ async def test_a_retry_of_a_run_that_succeeded_changes_nothing(sqlite_engine) ->
     assert await _counts(sqlite_engine) == before
 
 
-# ---------------------------------------------------------------------------
-# A key of another scheme is a decision, not a match
-# ---------------------------------------------------------------------------
-
 async def test_the_same_key_under_another_scheme_is_refused(sqlite_engine) -> None:
-    """Explicitly handled, because both silent readings are wrong.
+    """Reject a key produced by a different identity scheme.
 
-    Matching it would treat a key the old scheme produced as if the new scheme
-    had produced it, and the two do not mean the same thing — that is what the
-    version is for. Not matching it quietly creates a second assertion for one
-    business question, and the corpus then holds the same quantity twice with
-    nobody the wiser.
-
-    So it stops, naming the key. Migrating the old assertions is a deliberate
-    act, and this is what makes somebody perform it.
+    Accepting it would merge incompatible meanings. Ignoring it would duplicate
+    the same business question instead of requiring an explicit migration.
     """
     from nlght.core.knowledge import EntityKey, EntityKeyVersionMismatch
 
@@ -423,7 +384,7 @@ async def test_the_same_key_under_another_scheme_is_refused(sqlite_engine) -> No
 
 
 async def test_a_different_key_under_another_scheme_is_simply_new(sqlite_engine) -> None:
-    # The version alone is not the problem — a genuinely different quantity
+    # The version alone is not the problem. A genuinely different quantity
     # under a newer scheme is a new assertion like any other.
     from nlght.core.knowledge import EntityKey
 
@@ -443,23 +404,22 @@ async def test_a_different_key_under_another_scheme_is_simply_new(sqlite_engine)
     assert len(await _rows(sqlite_engine, KnowledgeAssertion)) == 2
 
 
-# ---------------------------------------------------------------------------
-# The transition: two records of one assertion, one transaction
-# ---------------------------------------------------------------------------
 #
 # While identity is being migrated, both the graph and the lineage are written.
 # Two transactions would let one land without the other, and the two records of
-# one assertion would then disagree — at precisely the moment when telling which
+# one assertion would then disagree when telling which
 # of them is right is hardest. So they commit together or not at all.
 
 
 def _knowledge_write(identity: str = "fp-500", run_id: str = "run-1"):
-    """The graph half of a sighting, addressed the way production addresses it.
+    """Build the graph node addressed by the revision fingerprint.
 
-    Its identity *is* the revision's fingerprint — `knowledge.persist` sets both
-    from the same content hash. They used to differ here, which quietly made a
-    graph row unreachable from its own lineage and let the report's reachability
-    check pass on a shape that cannot occur.
+    Production persistence derives both identities from the same content hash.
+    Keeping them aligned makes the node reachable from its lineage.
+
+    Args:
+        identity (str): Claim identity used for the write.
+        run_id (str): Ingestion run identifier.
     """
     from nlght.core.knowledge import KnowledgeWrite, RulePayload
 
@@ -511,12 +471,10 @@ async def test_a_failure_in_the_lineage_rolls_back_the_graph(sqlite_engine) -> N
 
 
 async def test_a_failure_in_the_graph_rolls_back_the_lineage(sqlite_engine) -> None:
-    """The other direction, and the more misleading one.
+    """Roll back lineage when its graph write fails.
 
-    A lineage without its graph row is a business question with a recorded
-    history that retrieval cannot see. It would look, to anything reading the
-    lineage, exactly like an assertion that exists — and to anything reading the
-    graph, like one that never did.
+    A recorded assertion without a graph node would appear to exist in lineage
+    while remaining invisible to retrieval.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
 
@@ -547,13 +505,9 @@ async def test_the_retry_after_either_failure_writes_both_once(sqlite_engine) ->
 async def test_an_assertion_without_an_entity_key_writes_only_the_graph(
     sqlite_engine,
 ) -> None:
-    """No substitute key is invented, and that is the whole point.
+    """Avoid inventing lineage identity for a claim without an entity key.
 
-    An assertion whose kind cannot yet name a business question has no entity
-    key. Deriving one from its wording would give it a key a later run cannot
-    reproduce, so every run would create a new assertion for the same claim —
-    the drift this design removes, arriving through the migration meant to end
-    it. The honest record is no lineage row.
+    Wording cannot provide a stable business key across later model runs.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
 
@@ -567,10 +521,6 @@ async def test_an_assertion_without_an_entity_key_writes_only_the_graph(
     }
 
 
-# ---------------------------------------------------------------------------
-# The report, taken between runs
-# ---------------------------------------------------------------------------
-
 async def test_the_report_of_an_empty_corpus_says_so(sqlite_engine) -> None:
     report = await SqlAlchemyKnowledgeRepository(sqlite_engine).lineage_report()
 
@@ -581,12 +531,10 @@ async def test_the_report_of_an_empty_corpus_says_so(sqlite_engine) -> None:
 async def test_a_second_run_over_an_unchanged_claim_leaves_the_report_standing(
     sqlite_engine,
 ) -> None:
-    """The acceptance metric, end to end and against a real database.
+    """Keep revision counts stable across repeated observations of one claim.
 
-    Everything stands still except the evidence, which grows because a second
-    run is a second sighting. That is the shape the comparison is built to
-    recognise, and getting it wrong in either direction — alarming on evidence
-    or ignoring a revision — would make the report useless.
+    Evidence gains a new sighting, while the assertion and revision remain
+    unchanged.
     """
     from nlght.core.knowledge import compare
 
@@ -623,7 +571,7 @@ async def test_a_reworded_claim_shows_up_as_drift_in_the_report(sqlite_engine) -
     assert not result.unchanged
     assert after.variants_beyond_first_revision == 1
     # The document's revision did not move, so nobody edited it and this is
-    # drift — named with the document and slot it happened in, rather than left
+    # drift. Name the document and slot where it happened instead of leaving it
     # in a count somebody has to notice.
     assert result.mode == "unchanged-source"
     assert [move.kind for move in result.movements] == ["revision added"]
@@ -649,15 +597,10 @@ async def test_the_report_counts_graph_rows_without_lineage(sqlite_engine) -> No
 
 
 async def test_the_report_counts_unresolved_migrations_apart(sqlite_engine) -> None:
-    """The number that says whether migration 0018 has finished.
+    """Count graph nodes whose revision identity migration remains unresolved.
 
-    A node it could not point at a revision is deliberately not canonical
-    (ADR-0051), so nothing about it shows up in retrieval — which is exactly why
-    it needs a count. Three such rows and thirty thousand look identical from the
-    outside, and only one of them is a corpus somebody should stop and re-ingest.
-
-    It is counted apart from the graph rows with no lineage at all: those cannot
-    name a business question and never will, this one is waiting for a sighting.
+    They are withheld from retrieval and must remain distinguishable from nodes
+    that never had business-key lineage.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     stored, _ = await repository.persist(_knowledge_write(), _write())
@@ -677,15 +620,9 @@ async def test_the_report_counts_unresolved_migrations_apart(sqlite_engine) -> N
 async def test_a_revision_does_not_look_like_a_candidate_without_lineage(
     sqlite_engine,
 ) -> None:
-    """The gap count asks reachability, not arithmetic.
+    """Count unreachable graph nodes by identity rather than row totals.
 
-    It used to be `graph rows minus assertions`, which was the same question only
-    while identity was the content hash. It is not any more: a node is addressed
-    by its wording and an assertion is resolved from its slot, so one assertion
-    legitimately owns a node per revision it has had. A live run reported seven
-    "candidates that could not name a business question" while the persist step
-    reported `no_entity_key=0` for the same run — both cannot be true, and the
-    subtraction was the one that was wrong.
+    One assertion may legitimately own a graph node for each revision.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.persist(_knowledge_write(), _write())
@@ -704,19 +641,10 @@ async def test_a_revision_does_not_look_like_a_candidate_without_lineage(
 
 
 async def test_a_redescribed_claim_leaves_no_orphan_in_the_graph(sqlite_engine) -> None:
-    """The graph node is addressed by the state, not by the candidate.
+    """Address a redescribed claim's graph node through its resolved revision.
 
-    A model that rewords an identifying field while leaving the rule's body
-    alone produces a sighting the lineage rightly calls the same state — the
-    claim did not move — and a content hash that is nevertheless different,
-    because the hash covers the whole content block and the state is judged on
-    the body.
-
-    Addressing the node by the candidate's own hash therefore wrote a row
-    nothing pointed at: unreachable from the lineage, so invisible to the diff
-    and impossible to retract. A live run left six of those in one pass, and the
-    only reason anyone noticed was a count that had just been taught to ask
-    reachability rather than subtract two totals.
+    Hashing the candidate's changed description would write an orphan node that
+    lineage cannot reach or retract.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     await repository.persist(_knowledge_write(), _write())
@@ -759,16 +687,13 @@ async def test_a_graph_row_with_its_lineage_is_not_counted_as_a_gap(sqlite_engin
     assert report.entity_key_versions == {"1": 1}
 
 
-# ---------------------------------------------------------------------------
-# One set of assertions taking another's place
-# ---------------------------------------------------------------------------
 #
-#     A → B          a claim replaced
-#     A → B, C       one rule split into two
-#     A, B → C       two folded into one
+#     A is replaced by B.
+#     A splits into B and C.
+#     A and B merge into C.
 #
 # An edge rather than a column, because a `superseded_by` field can say the
-# first of those and neither of the others — and a corpus of policies does both
+# first of those and neither of the others, and a corpus of policies does both
 # routinely.
 
 
@@ -789,12 +714,10 @@ def _other(key: str, text: str, run_id: str = "run-2") -> LineageWrite:
 
 
 async def test_one_assertion_can_take_another_s_place(sqlite_engine) -> None:
-    """Two propositions that say different things, and a link between them.
+    """Record succession between two distinct assertions explicitly.
 
-    `CEO(OpenAI, Alice)` and `CEO(OpenAI, Bob)` are not one thing whose value
-    moved — deciding that needs to know which relations are functional, which is
-    domain knowledge no platform has without an ontology. They are two
-    assertions, and the succession is recorded rather than inferred.
+    A platform cannot infer that two different CEO propositions replace each
+    other without domain knowledge.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     alice = await repository.record_lineage(_write(text="CEO is Alice.", fingerprint="fp-a"))
@@ -916,9 +839,6 @@ async def test_a_supersession_needs_both_sides(sqlite_engine) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# A source that changed
-# ---------------------------------------------------------------------------
 #
 # Three scenarios, and they end differently on purpose. The distinction is what
 # an assertion *is* for each kind:
@@ -947,26 +867,10 @@ def _fact_lineage(
 async def test_a_reworded_source_writes_a_revision_and_keeps_the_proposition(
     sqlite_engine,
 ) -> None:
-    """One assertion, one proposition, two observed forms.
+    """Record new observed wording without changing the fact proposition.
 
-        "Spring benötigt Maven."   →   "Maven wird von Spring benötigt."
-
-    The proposition did not move, so the same fact continues — same assertion,
-    same key, same fingerprint. What *did* move is the sentence, and a revision
-    is the state that was **observed** (ADR-0048), so the corpus records both:
-
-        Assertion A
-          Revision 1   proposition P, "Spring benötigt Maven."
-          Revision 2   proposition P, "Maven wird von Spring benötigt."
-
-    This asserted `revision == 1` until a live run showed what that costs. A
-    fact's fingerprint is its structured claim and does not contain the
-    sentence, so an edit that reworded a claim without moving its
-    subject/predicate/object hashed identically, no revision was written, and
-    the corpus went on quoting a sentence the document no longer contained.
-
-    The approval is not spent by it: nothing material moved, so
-    `semantic_change` reads this as a rewrite and the revision stays approved.
+    The same assertion and fingerprint gain a revision for the new source text.
+    Approval carries because the structured claim is unchanged.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.record_lineage(
@@ -995,7 +899,7 @@ async def test_a_reworded_source_writes_a_revision_and_keeps_the_proposition(
         "Maven wird von Spring benötigt.",
     ]
     # Both forms of one claim, so "what did the source say when revision 1 was
-    # written" stays answerable — which is what the history is for.
+    # written" stays answerable, which is what the history is for.
     assert len({row.fingerprint for row in revisions}) == 1
 
     evidence = await _rows(sqlite_engine, KnowledgeEvidence)
@@ -1003,17 +907,10 @@ async def test_a_reworded_source_writes_a_revision_and_keeps_the_proposition(
 
 
 async def test_a_materially_changed_fact_is_a_different_assertion(sqlite_engine) -> None:
-    """Java 17 becomes Java 21.
+    """Create a new assertion for a materially different fact.
 
-    Not one requirement moving: a fact is its proposition, and this proposition
-    is another one. The old assertion stays — its evidence and its review history
-    are what a reader following a citation needs, and nothing about the new claim
-    makes the old one never have been asserted.
-
-    **No succession is recorded.** That one claim took another's place cannot be
-    read off the words, and nothing here has looked at the source to decide it.
-    The slot lineage is what will later propose it; until then the two stand
-    side by side and that is the honest state.
+    The old assertion retains its evidence and review history. No succession is
+    inferred from wording alone.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     seventeen = await repository.record_lineage(
@@ -1038,15 +935,9 @@ async def test_a_materially_changed_fact_is_a_different_assertion(sqlite_engine)
 
 
 async def test_a_reworded_rule_does_write_a_revision(sqlite_engine) -> None:
-    """The kind where a rewording is a state of one thing.
+    """Write a revision when a rule is reworded without changing its key.
 
-    A rule is identified by its subject and property, so the same rule said in
-    other words is that rule at a new state — and the approval given against the
-    earlier wording carries, which is the whole reason the surrogate exists.
-
-    Stated beside the fact cases because the two are easy to confuse, and
-    getting them the wrong way round would either flood the review queue or
-    serve a changed claim under an old approval.
+    The same subject and property preserve the assertion and its approval.
     """
     repository = SqlAlchemyKnowledgeRepository(sqlite_engine)
     first = await repository.record_lineage(_write(fingerprint="fp-500"))

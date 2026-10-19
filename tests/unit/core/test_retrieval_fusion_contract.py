@@ -1,21 +1,11 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Layer A — the fusion contract, as invariants rather than examples.
+"""Specify how retrieval combines findings from independent stores.
 
-    a store decides local relevance
-    retrieval fuses rankings
-    retrieval never reads store scores as a shared unit
-
-Hand-written examples prove that one arrangement came out a particular way.
-These prove properties that must hold for every arrangement, which is what makes
-the fusion algorithm replaceable later without reopening the question of what
-"clean ranking" means.
-
-Most of them are metamorphic: change the input in a way that must not matter,
-and require the output not to move. A rank-based fusion is invariant under any
-monotone transformation of a store's scores, so scaling BM25 by a thousand is a
-test that can only fail one way — by magnitude having leaked back in.
+Each store supplies its own ranking. Fusion uses rank and store agreement
+without treating backend scores as a common unit. Document, chunk, and claim
+findings keep separate identities and revision fields.
 """
 
 from __future__ import annotations
@@ -53,7 +43,7 @@ def hit(source: str, carrier_id: str, *, score: float = 1.0, rank: int = 0) -> R
     )
 
 
-def order(fused) -> list[tuple[str, str]]:  # noqa: ANN001
+def order(fused) -> list[tuple[str, str]]:
     return [item.key for item in fused]
 
 
@@ -107,12 +97,7 @@ def test_shifting_one_stores_scores_changes_nothing() -> None:
 
 
 def test_a_flat_score_distribution_is_not_stretched_into_a_ranking() -> None:
-    """Why min-max normalisation was rejected.
-
-    Store A returns 7.1, 7.0, 6.9 — three near-identical results. Normalising
-    per store gives its top a 1.0 and its bottom a 0.0, inventing a spread that
-    the store did not express. Under rank fusion the three stay adjacent.
-    """
+    """Keep near-equal store scores in their original rank order."""
     flat = rank_within_sources([
         hit(LEXICAL, "d1", score=7.1), hit(LEXICAL, "d2", score=7.0),
         hit(LEXICAL, "d3", score=6.9),
@@ -148,6 +133,13 @@ def _chunk_from(source: str, carrier_id: str) -> RetrievalHit:
     happen to read alike: an assertion called `c1` and a chunk called `c1` are
     different things, and the helper above ties each source to its usual carrier
     precisely so that is not glossed over.
+
+    Args:
+        source (str): Retrieval source to attribute.
+        carrier_id (str): Carrier identifier for the retrieval hit.
+
+    Returns:
+        RetrievalHit: Equivalent retrieval hit from the selected source.
     """
     return RetrievalHit(
         source=source, carrier=CHUNK, carrier_id=carrier_id,
@@ -156,11 +148,7 @@ def _chunk_from(source: str, carrier_id: str) -> RetrievalHit:
 
 
 def test_a_finding_two_stores_made_outranks_the_same_finding_from_one() -> None:
-    """The central reason to fuse at all.
-
-    Both stores returned `c1`; only one of them returned `c9`. The agreement is
-    the difference, and it is the only difference.
-    """
+    """Reward a finding returned by more than one store."""
     ranked = rank_within_sources([
         _chunk_from(VECTOR, "c9"), _chunk_from(VECTOR, "c1"),
         _chunk_from(LEXICAL, "c1"), _chunk_from(LEXICAL, "c8"),
@@ -174,30 +162,15 @@ def test_a_finding_two_stores_made_outranks_the_same_finding_from_one() -> None:
     assert agreed.score > next(item for item in fused if item.key == (CHUNK, "c9")).score
 
 
-def test_how_far_agreement_outweighs_position_is_the_damping(  # noqa: D103
+def test_how_far_agreement_outweighs_position_is_the_damping(
 ) -> None:
-    """The knob that decides what fusion is actually *for*, pinned in both directions.
-
-    Reciprocal rank fusion adds `damping` to every rank, so the damping decides
-    how much of the score a position can still move:
-
-        damping 60   one store's first place   0.0164
-                     two stores at rank 10/11  0.0284   → agreement wins
-        damping 5    one store's first place   0.1667
-                     two stores at rank 10/11  0.1292   → position wins
-
-    At the published 60 and lists of tens, the fusion is close to counting
-    sources; low damping makes it close to trusting whichever store was most
-    confident. Neither is wrong, and the choice is not the algorithm's to make —
-    so it is configuration, and both ends of it are held here rather than
-    discovered later by someone tuning it blind.
-    """
+    """Use damping to control the balance between rank and store agreement."""
     lexical = [hit(LEXICAL, "top"), *(hit(LEXICAL, f"pad{i}") for i in range(9)),
                _chunk_from(LEXICAL, "deep")]
     vector = [*(_chunk_from(VECTOR, f"c{i}") for i in range(9)), _chunk_from(VECTOR, "deep")]
     ranked = rank_within_sources([*lexical, *vector])
 
-    def rank_of(fused, key):  # noqa: ANN001, ANN202
+    def rank_of(fused, key):
         return next(item.score for item in fused if item.key == key)
 
     damped = fuse(ranked, weights=FusionWeights(damping=60.0))
@@ -305,12 +278,7 @@ def test_two_findings_with_one_score_always_come_out_in_the_same_order() -> None
 # --- 10. granularity is not identity ---------------------------------------
 
 def test_a_document_a_chunk_of_it_and_a_claim_from_it_stay_three_findings() -> None:
-    """Three systems each found something, and that is the result.
-
-    Merging them on a shared `document_id` would throw away exactly that, and it
-    would answer a question — which text does the model get — that belongs to
-    context building, with no view of a token budget.
-    """
+    """Keep document, chunk, and claim findings separate."""
     document = RetrievalHit(source=LEXICAL, carrier=DOCUMENT, carrier_id="d1", content="doc",
                             provenance=Provenance(document_id="d1"))
     chunk = RetrievalHit(source=VECTOR, carrier=CHUNK, carrier_id="c7", content="chunk",
@@ -327,7 +295,7 @@ def test_a_document_a_chunk_of_it_and_a_claim_from_it_stay_three_findings() -> N
 
 
 def test_the_same_carrier_from_two_stores_is_one_finding() -> None:
-    # Relatedness is not identity; sameness is. Two stores returning chunk `c7`
+    # Relatedness is not identity. Sameness is. Two stores returning chunk `c7`
     # found one thing twice, and that is the agreement fusion counts.
     ranked = rank_within_sources([
         RetrievalHit(source=VECTOR, carrier=CHUNK, carrier_id="c7", content="a"),
@@ -359,19 +327,8 @@ def test_a_hit_with_no_rank_is_refused_rather_than_ranked_last() -> None:
         fuse([hit(LEXICAL, "d1")])
 
 
-# ---------------------------------------------------------------------------
-# three revisions, three names (ADR-0062)
-# ---------------------------------------------------------------------------
-
-
 def test_the_three_revision_identities_do_not_share_a_field() -> None:
-    """Each name answers one question, and none of them answers another's.
-
-    Before the split there was one `revision_id` carrying the source fassung,
-    the processed fassung or a claim's state depending on the carrier — so a
-    consumer reading it got a different kind of answer per hit and nothing said
-    so.
-    """
+    """Keep source, processing, and claim revisions in distinct fields."""
     document = Provenance(
         document_id="d1",
         source_revision_id="src-7",
@@ -390,11 +347,7 @@ def test_the_three_revision_identities_do_not_share_a_field() -> None:
 
 
 def test_the_state_revision_reads_whichever_the_carrier_actually_has() -> None:
-    """One derived question — which state is this finding on — for deduplication.
-
-    It is not a fourth stored value: the fields above keep one meaning each, and
-    this reads the one the carrier has.
-    """
+    """Select the state revision from the carrier that owns it."""
     document = Provenance(document_id="d1", processing_revision_id="proc-7")
     assertion = Provenance(assertion_id="a1", knowledge_revision_id="know-7")
 

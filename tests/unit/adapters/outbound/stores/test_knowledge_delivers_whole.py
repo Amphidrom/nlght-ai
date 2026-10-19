@@ -1,20 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""What generic retrieval already does with a claim, measured rather than assumed.
+"""Verify that generic retrieval preserves a complete knowledge claim.
 
-Written because the opposite was assumed once. "Retrieval loses n-ary
-propositions" was recorded as a gap and used to justify an abstraction, and the
-serialiser had never lost anything: it hands over whatever the claim carries.
-
-So the open question is narrower than it looked, and this file is what keeps it
-narrow:
-
-    generic retrieval          delivers the claim whole — measured below
-    an explicit projection     into a form that cannot hold the claim is where a
-                               refusal is needed
-
-Which forms exist at all is not decided, and nothing here decides it.
+Shape-specific projection is a separate consumer contract.
 """
 
 from __future__ import annotations
@@ -54,13 +43,7 @@ def test_every_field_of_a_claim_reaches_the_caller() -> None:
 
 
 def test_a_claim_with_more_roles_than_three_also_arrives_whole() -> None:
-    """The measurement that made an assumed gap go away.
-
-    The serialiser does not know how many roles a claim has and does not care —
-    it hands over what the claim carries. A proposition the payload cannot yet
-    *store* would nonetheless be delivered complete if it could be, so retrieval
-    is not where that loss would happen.
-    """
+    """Preserve every role of an n-ary claim through generic retrieval."""
     [item] = json.loads(
         _serialize([
             _object(subject="Alice", predicate="transfers", amount="CHF 500", recipient="Bob")

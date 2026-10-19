@@ -14,10 +14,10 @@ class Signal:
     Serialisation to SSE, JSON, or any other format is the adapter's concern.
 
     kind values:
-      "token"  — incremental content fragment (e.g. an LLM output token)
-      "result" — a complete, final result payload
-      "status" — non-user-facing progress / diagnostic message
-      "done"   — signals end of output for this invocation
+      "token": incremental content fragment (e.g. an LLM output token)
+      "result": a complete, final result payload
+      "status": non-user-facing progress / diagnostic message
+      "done": signals end of output for this invocation
     """
 
     role: str

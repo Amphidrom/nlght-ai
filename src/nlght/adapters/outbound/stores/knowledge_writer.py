@@ -1,15 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Write path for the knowledge graph: PostgreSQL authority plus lexical index.
+"""Maintain the lexical projection of the knowledge graph.
 
-One activation owning both halves, mirroring ``knowledge_store`` on the read
-side. PostgreSQL is the authority; OpenSearch only makes assertions findable —
-without the index side every knowledge query returns nothing.
-
-Mappings follow the prototype's ``ensure_collections``: one index per kind, the
-kind's own fields analysed, and everything searchable copied into ``fulltext``
-so a single query can span structure and prose.
+PostgreSQL remains authoritative. This adapter maintains the OpenSearch projection.
 """
 
 from __future__ import annotations
@@ -53,8 +47,8 @@ _BASE_FIELDS: dict[str, Any] = {
     # through it can be quoted back to a reader.
     #
     # It replaced `text_all`, a bag assembled from every field value. That bag
-    # was neither observed nor quotable — for a pattern it was literally
-    # `description + pattern_name`, both already indexed beside it — and once
+    # was neither observed nor quotable. For a pattern it was literally
+    # `description + pattern_name`, both already indexed beside it, and once
     # the wording is stored there is nothing it added but a second copy.
     "observed_text": {"type": "text", "analyzer": "knowledge_text"},  # _WORDING_FIELD
     "fulltext": {"type": "text", "analyzer": "knowledge_text"},
@@ -76,10 +70,11 @@ _KIND_FIELDS: dict[str, dict[str, Any]] = {
 
 
 class KnowledgeIndexWriterTool(ToolBase):
-    """Indexes reviewed-or-quarantined assertions for lexical search.
+    """Maintains the lexical projection selected by knowledge publish steps.
 
-    Under a kind disjoint from ``knowledge_store`` and declaring no signatures,
-    so retrieval cannot reach it and no model is offered a write.
+    The persist and publish steps pass only readable assertions. This writer
+    has a resource kind distinct from ``knowledge_store`` and declares no tool
+    signatures, so model requests cannot reach its write operations.
 
     Config: ``os_url``, optional ``os_username``, ``os_password``,
     ``os_verify_certs``, ``os_timeout``, ``index_prefix``.
@@ -159,39 +154,10 @@ class KnowledgeIndexWriterTool(ToolBase):
         return f"{self._prefix}{kind}s"
 
     def ensure_ready(self) -> None:
-        """Create one index per kind with its mapping, once per process.
+        """Create per-kind indexes and mappings once per process.
 
-        Raised, never logged and passed over. Indexing into an OpenSearch index
-        with no mapping stores the document and makes it unsearchable, so a
-        swallowed failure here produced the one state this write path may not
-        reach: PostgreSQL committed, the mapping never applied, and the workflow
-        green. "Persisted" may not be true while "findable" is structurally
-        impossible.
-
-        Worse than swallowing, the memo was written on the failure path too, so
-        every later call in the process skipped the index it had just failed to
-        create — the error was not ignored but *cached as success*, which is why
-        a retry could not recover. `mark_bootstrapped` is now reached only when
-        the index is actually there.
-
-        Losing the create race to another writer is not a failure. Two workers
-        bootstrapping one empty deployment both see the index missing and both
-        try; the second gets an error and the index exists, which is the outcome
-        it wanted. Recognised by asking again rather than by matching an
-        exception type — `opensearchpy` is untyped and its error classes move
-        between versions, while "is the index there" is the question that
-        actually matters.
-
-        Every kind is required. There is no optional index: a kind whose mapping
-        is missing is a kind no query can find, so this stops at the first one it
-        cannot create instead of reporting partial readiness.
-
-        An index that already exists is **not** migrated here, and its schema is
-        reported rather than assumed. A mapping written before the wording was
-        indexed still accepts every document and still answers every query — it
-        simply cannot rank on `observed_text`, and a search that quietly got
-        worse is the hardest kind of regression to find months later. So the gap
-        is named, loudly, with what to do about it.
+        Side Effects:
+            Creates OpenSearch indexes when missing. Backend failures propagate.
         """
         for kind, fields in _KIND_FIELDS.items():
             index = self.index_for(kind)
@@ -222,7 +188,15 @@ class KnowledgeIndexWriterTool(ToolBase):
             self._connections.mark_bootstrapped("opensearch", self._url, index)
 
     def _report_schema(self, kind: str, index: str) -> None:
-        """Say whether this index can rank on the wording, and say it once."""
+        """Log whether an index can search observed wording.
+
+        Args:
+            kind (str): Knowledge kind represented by the index.
+            index (str): OpenSearch index name.
+
+        Side Effects:
+            Reads index mapping and logs its wording capability once.
+        """
         if self.wording_indexed(kind):
             return
         logger.warning(
@@ -232,17 +206,24 @@ class KnowledgeIndexWriterTool(ToolBase):
         )
 
     def wording_indexed(self, kind: str) -> bool:
-        """Whether this kind's index maps the observed wording.
+        """Check the live index mapping for observed wording.
 
-        An index created before the wording was indexed has no mapping for it,
-        so documents written now carry the field and nothing can search it. The
-        answer is read from the live mapping rather than remembered, because the
-        thing being asked about is the deployment's state and not this process's.
+        Args:
+            kind (str): Knowledge kind to inspect.
+
+        Returns:
+            bool: True when the current mapping indexes observed wording.
+
+        Side Effects:
+            Reads the OpenSearch mapping and logs lookup failures.
+
+        Notes:
+            Live mapping state may differ from newly written document fields.
         """
         index = self.index_for(kind)
         try:
             mapping = self._client.indices.get_mapping(index=index)
-        except Exception:  # noqa: BLE001 (an unreachable index is not a schema answer)
+        except Exception:
             logger.exception("knowledge_writer.index.mapping | name=%s", index)
             return False
         for body in (mapping or {}).values():
@@ -252,12 +233,13 @@ class KnowledgeIndexWriterTool(ToolBase):
         return False
 
     def schema_state(self) -> dict[str, str]:
-        """Each kind's index, as `current` or `stale`, for a readiness report.
+        """Report mapping readiness for each knowledge kind.
 
-        `stale` is not a failure: the corpus is still searchable through its
-        structured fields and its keywords. It is a statement that retrieval is
-        running degraded and that a rebuild would fix it — which is exactly what
-        nobody can work out afterwards from a search that is merely worse.
+        Returns:
+            dict[str, str]: Each kind mapped to current or stale schema state.
+
+        Side Effects:
+            Reads OpenSearch mappings and may log lookup failures.
         """
         return {
             kind: "current" if self.wording_indexed(kind) else "stale"
@@ -265,13 +247,14 @@ class KnowledgeIndexWriterTool(ToolBase):
         }
 
     async def index(self, item: KnowledgeObject, *, keywords: list[str] | None = None) -> None:
-        """Upsert one assertion into its kind's index, keyed by identity.
+        """Upsert one assertion into its kind-specific search index.
 
-        Raises if the store refuses. It used to catch and log, which left the
-        caller unable to tell a written assertion from an unwritten one — and
-        the caller is what decides whether the assertion counts as persisted.
-        A swallowed failure here is an assertion that PostgreSQL calls
-        retrievable and search cannot find.
+        Args:
+            item (KnowledgeObject): Persisted assertion selected for publication.
+            keywords (list[str] | None): Optional search keywords.
+
+        Side Effects:
+            Writes OpenSearch and propagates backend failures.
         """
         body = {
             "id": item.identity,
@@ -289,13 +272,14 @@ class KnowledgeIndexWriterTool(ToolBase):
         )
 
     async def remove(self, *, identity: str, kind: str) -> None:
-        """Drop an assertion from search, so it cannot be found at all.
+        """Remove one assertion from its search index.
 
-        Raises if the store refuses, for the mirror of the reason above: a
-        removal reported as done while the document stays in the index leaves
-        rejected or merged-away content findable, and nothing would ever try
-        again. A document that is already gone is not a failure — ``404`` is
-        ignored, because the wanted state is "absent" and it is absent.
+        Args:
+            identity (str): Assertion identity to withdraw.
+            kind (str): Knowledge kind that selects the index.
+
+        Side Effects:
+            Deletes from OpenSearch and propagates backend failures.
         """
         self._client.delete(
             index=self.index_for(kind), id=identity, ignore=[404], refresh=False

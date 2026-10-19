@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -25,7 +26,17 @@ _DEFAULT_CONFIG_PATH = ".config/platform.yaml"
 
 
 def _read_raw(config_path: str) -> dict[str, Any]:
-    """Read the platform YAML synchronously — no event loop needed."""
+    """Read platform configuration without starting an event loop.
+
+    Args:
+        config_path (str): Path to the platform YAML file.
+
+    Returns:
+        dict[str, Any]: Parsed configuration, or an empty mapping if absent.
+
+    Side Effects:
+        Reads the configuration file when it exists.
+    """
     try:
         with open(config_path, encoding="utf-8") as fh:
             return yaml.safe_load(fh) or {}
@@ -45,13 +56,19 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def _warn_if_admin_on_public_binding(host: str) -> None:
-    """RLS-009: the Admin UI has no authentication — warn loudly when it is
-    enabled on a binding that is reachable beyond loopback."""
+    """Warn when the unauthenticated Admin UI is exposed beyond loopback.
+
+    Args:
+        host (str): Host address bound by the HTTP gateway.
+
+    Side Effects:
+        Emits a warning when NLGHT_ADMIN is enabled on a public binding.
+    """
     admin_enabled = os.environ.get("NLGHT_ADMIN", "").lower() in ("1", "true")
     if admin_enabled and host not in _LOOPBACK_HOSTS:
         logging.getLogger(__name__).warning(
             "NLGHT_ADMIN is enabled on a non-loopback binding (%s). The Admin "
-            "UI has NO authentication — anyone who can reach this port can "
+            "UI has NO authentication. Anyone who can reach this port can "
             "modify workflows, resources, and access policies. Restrict the "
             "binding to 127.0.0.1 or put an authenticating proxy in front.",
             host,
@@ -133,22 +150,23 @@ def create_app() -> FastAPI:
 
 
 def migrate(argv: list[str] | None = None) -> None:
-    """Run database migrations: nlght-ai migrate [alembic-command [args...]]
+    """Run platform database migrations with Alembic.
 
-    Resolves NLGHT_CONFIG (or the default path) before invoking alembic,
-    so the migration environment picks up the correct platform.yaml without
-    manual environment setup.
+    Args:
+        argv (list[str] | None): Alembic arguments. Defaults to ``upgrade head``.
 
-    Defaults to ``upgrade head`` when called with no arguments:
+    Side Effects:
+        Sets NLGHT_CONFIG, runs Alembic against the platform migration chain,
+        and exits with the subprocess status.
 
-        nlght-ai migrate                   # → alembic upgrade head
-        nlght-ai migrate downgrade -1      # → alembic downgrade -1
-        nlght-ai migrate current           # → alembic current
+    Examples:
+        ``nlght-ai migrate downgrade -1`` rolls back one revision.
+        ``nlght-ai migrate current`` prints the current revision.
     """
     config_path = os.environ.get("NLGHT_CONFIG", _DEFAULT_CONFIG_PATH)
     os.environ["NLGHT_CONFIG"] = config_path
 
-    # alembic.ini aus dem installierten Package laden
+    # Load alembic.ini from the installed package.
     ini_path = files("nlght").joinpath("alembic.ini")
 
     args = list(argv) if argv else ["upgrade", "head"]
@@ -162,16 +180,19 @@ def migrate(argv: list[str] | None = None) -> None:
 
 
 def migrate_knowledge(argv: list[str] | None = None) -> None:
-    """Migrate the knowledge graph database: nlght-ai migrate-knowledge [args...]
+    """Run the knowledge database's separate Alembic migration chain.
 
-    A separate chain from ``migrate`` on purpose: the knowledge graph is not
-    runtime metadata, has its own connection URL
-    (``integrations.persistence.knowledge.url``), and may live on another
-    server. Neither command ever touches the other's database.
+    Args:
+        argv (list[str] | None): Alembic arguments. Defaults to ``upgrade head``.
 
-        nlght-ai migrate-knowledge              # → upgrade head
-        nlght-ai migrate-knowledge downgrade -1
-        nlght-ai migrate-knowledge current
+    Side Effects:
+        Sets NLGHT_CONFIG, runs Alembic against the knowledge database, and
+        exits with the subprocess status. Platform database revisions are
+        unaffected.
+
+    Examples:
+        ``nlght-ai migrate-knowledge downgrade -1`` rolls back one revision.
+        ``nlght-ai migrate-knowledge current`` prints the current revision.
     """
     config_path = os.environ.get("NLGHT_CONFIG", _DEFAULT_CONFIG_PATH)
     os.environ["NLGHT_CONFIG"] = config_path
@@ -202,12 +223,17 @@ commands:
 
 
 def _read_expectations(path: str) -> dict[str, object]:
-    """The expectation file, as YAML or JSON — whichever it is written in.
+    """Read a corpus expectation file as YAML or JSON.
 
-    YAML by preference because these files are read and edited by people, and a
-    case with a sentence explaining what it demonstrates is the point of them.
+    Args:
+        path (str): Path to the expectation file.
+
+    Returns:
+        dict[str, object]: Parsed expectation mapping.
+
+    Side Effects:
+        Reads the file from disk.
     """
-    import json  # noqa: PLC0415
 
     text = Path(path).read_text(encoding="utf-8")
     if path.endswith((".yaml", ".yml")):
@@ -221,8 +247,6 @@ async def _run_knowledge_report(
     compare_to: str | None,
     expect: str | None = None,
 ) -> int:
-    import json  # noqa: PLC0415 (lazy import: kept off the serve path)
-
     from sqlalchemy.ext.asyncio import create_async_engine  # noqa: PLC0415
 
     from nlght.adapters.outbound.persistence.knowledge_repository import (  # noqa: PLC0415
@@ -258,8 +282,8 @@ async def _run_knowledge_report(
 
         if expect:
             # What the corpus said this run should do, held against what it did.
-            # A comparison says what moved; only this says whether that was the
-            # movement anybody wanted — "two revisions" is as true of a threshold
+            # A comparison says what moved. Only this says whether that was the
+            # movement anybody wanted. "Two revisions" is as true of a threshold
             # moving to 60 as of one moving to 6000.
             outcome = check_expectations(
                 previous, report, result, parse_expectations(_read_expectations(expect))
@@ -274,19 +298,23 @@ async def _run_knowledge_report(
 
 
 def knowledge_report(argv: list[str] | None = None) -> None:
-    """nlght-ai knowledge-report -x url=... [--baseline FILE] [--compare FILE]
+    """Report corpus state and compare it with a saved baseline.
 
-    A picture of the corpus, for holding a rerun against the run before it.
+    Args:
+        argv (list[str] | None): ``-x url=...`` and optional ``--baseline``,
+            ``--compare``, or ``--expect`` arguments.
 
-    The design's acceptance metric is a comparison — two runs over an unchanged
-    source must not change the corpus — so it takes two pictures to check. Write
-    one before the rerun and compare against it after:
+    Raises:
+        SystemExit: Always exits with the report status. Invalid arguments,
+            unmet expectations, or a changed corpus produce a nonzero status.
 
-        nlght-ai knowledge-report -x url=... --baseline before.json
-        # ... rerun the ingestion ...
-        nlght-ai knowledge-report -x url=... --compare before.json
+    Side Effects:
+        Reads the knowledge database. May write a baseline file. Prints the
+        report and comparison.
 
-    Exits non-zero when the corpus moved.
+    Examples:
+        ``nlght-ai knowledge-report -x url=... --baseline before.json``
+        ``nlght-ai knowledge-report -x url=... --compare before.json``
     """
     args = list(argv or [])
     url = ""
@@ -328,7 +356,11 @@ def knowledge_report(argv: list[str] | None = None) -> None:
 
 
 def cli() -> None:
-    """CLI entry point: nlght-ai <command> [args...]"""
+    """Dispatch the ``nlght-ai`` command from process arguments.
+
+    Side Effects:
+        Runs the selected command or prints usage and exits for invalid input.
+    """
     args = sys.argv[1:]
     if not args:
         print(_USAGE, end="", file=sys.stderr)

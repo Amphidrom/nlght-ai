@@ -1,30 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Provenance survives every parser, as a contract rather than as a field list.
+"""Carry document provenance through every knowledge parser.
 
-This exists because the same fault happened three times, and the guard written
-after the second one did not catch the third.
-
-    `document_id` was added and `knowledge.parse_auto` did not carry it
-    `processing_revision_id` was added and `knowledge.parse_auto` did not carry it
-    `document_path` was added and `knowledge.parse_auto` did not carry it
-
-The first two produced seventeen assertions with no lineage at all. They were
-fixed, `KnowledgeUnit` was given *fields* rather than a metadata dict — "a field
-cannot be forgotten the way a dict key can" — and a regression test was written.
-That test names the two fields that had failed:
-
-    assert (lineage.document_id, lineage.document_revision) == ("doc-1", "rev-1")
-
-So it was a test about `document_id` and `processing_revision_id`, not a test about
-provenance. When a third field arrived it was green while half the corpus was
-unnameable, and a live `--expect` run found it instead.
-
-What follows is written so a **fourth** field cannot repeat this. Nothing here
-names a provenance field: the contract is read off `KnowledgeUnit.provenance`, so
-adding one turns these red until every parser carries it.
-"""
+The tests check the parser outputs rather than only the declared field list."""
 
 from __future__ import annotations
 
@@ -49,7 +28,14 @@ PROVENANCE = tuple(
 
 
 def _constructions(name: str) -> list[tuple[str, set[str]]]:
-    """Every place in the source that builds `name`, with the keywords it passes."""
+    """Every place in the source that builds `name`, with the keywords it passes.
+
+    Args:
+        name (str): Name assigned to the resource or source.
+
+    Returns:
+        list[tuple[str, set[str]]]: Constructor sites and their supplied keyword names.
+    """
     found: list[tuple[str, set[str]]] = []
     for path in _SRC.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -75,12 +61,7 @@ def test_the_contract_is_not_empty() -> None:
 
 @pytest.mark.parametrize("field", PROVENANCE)
 def test_every_unit_is_built_with_every_provenance_field(field: str) -> None:
-    """No construction site may omit one.
-
-    Parametrised over the contract, so a new field is checked at every site the
-    moment it is added — which is precisely what did not happen for
-    `document_path`, where one constructor was updated and the other was not.
-    """
+    """Supply every required provenance field at each unit constructor."""
     sites = _constructions("KnowledgeUnit")
 
     assert sites, "no KnowledgeUnit construction found; this guard has gone blind"
@@ -94,18 +75,12 @@ def test_every_unit_is_built_with_every_provenance_field(field: str) -> None:
 
 
 def test_every_parser_reaches_a_builder_that_is_given_the_document() -> None:
-    """The six parser steps share two constructors, and both must be complete.
-
-    `knowledge.parse` builds units directly; the five in `parsers.py` — markdown,
-    asciidoc, html, pdf and auto — all go through `_UnitBuilder`. So checking the
-    two constructors covers all six, and covers a seventh parser written later
-    that reuses either.
-    """
+    """Pass document provenance through direct and shared parser builders."""
     builders = _constructions("_UnitBuilder")
 
     assert builders, "no _UnitBuilder construction found; this guard has gone blind"
     # Positional or keyword, the builder has to be handed the document's own
-    # path — it cannot derive one, and a builder that is not given it silently
+    # path. It cannot derive one, and a builder that is not given it silently
     # produces units nothing can name.
     for where, _ in builders:
         assert "parsers.py" in where
@@ -113,17 +88,7 @@ def test_every_parser_reaches_a_builder_that_is_given_the_document() -> None:
 
 @pytest.mark.parametrize("step", ["knowledge.parse", "knowledge.parse_auto"])
 async def test_provenance_survives_into_the_lineage(step: str) -> None:
-    """And it is carried, not merely constructed.
-
-    The structural halves above say the pipeline *passes* every field. This says
-    the value arrives — through the parser, through extraction's evidence dict,
-    into the write the repository stores. Every provenance value has to be
-    findable there; nothing is matched by name, so a field routed to the wrong
-    attribute fails too.
-
-    Two steps rather than six because the other four need their own formats; the
-    constructor checks above are what cover those.
-    """
+    """Carry parser provenance through extraction into stored lineage."""
     from nlght.adapters.outbound.workflow.registry import step_registry
     from nlght.adapters.outbound.workflow.steps.knowledge.persist import KnowledgePersistStep
 
@@ -131,7 +96,7 @@ async def test_provenance_survives_into_the_lineage(step: str) -> None:
 
     ctx = _ctx(_Llm())
     ctx.metadata["ingestion.processed"] = (_document(_TEXT),)
-    await step_registry._registry[step](config={}).run(ctx)  # noqa: SLF001
+    await step_registry._registry[step](config={}).run(ctx)
 
     units = ctx.metadata["knowledge.units"]
     assert units, f"{step} produced no units"
@@ -148,7 +113,7 @@ async def test_provenance_survives_into_the_lineage(step: str) -> None:
             f"{step}: evidence lost {name!r} between the unit and the candidate"
         )
 
-    lineage, gap = KnowledgePersistStep._lineage(item, "run-1", "ver-1")  # noqa: SLF001
+    lineage, gap = KnowledgePersistStep._lineage(item, "run-1", "ver-1")
 
     assert gap is None, f"{step} left a candidate without {gap}"
     assert lineage is not None

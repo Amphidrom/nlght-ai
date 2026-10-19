@@ -20,10 +20,6 @@ import pytest
 
 from nlght.main import _gateway_binding, _read_raw, cli
 
-# ---------------------------------------------------------------------------
-# _read_raw
-# ---------------------------------------------------------------------------
-
 
 def test_read_raw_returns_empty_dict_for_missing_file() -> None:
     result = _read_raw("/nonexistent/path/platform.yaml")
@@ -52,11 +48,6 @@ def test_read_raw_returns_empty_dict_for_empty_file(tmp_path) -> None:
     config = tmp_path / "empty.yaml"
     config.write_text("", encoding="utf-8")
     assert _read_raw(str(config)) == {}
-
-
-# ---------------------------------------------------------------------------
-# _gateway_binding
-# ---------------------------------------------------------------------------
 
 
 def test_gateway_binding_returns_defaults_when_no_subsystem() -> None:
@@ -116,11 +107,6 @@ def test_gateway_binding_uses_first_enabled_gateway() -> None:
     host, port = _gateway_binding(raw)
     assert host == "good"
     assert port == 2
-
-
-# ---------------------------------------------------------------------------
-# serve() — verify uvicorn.run is called with correct args
-# ---------------------------------------------------------------------------
 
 
 def test_serve_calls_uvicorn_run_with_config_binding(tmp_path, monkeypatch) -> None:
@@ -188,11 +174,6 @@ def test_serve_rejects_worker_only_role(tmp_path, monkeypatch) -> None:
         serve_module.serve()
 
 
-# ---------------------------------------------------------------------------
-# _warn_if_admin_on_public_binding — RLS-009
-# ---------------------------------------------------------------------------
-
-
 def test_admin_on_public_binding_warns(monkeypatch, caplog) -> None:
     from nlght.main import _warn_if_admin_on_public_binding
 
@@ -223,11 +204,6 @@ def test_no_admin_on_public_binding_does_not_warn(monkeypatch, caplog) -> None:
     assert not caplog.records
 
 
-# ---------------------------------------------------------------------------
-# py.typed — RLS-010: PEP 561 marker ships with the package
-# ---------------------------------------------------------------------------
-
-
 def test_py_typed_marker_exists_and_is_packaged() -> None:
     from pathlib import Path
 
@@ -246,11 +222,6 @@ def test_admin_static_assets_exist_and_are_packaged() -> None:
         assert (static / asset).is_file()
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     assert '"adapters/inbound/http/admin/static/*"' in pyproject
-
-
-# ---------------------------------------------------------------------------
-# cli() — nlght-ai <command> dispatch
-# ---------------------------------------------------------------------------
 
 
 def test_cli_dispatches_serve(monkeypatch) -> None:

@@ -21,10 +21,9 @@ class WorkspaceContext:
     Provisioned once per invocation (or session) by the WorkspaceManager
     and stored in WorkflowStepContext.workspace.
 
-    session_key:
-        Non-None for session workspaces — the client-side key extracted
-        by the protocol (e.g. OpenAI ``user`` field, x-session-id header).
-        None for ephemeral workspaces.
+    ``session_key`` is the client-side key extracted by the protocol for a
+    session workspace, such as the OpenAI ``user`` field or x-session-id header.
+    It is ``None`` for an ephemeral workspace.
     """
 
     workspace_id: str

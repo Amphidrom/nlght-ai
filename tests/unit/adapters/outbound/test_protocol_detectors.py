@@ -57,7 +57,7 @@ def test_generic_json_detector_returns_generic_kind_for_json_with_body() -> None
 
 
 def test_generic_json_detector_matches_bodyless_get() -> None:
-    # A parameterless trigger — a reindex kicked off by hand — arrives as a GET
+    # A manually started reindex has no parameters and arrives as a GET
     # with no body and no content type. It must still resolve to a generic JSON
     # trigger rather than falling through to "unknown".
     detector = GenericJsonProtocolDetector()

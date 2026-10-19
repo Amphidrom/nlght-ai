@@ -1,12 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""SimpleStoreCoordinator — in-memory session memory for the free tier.
+"""Provide configured in-memory session coordination.
 
-No external dependencies.  Sessions are kept in a process-level dict
-with TTL-based eviction.  On process restart all session state is lost.
-
-For persistent session memory use HiveMindStoreCoordinator instead.
+Sessions live in process memory until TTL eviction or restart.
 """
 
 from __future__ import annotations
@@ -17,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
+from nlght.adapters.outbound.hive_mind.origin import LedgerStamp
 from nlght.core.hive_mind.models import (
     AtomType,
     PromotionStatus,
@@ -38,10 +36,10 @@ logger = logging.getLogger(__name__)
 _PROMOTABLE = {AtomType.RESULT, AtomType.EVAL}
 
 
-class SimpleStoreCoordinator(StoreCoordinator):
+class SimpleStoreCoordinator(LedgerStamp, StoreCoordinator):
     """Flat in-memory implementation of the StoreCoordinator port.
 
-    Intentionally minimal — no entity indexing, no relevance scoring,
+    Intentionally minimal: no entity indexing, no relevance scoring,
     no conflict detection, no task-graph.  Designed to be fast and
     dependency-free.
 
@@ -59,11 +57,9 @@ class SimpleStoreCoordinator(StoreCoordinator):
         self._active_task: str | None = None
         self._slots: dict[str, Any] = {}
 
-    # ------------------------------------------------------------------
-    # Conversation
-    # ------------------------------------------------------------------
 
     def record_turn(self, turn: TurnSummary) -> None:
+        turn.origin = self._stamp(turn.origin)
         self._turns.append(turn)
 
     def get_recent_turns(self, n: int) -> list[TurnSummary]:
@@ -72,9 +68,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
     def next_turn_nr(self) -> int:
         return len(self._turns) + 1
 
-    # ------------------------------------------------------------------
-    # Working Memory + Promotion
-    # ------------------------------------------------------------------
 
     def write(self, intent: WriteIntent) -> tuple[str, None]:
         # Match HiveMind coordinator semantics while a branch stack is active:
@@ -95,6 +88,7 @@ class SimpleStoreCoordinator(StoreCoordinator):
             key               = intent.key,
             kind              = intent.kind,
             promote_to_parent = intent.promote_immediately,
+            origin            = self._stamp(),
         )
         target_task = self._branch_stack[-1] if self._branch_stack else intent.task_id
         self._working.setdefault(target_task, []).append(atom)
@@ -106,6 +100,7 @@ class SimpleStoreCoordinator(StoreCoordinator):
                 tags     = list(intent.tags),
                 turn_nr  = intent.turn_nr,
                 status   = PromotionStatus.FINAL,
+                origin   = atom.origin,
             ))
         return atom.id, None
 
@@ -145,6 +140,7 @@ class SimpleStoreCoordinator(StoreCoordinator):
                 tags=list(atom.tags),
                 turn_nr=turn_nr,
                 status=PromotionStatus.FINAL,
+                origin=self._stamp(atom.origin),
             )
             self._results.append(result)
             stored.append(result)
@@ -168,6 +164,7 @@ class SimpleStoreCoordinator(StoreCoordinator):
                     entities = entities,
                     turn_nr  = turn_nr,
                     status   = PromotionStatus.FINAL,
+                    origin   = self._stamp(atom.origin),
                 )
                 self._results.append(result)
                 promoted.append(result)
@@ -187,15 +184,12 @@ class SimpleStoreCoordinator(StoreCoordinator):
         else:
             self._working.pop(task_id, None)
 
-    # ------------------------------------------------------------------
-    # Read interface
-    # ------------------------------------------------------------------
 
     def get_context(self, entities: list[str]) -> dict[str, Any]:
         active_atoms: list[WorkingAtom] = []
         for label in self._branch_stack:
             active_atoms.extend(self._working.get(label, []))
-        # Empty entity list means "no filter" — return all stored results.
+        # Treat an empty entity list as no filter to include all stored results.
         if entities:
             entity_set = {e.lower() for e in entities}
             known = [
@@ -243,6 +237,7 @@ class SimpleStoreCoordinator(StoreCoordinator):
             tags     = list(set(tags) | {"payload"}),
             turn_nr  = turn_nr,
             status   = PromotionStatus.FINAL,
+            origin   = self._stamp(),
         )
         self._results.append(result)
         return result.id, True
@@ -275,17 +270,9 @@ class SimpleStoreCoordinator(StoreCoordinator):
             logger.warning("simple_store.load_artifact.failed | id=%s error=%s", clean, exc)
             return None
 
-    # ------------------------------------------------------------------
-    # Slot API
-    # ------------------------------------------------------------------
 
     def _dump(self, checkpoint_name: str) -> None:
-        logger.debug(
-            "\n████████████████████████████████████████████████\n"
-            "STORE COORDINATOR CHECKPOINT: %s\n"
-            "████████████████████████████████████████████████",
-            checkpoint_name,
-        )
+        logger.debug("STORE COORDINATOR CHECKPOINT: %s", checkpoint_name)
 
         recent_turns = self._turns[-4:]
         if recent_turns:
@@ -322,7 +309,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
         else:
             logger.debug("WORKING MEMORY: (no active task)")
 
-        logger.debug("████████████████████████████████████████████████\n")
 
     def get_slot(self, key: str, default_factory: Callable[[], T]) -> T:
         if key not in self._slots:
@@ -333,10 +319,6 @@ class SimpleStoreCoordinator(StoreCoordinator):
         self._slots[key] = value
 
 
-# ---------------------------------------------------------------------------
-# Factory
-# ---------------------------------------------------------------------------
-
 class SimpleStoreCoordinatorFactory(StoreCoordinatorFactory):
     """Process-local factory with TTL-based session eviction.
 
@@ -344,7 +326,7 @@ class SimpleStoreCoordinatorFactory(StoreCoordinatorFactory):
     of inactivity.  On each ``get_or_create`` call, expired sessions are
     lazily evicted.
 
-    ``save`` updates the last-accessed timestamp — no serialisation.
+    ``save`` updates the last-accessed timestamp without serialisation.
     """
 
     def __init__(self, session_ttl_seconds: int = 3600) -> None:

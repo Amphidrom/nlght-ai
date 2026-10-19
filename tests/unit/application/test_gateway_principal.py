@@ -24,15 +24,7 @@ def test_a_context_has_no_principal_unless_one_was_established() -> None:
 
 
 def test_the_principal_survives_the_replace_that_fan_out_uses() -> None:
-    """Child executions inherit the caller, and this is why.
-
-    `fan_out` derives a child trigger with
-    `dataclasses.replace(parent_context, correlation_id=…, request_id=…)`, so
-    every field it does not name is carried. A principal added to the context is
-    therefore propagated without the fan-out knowing it exists — and the
-    workflow name is still overwritten downstream by the executor with the
-    workflow actually being run.
-    """
+    """Carry the caller principal into a fan-out child trigger."""
     import datetime
 
     parent = RequestContext(

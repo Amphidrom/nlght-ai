@@ -20,7 +20,7 @@ from pathlib import Path
 _SCRIPTS = Path(__file__).resolve().parents[3] / "scripts" / "security"
 
 
-def _load(name: str):  # noqa: ANN202
+def _load(name: str):
     spec = importlib.util.spec_from_file_location(name, _SCRIPTS / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -43,7 +43,7 @@ FINDING = {
 CLEAN = {"dependencies": [{"name": "cryptography", "version": "50.0.1", "vulns": []}]}
 
 
-def _exception(**overrides):  # noqa: ANN202
+def _exception(**overrides):
     entry = {
         "advisory": "PYSEC-2026-3552",
         "package": "cryptography",
@@ -55,7 +55,7 @@ def _exception(**overrides):  # noqa: ANN202
     return {"exceptions": [entry]}
 
 
-def _run(report, raw, today=TODAY):  # noqa: ANN001, ANN202
+def _run(report, raw, today=TODAY):
     exceptions, problems = audit_gate.load_exceptions(raw)
     failures, notes = audit_gate.evaluate(
         audit_gate.load_findings(report), exceptions, today,
@@ -81,7 +81,7 @@ def test_a_reviewed_unexpired_exception_lets_the_build_through() -> None:
 
 
 def test_an_exception_may_name_the_alias_instead_of_the_id() -> None:
-    # Scanners disagree about which identifier is primary; a reviewer should not
+    # Scanners disagree about which identifier is primary. A reviewer should not
     # have to guess which one the report will use.
     failures, _ = _run(FINDING, _exception(advisory="CVE-2026-69247"))
     assert failures == []
@@ -117,7 +117,7 @@ def test_an_expiry_that_is_not_a_date_is_refused() -> None:
 
 
 def test_an_exception_matching_nothing_is_reported_but_does_not_fail() -> None:
-    # Dead configuration is worth saying out loud; it is not a security failure.
+    # Dead configuration is worth saying out loud. It is not a security failure.
     failures, notes = _run(CLEAN, _exception())
     assert failures == []
     assert any("unused exception" in note for note in notes)

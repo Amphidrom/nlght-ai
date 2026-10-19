@@ -4,8 +4,8 @@
 """Compare what the database expects of an index against what the index holds.
 
 Every other guard here prevents divergence. This one finds it. The distinction
-matters, because the guards cover the paths the platform controls — a failed
-write raises, a recreated index rotates its generation — and none of them covers
+matters because the guards cover the paths the platform controls: a failed
+write raises, and a recreated index rotates its generation. None covers
 what happens outside those paths: a collection dropped by hand, a container
 restarted without its volume, a database restored to a different point in time
 than the indexes, an index wiped before the generation existed at all.
@@ -16,7 +16,7 @@ claim, how many of those claims are on the current generation, and how many
 documents does the index actually contain. Those four numbers name every
 interesting state without needing to enumerate a corpus.
 
-It reports; it never repairs. Repair is running the pipeline, which is a
+It reports. It never repairs. Repair is running the pipeline, which is a
 decision with a cost attached, and one an operator should take deliberately
 rather than as a side effect of asking a question.
 """
@@ -57,12 +57,18 @@ class IngestionReconcileStep(StepBase):
         tolerance: documents the lexical count may differ by before it counts as
                    divergence (default 0)
 
-    Emits ``ingestion.reconcile`` — the four counts plus the verdict — and
+    Emits ``ingestion.reconcile`` with four counts and a verdict, then
     returns ``diverged``, ``outstanding``, or ``DEFAULT``. Route ``diverged``
-    wherever a deployment wants to be told; the step itself only reports.
+    wherever a deployment wants to be told. The step itself only reports.
     """
 
     TYPE = "ingestion.reconcile"
+
+    class Verdict(StepBase.Verdict):
+        """Verdicts returned by this step."""
+
+        DIVERGED = DIVERGED
+        OUTSTANDING = OUTSTANDING
 
     def __init__(
         self,
@@ -105,7 +111,7 @@ class IngestionReconcileStep(StepBase):
         tolerance = self._tolerance()
         lexical_gap = summary.indexed - counts.lexical_documents
         # A corpus recorded as indexed while the vector collection is empty is
-        # the signature of a wiped index that the generation could not catch —
+        # the signature of a wiped index that the generation could not catch:
         # wiped before it existed, or between two runs of one process.
         vectors_missing = summary.indexed > 0 and counts.vector_points == 0
         diverged = abs(lexical_gap) > tolerance or vectors_missing
@@ -136,24 +142,24 @@ class IngestionReconcileStep(StepBase):
             stale = await writer.repository.stale_document_ids(target=writer.target, limit=5)
             logger.error(
                 "[%s] ingestion.reconcile.diverged | target=%s the index state claims %d "
-                "documents, the index holds %d, vectors=%d — rerun the ingestion pipeline "
+                "documents, the index holds %d, vectors=%d. Rerun the ingestion pipeline "
                 "to rebuild it%s",
                 ctx.correlation_id, summary.target, summary.indexed,
                 counts.lexical_documents, counts.vector_points,
                 f"; e.g. {', '.join(stale)}" if stale else "",
             )
-            return StepResult(ctx=ctx, verdict=DIVERGED)
+            return StepResult(ctx=ctx, verdict=self.Verdict.DIVERGED)
 
         if summary.outstanding:
             logger.warning(
                 "[%s] ingestion.reconcile.outstanding | target=%s %d documents are still on an "
-                "earlier index generation — a reindex was interrupted; rerunning the pipeline "
+                "earlier index generation. A reindex was interrupted; rerunning the pipeline "
                 "writes exactly those",
                 ctx.correlation_id, summary.target, summary.outstanding,
             )
-            return StepResult(ctx=ctx, verdict=OUTSTANDING)
+            return StepResult(ctx=ctx, verdict=self.Verdict.OUTSTANDING)
 
-        return StepResult(ctx=ctx, verdict="DEFAULT")
+        return StepResult(ctx=ctx, verdict=self.Verdict.DEFAULT)
 
     def _tolerance(self) -> int:
         try:
@@ -169,7 +175,7 @@ class IngestionReconcileStep(StepBase):
         return tolerance
 
     async def _writer(self, caller: RequestContext | None) -> DataIndexWriterTool:
-        assert self._resources is not None and self._tools is not None  # noqa: S101 (guarded by run)
+        assert self._resources is not None and self._tools is not None
         name = str(self.config.get("writer", "")).strip()
         if not name:
             raise WorkflowConfigurationError(

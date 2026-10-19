@@ -13,18 +13,16 @@ from __future__ import annotations
 
 
 def quote_from(prompt: str) -> str:
-    """A sentence the prompt actually contains, for a stub to quote back.
+    """Extract a quoted sentence from the prompt's source text.
 
-    A candidate's wording has to occur in the unit it was extracted from
-    (ADR-0048), so a stub answering one canned sentence for every unit models a
-    model that misquotes — and the pipeline is right to reject it. Substituting
-    `{quote}` in a scripted response keeps the stub honest about the one thing
-    the extraction boundary now verifies.
+The stub reads the first nonempty line after TEXT: and replaces double quotes
+    for its JSON response.
 
-    The extraction prompt ends with the unit under `TEXT:`, so the first
-    non-empty line after it is a sentence the source really has. Quotes are
-    flattened because the response the stub returns is JSON.
-    """
+    Args:
+        prompt (str): Extraction prompt containing a TEXT section.
+
+    Returns:
+        str: A source line suitable for a scripted quotation, or an empty string."""
     body = prompt.split("TEXT:", 1)[-1]
     for line in body.splitlines():
         stripped = line.strip()

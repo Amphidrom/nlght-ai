@@ -4,7 +4,7 @@
   <td>
     {% if policy.effect == "allow" %}<span class="badge badge-yes">allow</span>{% else %}<span class="badge badge-no">deny</span>{% endif %}
   </td>
-  <td><code>{{ policy.conditions | tojson if policy.conditions else "—" }}</code></td>
+  <td><code>{{ policy.conditions | tojson if policy.conditions else "N/A" }}</code></td>
   <td>{{ policy.priority }}</td>
   <td>
     {% if policy.enabled %}<span class="badge badge-yes">enabled</span>{% else %}<span class="badge badge-no">disabled</span>{% endif %}

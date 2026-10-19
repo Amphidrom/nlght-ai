@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Session key resolver adapters — extract session identity from inbound requests."""
+"""Provide session key resolvers for inbound requests."""
 
 from nlght.adapters.outbound.session.body import BodyParameterSessionKeyResolver
 from nlght.adapters.outbound.session.composite import CompositeSessionKeyResolver

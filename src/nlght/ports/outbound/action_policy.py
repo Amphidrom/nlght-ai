@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Ports for deterministic action authorization and concrete approval."""
+"""Define action policy and human approval ports."""
 
 from __future__ import annotations
 
@@ -9,22 +9,23 @@ from typing import Protocol, runtime_checkable
 
 from nlght.core.tools.action import (
     ActionDecisionResult,
-    ActionExecutionContext,
+    ActionReview,
     ApprovalResult,
-    ConcreteAction,
-    PendingAction,
 )
 
 
 @runtime_checkable
 class ActionPolicy(Protocol):
-    """Decides one concrete, already-bound action outside the model."""
+    """Decides one concrete, already-bound action.
 
-    async def evaluate(
-        self,
-        action: ConcreteAction,
-        context: ActionExecutionContext,
-    ) -> ActionDecisionResult: ...
+    The decision logic is the deployment's: deterministic rules, a reviewing
+    model, or both. The framework enforces only that a decision is made before
+    execution, that it belongs to the reviewed snapshot, and that an exception,
+    a timeout or a result that is not an ``ActionDecisionResult`` denies
+    (ADR-0072).
+    """
+
+    async def evaluate(self, review: ActionReview) -> ActionDecisionResult: ...
 
 
 @runtime_checkable
@@ -35,4 +36,4 @@ class ActionApprovalPort(Protocol):
     is not an override mechanism and never receives a hard-denied action.
     """
 
-    async def approve(self, action: PendingAction) -> ApprovalResult: ...
+    async def approve(self, review: ActionReview) -> ApprovalResult: ...

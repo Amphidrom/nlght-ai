@@ -1,18 +1,10 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The shape of `PrincipalRef` is part of the authorization architecture.
+"""Keep PrincipalRef limited to caller identity.
 
-Normally a test against an exact field list is noise. Here the single field *is*
-the decision (ADR-0060): a principal that also carried roles, scopes or tenants
-would put an authorization input on an object every step and tool already holds,
-and the first `if "admin" in ctx.principal.roles` would be a local authorization
-decision made outside any policy.
-
-Authentication may of course produce roles. They belong to a separate,
-authorization-facing type that only a policy consumes — not to the reference
-that identifies who is calling.
-"""
+Roles and scopes belong to policy inputs, because carrying them on the
+principal lets steps make local authorization decisions (ADR-0060)."""
 
 from __future__ import annotations
 

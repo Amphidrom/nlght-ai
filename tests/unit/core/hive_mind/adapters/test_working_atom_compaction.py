@@ -1,19 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""The first honest compact representation in the platform.
+"""Produce a compact working-atom representation.
 
-Until now every adapter offered `FULL` and `OMIT`, so the reduction could forget
-but never shorten — half of what the architecture was built for was unproven. A
-working atom can now be said briefly, and briefly means *the subject without the
-substance*, built from fields the atom has:
-
-    FULL     [SPEC] candidate:ssl-keystore-path | the keystore lives at …
-    COMPACT  [SPEC] [fact] candidate:ssl-keystore-path
-
-Not a truncation. A truncation ends mid-claim and reads as a quotation of
-something the source never finished saying.
-"""
+The compact form preserves the subject while omitting lower-priority detail."""
 
 from __future__ import annotations
 
@@ -49,12 +39,11 @@ def _model(*atoms: ScoredAtom) -> MentalModel:
     return MentalModel(turn_id="t", built_at=datetime.now(UTC), active_atoms=list(atoms))
 
 
-def _element(**kwargs):  # noqa: ANN003, ANN202
+def _element(**kwargs):
     return context_atom_elements(_model(_atom(**kwargs)))[0]
 
 
 # What the atom offers
-# ---------------------------------------------------------------------------
 
 def test_an_atom_with_a_key_can_be_said_briefly() -> None:
     element = _element()
@@ -74,7 +63,7 @@ def test_the_brief_form_is_derived_and_never_a_quotation() -> None:
 
 
 def test_an_atom_without_a_key_offers_no_brief_form() -> None:
-    # Nothing to build one from, so nothing is offered — rather than parsing a
+    # No honest short form exists, so the adapter offers none instead of parsing a
     # shorthand back out of the content, which is where it used to hide.
     element = _element(key="")
 
@@ -104,7 +93,6 @@ def test_the_element_contract_still_holds_with_three_levels() -> None:
 
 
 # What the reduction now does with it
-# ---------------------------------------------------------------------------
 
 def test_the_budget_walks_full_then_compact_then_gone() -> None:
     element = _element()

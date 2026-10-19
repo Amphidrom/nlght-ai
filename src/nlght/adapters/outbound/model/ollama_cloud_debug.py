@@ -18,7 +18,9 @@ from nlght.adapters.outbound.model._context_chunking import (
 from nlght.adapters.outbound.model._ollama_http_debug import _OllamaHttp
 from nlght.adapters.outbound.model._tool_helpers import (
     append_openai_tool_turn,
+    context_origin_of,
     contract_to_openai_tool,
+    execute_tool_call,
     terminal_tool_names,
 )
 from nlght.adapters.outbound.model.openai_cloud import (
@@ -34,6 +36,7 @@ from nlght.ports.outbound.signal_emitter import SignalEmitter
 if TYPE_CHECKING:
     from nlght.core.metering.context import MeteringContext
     from nlght.core.model.budget import TokenBudget
+    from nlght.core.tools.tool import ToolOutput
     from nlght.ports.outbound.tool_catalog import ToolCatalog
 
 logger = logging.getLogger(__name__)
@@ -57,17 +60,16 @@ _CONTEXT_WINDOWS: dict[str, int] = {
 }
 _DEFAULT_CONTEXT_WINDOW = 131_072
 
-# Ollama Cloud's public endpoint. Used when no base_url is configured, so a
-# cloud provider needs only an API key — override for a self-hosted remote.
+# Use Ollama Cloud by default and allow an endpoint override for a self-hosted provider.
 DEFAULT_CLOUD_BASE_URL = "https://ollama.com"
 
 
 class OllamaCloudClient(ModelProviderBackend):
     """Cloud/remote Ollama provider.
 
-    Inference uses the OpenAI-compatible ``/v1/chat/completions`` wire format;
-    model discovery still uses Ollama's ``/api/tags`` and ``/api/ps`` endpoints.
-    Defaults to ``https://ollama.com``; pass ``base_url`` for a remote endpoint.
+    Inference uses the OpenAI-compatible ``/v1/chat/completions`` wire format.
+    Model discovery still uses Ollama's ``/api/tags`` and ``/api/ps`` endpoints.
+    Defaults to ``https://ollama.com``. Pass ``base_url`` for a remote endpoint.
     """
 
     def __init__(
@@ -81,6 +83,7 @@ class OllamaCloudClient(ModelProviderBackend):
         request_timeout_s: float | None = None,
         stream_connect_timeout_s: float | None = None,
         stream_read_timeout_s: float | None = None,
+        temperature: float | None = None,
     ) -> None:
         self._http = _OllamaHttp(
             http_client=http_client,
@@ -92,6 +95,7 @@ class OllamaCloudClient(ModelProviderBackend):
             stream_read_timeout_s=stream_read_timeout_s,
         )
         self._default_model = default_model
+        self._temperature = temperature
 
     @property
     def native_base_url(self) -> str:
@@ -112,7 +116,7 @@ class OllamaCloudClient(ModelProviderBackend):
         from nlght.core.model.budget import TokenBudget as _Budget  # noqa: PLC0415 (lazy import: optional extra or deliberate startup-cost/cycle avoidance)
 
         resolved = model or self._default_model
-        # Prefix-match so versioned/suffixed names (…:480b, …-cloud) resolve.
+        # Prefix-match so versioned and suffixed model names resolve.
         window = _DEFAULT_CONTEXT_WINDOW
         for key, w in _CONTEXT_WINDOWS.items():
             if resolved.startswith(key):
@@ -169,10 +173,16 @@ class BoundOllamaCloudClient(ModelClient):
 
     @property
     def token_budget(self) -> TokenBudget | None:
-        """The budget this client will enforce, so a prompt is built to it."""
+        """Expose the budget enforced by this model client.
+
+        Returns:
+            TokenBudget | None: A TokenBudget or None when no budget is configured.
+        """
         return self._token_budget
 
-    async def call(self, messages: Sequence[MessageLike], *, temperature: float | None = None) -> None:
+    async def call(self, messages: Sequence[MessageLike]) -> None:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_ollama_cloud_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
@@ -204,7 +214,7 @@ class BoundOllamaCloudClient(ModelClient):
             input_t = output_t = 0
             terminal_names = terminal_tool_names(self._tool_catalog)
             # Derive OpenAI-format tool schemas from the catalog and send them on
-            # every request — the non-streaming /v1/chat/completions loop used to
+            # every request. The non-streaming /v1/chat/completions loop used to
             # omit them, so the model was never told the tools existed and never
             # called them (proven by the tools_in_request=None evidence log).
             tool_defs = [contract_to_openai_tool(c) for c in self._tool_catalog.all()] or None
@@ -227,7 +237,7 @@ class BoundOllamaCloudClient(ModelClient):
                 tool_calls_native = msg.get("tool_calls") or []
                 content = msg.get("content") or ""
                 # Evidence log: the tool-call names the provider actually returned,
-                # verbatim, before any of our processing — proves whether a prefix
+                # verbatim before processing to identify whether a prefix
                 # like "tool." originates upstream or in our code.
                 logger.info(
                     "ollama_cloud.call.response_tool_calls | round=%d names=%s",
@@ -252,7 +262,7 @@ class BoundOllamaCloudClient(ModelClient):
                     "ollama_cloud.call.tool_loop | round=%d calls=%d dispatch_names=%s",
                     _round, len(tool_calls_raw), [tc["name"] for tc in tool_calls_raw],
                 )
-                results = [await self._tool_catalog.execute(tc) for tc in tool_calls_raw]
+                results = [await execute_tool_call(self._tool_catalog, tc, context_origin) for tc in tool_calls_raw]
                 current = append_openai_tool_turn(current, tool_calls_raw, results, content)
                 if terminal_names and any(tc.get("name") in terminal_names for tc in tool_calls_raw):
                     break
@@ -271,9 +281,9 @@ class BoundOllamaCloudClient(ModelClient):
         messages: Sequence[MessageLike],
         tools: list[dict[str, Any]] | None = None,
         tool_choice: dict[str, Any] | str | None = None,
-        *,
-        temperature: float | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
+        context_origin = context_origin_of(messages)
+        temperature = self._backend._temperature
         messages = _to_ollama_cloud_messages(messages)
         if self._token_budget is not None and needs_chunking(messages, self._token_budget):
             base, chunks, task = prepare_chunked_session(messages, self._token_budget)
@@ -320,7 +330,7 @@ class BoundOllamaCloudClient(ModelClient):
                 b["temperature"] = temperature
             return b
 
-        # Without a catalog the caller handles tool calls — pass all events through.
+        # Pass tool-call events through when no catalog owns the tool loop.
         if self._tool_catalog is None:
             async for event in self._http.stream_events_sse(target, _make_body(list(effective))):
                 if event.kind == "usage":
@@ -333,7 +343,7 @@ class BoundOllamaCloudClient(ModelClient):
                 await self._http._record_tokens(self._metering, self._model, {"prompt_tokens": input_t, "completion_tokens": output_t})
             return
 
-        # With catalog: internal tool loop — only token/done reach the caller.
+        # With catalog: internal tool loop, only token/done reach the caller.
         current_messages = list(effective)
         terminal_names = terminal_tool_names(self._tool_catalog)
         for _round in range(10):
@@ -366,7 +376,7 @@ class BoundOllamaCloudClient(ModelClient):
                 "ollama_cloud.stream.tool_loop | round=%d calls=%d names=%s",
                 _round, len(tool_calls_raw), [tc.get("name") for tc in tool_calls_raw],
             )
-            results = [await self._tool_catalog.execute(tc) for tc in tool_calls_raw]
+            results = [await execute_tool_call(self._tool_catalog, tc, context_origin) for tc in tool_calls_raw]
             for tc, result_text in zip(tool_calls_raw, results, strict=False):
                 logger.info("ollama_cloud.tool_call | name=%s chars=%d", tc["name"], len(result_text))
             current_messages = append_openai_tool_turn(current_messages, tool_calls_raw, results, assistant_text)
@@ -381,7 +391,7 @@ class BoundOllamaCloudClient(ModelClient):
         self,
         messages: Sequence[MessageLike],
         tool_calls_raw: list[dict[str, Any]],
-        results: list[str],
+        results: Sequence[str | ToolOutput],
         assistant_text: str = "",
     ) -> list[CanonicalMessage]:
         return append_canonical_tool_turn(messages, tool_calls_raw, results, assistant_text)

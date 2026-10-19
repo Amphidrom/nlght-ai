@@ -67,6 +67,15 @@ async def test_passthrough_fails_without_llm() -> None:
     assert result.verdict == "failed"
 
 
+def test_passthrough_declares_its_configured_verdict() -> None:
+    options = PassthroughStep.options()
+
+    assert len(options) == 1
+    assert options[0].name == "verdict"
+    assert options[0].type == "string"
+    assert options[0].default == "DEFAULT"
+
+
 async def test_passthrough_non_streaming_calls_llm_and_uses_configured_verdict() -> None:
     llm = _Llm()
     ctx = _ctx(stream=False, llm=llm)

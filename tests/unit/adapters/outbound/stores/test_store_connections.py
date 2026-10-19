@@ -1,15 +1,9 @@
 # Copyright (c) 2026 Amphidrom GmbH. All rights reserved.
 # See LICENSE in the repository root for license terms.
 
-"""Pools belong to the process, not to the call that first needed one.
+"""Reuse process-owned store connections across resource activations.
 
-The defect these cover: every store activation built its own engine and clients
-in ``__init__``, and activations are constructed per catalog build and per step
-hop. An ``ingestion.write`` step that re-enters itself once per document batch
-therefore abandoned one engine — with live asyncpg connections — per document.
-Nothing disposed them, and their finalizers aborted socket reads from whichever
-thread the collection ran in, which took a worker's event loop down.
-"""
+Repeated step activations must not create and abandon new engines or clients."""
 
 from __future__ import annotations
 

@@ -13,7 +13,7 @@ from nlght.core.protocol.protocol import ProtocolKind
 
 class TriggerKind(StrEnum):
     HTTP_REQUEST = "http.request"
-    #: Anything an InboundAdapter drives — a watcher, a poll loop, a queue
+    #: Cover anything an InboundAdapter drives: a watcher, poll loop, or queue
     #: consumer. Not tied to one kind of workload.
     INBOUND_EVENT = "inbound.event"
     MODEL_REQUEST = "model.request"

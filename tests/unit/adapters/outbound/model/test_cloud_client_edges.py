@@ -68,6 +68,7 @@ def test_anthropic_helpers_convert_tools_and_tool_history() -> None:
 
 async def test_openai_complete_and_stream_record_metering() -> None:
     client = OpenAICloudModelClient.__new__(OpenAICloudModelClient)
+    client._temperature = None
     client._default_model = "gpt-4o"
     client._client = MagicMock()
     recorded: list[dict] = []
@@ -114,6 +115,7 @@ async def test_openai_complete_and_stream_record_metering() -> None:
 
 async def test_openai_metering_failures_do_not_break_completion() -> None:
     client = OpenAICloudModelClient.__new__(OpenAICloudModelClient)
+    client._temperature = None
     client._client = MagicMock()
     client._client.chat.completions.create = AsyncMock(
         return_value=SimpleNamespace(
