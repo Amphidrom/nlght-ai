@@ -27,6 +27,9 @@ from nlght.core.licensing.service import LicenseService
 
 _log = logging.getLogger(__name__)
 _KEYGEN_ORIGIN = "https://license.nlght.ai"
+# FINGERPRINT_SCOPE_MISMATCH: the license has machines, none with this fingerprint.
+# On a multi-machine policy this is the first start of an additional machine.
+_ACTIVATION_REQUIRED_CODES = frozenset({"NO_MACHINE", "NO_MACHINES", "FINGERPRINT_SCOPE_MISMATCH"})
 
 
 class LicenseServerUnavailable(RuntimeError):
@@ -265,11 +268,11 @@ class KeygenLicenseAdapter(LicenseService):
 
             if not meta.get("valid", False):
                 code = meta.get("code")
-                if code in {"NO_MACHINE", "NO_MACHINES"}:
+                if code in _ACTIVATION_REQUIRED_CODES:
                     license_id = body.get("data", {}).get("id")
                     if not license_id:
                         raise RuntimeError(
-                            "License invalid: NO_MACHINE and no license ID in response"
+                            f"License invalid: code={code} and no license ID in response"
                         )
                     self._activate(client, server_url, license_id, license_key)
                     body = self._validate(client, server_url, license_key)

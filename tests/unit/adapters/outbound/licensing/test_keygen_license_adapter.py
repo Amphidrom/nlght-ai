@@ -159,11 +159,14 @@ def test_activate_accepts_existing_fingerprint_but_raises_other_failures(
         adapter._activate(client, "https://license.example", "lic-1", "key")
 
 
-def test_fetch_builds_license_and_activates_no_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("code", ["NO_MACHINE", "NO_MACHINES", "FINGERPRINT_SCOPE_MISMATCH"])
+def test_fetch_builds_license_and_activates_unregistered_machine(
+    monkeypatch: pytest.MonkeyPatch, code: str
+) -> None:
     client = _Client()
     client_options: list[dict[str, object]] = []
     client.post_responses.extend([
-        _Response({"meta": {"valid": False, "code": "NO_MACHINE"}, "data": {"id": "license-1"}}),
+        _Response({"meta": {"valid": False, "code": code}, "data": {"id": "license-1"}}),
         _Response({"data": {"id": "machine"}}, status_code=201),
         _Response(_valid_body()),
     ])
@@ -183,6 +186,12 @@ def test_fetch_builds_license_and_activates_no_machine(monkeypatch: pytest.Monke
     assert license_.tier is Tier.COMMERCIAL
     assert license_.entitlements == frozenset({"playbook-a"})
     assert client_options == [{}]
+    assert [post["url"] for post in client.posts] == [
+        "https://license.example/v1/licenses/actions/validate-key",
+        "https://license.example/v1/machines",
+        "https://license.example/v1/licenses/actions/validate-key",
+    ]
+    assert client.posts[1]["json"]["data"]["attributes"]["fingerprint"] == "fingerprint"
     # max_machines population was intentionally dropped in "Update Licensing".
     # limits is now always empty until the tier rework lands.
     assert license_.limits == {}
